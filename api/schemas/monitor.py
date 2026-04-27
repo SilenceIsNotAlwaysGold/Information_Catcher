@@ -1,0 +1,96 @@
+from typing import List, Optional
+from pydantic import BaseModel, Field
+
+
+class AddPostsRequest(BaseModel):
+    links: List[str]
+    account_id: Optional[int] = None
+    post_type: str = "observe"  # "own" | "observe"
+
+
+class CreatePromptRequest(BaseModel):
+    name: str
+    content: str
+
+
+class UpdatePromptRequest(BaseModel):
+    name: Optional[str] = None
+    content: Optional[str] = None
+
+
+class RewriteTrendingRequest(BaseModel):
+    prompt_id: Optional[int] = None  # use saved prompt by ID (preferred)
+    prompt_text: Optional[str] = None  # or supply ad-hoc prompt text
+
+
+class SyncBitableRequest(BaseModel):
+    note_ids: List[str]
+
+
+class DeletePostRequest(BaseModel):
+    note_id: str
+
+
+class AddAccountRequest(BaseModel):
+    name: str
+    cookie: str
+    proxy_url: Optional[str] = ""
+    user_agent: Optional[str] = ""
+    viewport: Optional[str] = ""
+    timezone: Optional[str] = "Asia/Shanghai"
+    locale: Optional[str] = "zh-CN"
+    fp_browser_type: Optional[str] = "builtin"  # builtin | adspower | bitbrowser
+    fp_profile_id: Optional[str] = ""
+    fp_api_url: Optional[str] = ""
+
+
+class QRLoginStartRequest(BaseModel):
+    """Account template applied when the login succeeds."""
+    name: str = ""
+    proxy_url: Optional[str] = ""
+    user_agent: Optional[str] = ""
+    viewport: Optional[str] = ""
+    timezone: Optional[str] = "Asia/Shanghai"
+    locale: Optional[str] = "zh-CN"
+
+
+class UpdateAccountRequest(BaseModel):
+    name: Optional[str] = None
+    cookie: Optional[str] = None
+    proxy_url: Optional[str] = None
+    user_agent: Optional[str] = None
+    viewport: Optional[str] = None
+    timezone: Optional[str] = None
+    locale: Optional[str] = None
+    fp_browser_type: Optional[str] = None
+    fp_profile_id: Optional[str] = None
+    fp_api_url: Optional[str] = None
+
+
+class UpdateSettingsRequest(BaseModel):
+    webhook_url: Optional[str] = None
+    feishu_webhook_url: Optional[str] = None
+    check_interval_minutes: Optional[int] = Field(default=None, ge=1)
+    daily_report_enabled: Optional[bool] = None
+    daily_report_time: Optional[str] = None
+    likes_alert_enabled: Optional[bool] = None
+    likes_threshold: Optional[int] = Field(default=None, ge=1)
+    collects_alert_enabled: Optional[bool] = None
+    collects_threshold: Optional[int] = Field(default=None, ge=1)
+    comments_alert_enabled: Optional[bool] = None
+    comments_threshold: Optional[int] = Field(default=None, ge=1)
+    ai_base_url: Optional[str] = None
+    ai_api_key: Optional[str] = None
+    ai_model: Optional[str] = None
+    ai_rewrite_enabled: Optional[bool] = None
+    ai_rewrite_prompt: Optional[str] = None
+    feishu_app_id: Optional[str] = None
+    feishu_app_secret: Optional[str] = None
+    feishu_bitable_app_token: Optional[str] = None
+    feishu_bitable_table_id: Optional[str] = None
+    trending_enabled: Optional[bool] = None
+    trending_keywords: Optional[str] = None
+    trending_min_likes: Optional[int] = None
+    trending_account_ids: Optional[str] = None
+    comments_fetch_enabled: Optional[bool] = None
+    observe_use_cookie_fallback: Optional[bool] = None
