@@ -54,6 +54,27 @@ def _parse_viewport(viewport: str) -> Optional[Dict[str, int]]:
         return None
 
 
+def validate_proxy_url(proxy_url: str) -> Optional[str]:
+    """校验代理 URL 格式。返回 None 表示可用，返回字符串则是给前端的拒绝原因。
+
+    支持的协议：http / https / socks5 / socks5h。socks5+鉴权会由 proxy_forwarder
+    在本机起 gost 转发为 http://127.0.0.1:port，再交给 Playwright/httpx。
+    """
+    if not proxy_url or not proxy_url.strip():
+        return None
+    url = proxy_url.strip()
+    try:
+        p = urlparse(url)
+    except Exception as e:
+        return f"代理 URL 格式无效: {e}"
+    scheme = (p.scheme or "").lower()
+    if scheme not in ("http", "https", "socks5", "socks5h"):
+        return f"不支持的代理协议 '{scheme}'，请使用 http / https / socks5"
+    if not p.hostname:
+        return "代理 URL 缺少 host"
+    return None
+
+
 def _parse_proxy(proxy_url: str) -> Optional[Dict[str, str]]:
     """Convert `http://user:pass@host:port` / `socks5://...` to Playwright proxy dict.
 
@@ -117,7 +138,10 @@ def _cookie_str_to_list(cookie_str: str, domain: str = ".xiaohongshu.com") -> Li
 
 async def _open_builtin(pw, account: Dict) -> Tuple:
     launch_kwargs = {"headless": True, "args": ["--no-sandbox"]}
-    proxy_cfg = _parse_proxy(account.get("proxy_url", ""))
+    # 使用 effective_proxy_url：socks5+鉴权会被转成本地 http://127.0.0.1:port
+    from . import proxy_forwarder
+    eff = proxy_forwarder.effective_proxy_url(account)
+    proxy_cfg = _parse_proxy(eff) if eff else None
     if proxy_cfg:
         launch_kwargs["proxy"] = proxy_cfg
 

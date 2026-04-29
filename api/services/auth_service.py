@@ -52,16 +52,24 @@ def _get_db_connection() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_column(cursor, table: str, col: str, coldef: str):
+    cursor.execute(f"PRAGMA table_info({table})")
+    cols = [r["name"] for r in cursor.fetchall()]
+    if col not in cols:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coldef}")
+
+
 def init_user_db():
     """
-    初始化用户数据库
-    
-    创建users表并插入默认管理员账号 admin/admin123
+    初始化用户数据库 (SaaS 多租户)
+
+    - users 表新增字段: email, plan, trial_ends_at, role
+    - 内置 admin 账号 admin/admin123 自动升级为 role='admin'
     """
     conn = _get_db_connection()
     cursor = conn.cursor()
-    
-    # 创建用户表
+
+    # 基础表结构
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,19 +80,64 @@ def init_user_db():
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
-    # 检查是否存在admin用户，不存在则创建
-    cursor.execute("SELECT id FROM users WHERE username = ?", ("admin",))
-    if not cursor.fetchone():
-        password_hash = hash_password("admin123")
+
+    # SaaS 字段：email、套餐、试用截止、角色
+    _ensure_column(cursor, "users", "email",          "TEXT")
+    _ensure_column(cursor, "users", "plan",           "TEXT DEFAULT 'trial'")
+    _ensure_column(cursor, "users", "trial_ends_at",  "TEXT")
+    _ensure_column(cursor, "users", "role",           "TEXT DEFAULT 'user'")
+
+    # email 唯一索引（NULL 允许多个）
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email "
+        "ON users(email) WHERE email IS NOT NULL"
+    )
+
+    # 内置 admin 账号
+    cursor.execute("SELECT id, role FROM users WHERE username = ?", ("admin",))
+    row = cursor.fetchone()
+    if not row:
         cursor.execute(
-            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-            ("admin", password_hash)
+            "INSERT INTO users (username, password_hash, role, plan) "
+            "VALUES (?, ?, 'admin', 'team')",
+            ("admin", hash_password("admin123"))
         )
-        print("[Auth] 已创建默认管理员账号: admin / admin123")
-    
+        print("[Auth] 已创建默认管理员账号: admin / admin123 (role=admin)")
+    elif row["role"] != "admin":
+        cursor.execute(
+            "UPDATE users SET role='admin', plan='team' WHERE id=?",
+            (row["id"],)
+        )
+        print("[Auth] admin 账号已升级为 role=admin")
+
     conn.commit()
     conn.close()
+
+
+def register_user(email: str, password: str, username: Optional[str] = None) -> Optional[dict]:
+    """
+    新用户注册：创建账号 + 自动开 7 天试用。
+
+    返回新用户的简短信息，username 冲突时返回 None。
+    """
+    conn = _get_db_connection()
+    cursor = conn.cursor()
+    try:
+        username = username or email
+        trial_end = (datetime.utcnow() + timedelta(days=7)).isoformat()
+        cursor.execute(
+            "INSERT INTO users (username, email, password_hash, plan, trial_ends_at, role) "
+            "VALUES (?, ?, ?, 'trial', ?, 'user')",
+            (username, email, hash_password(password), trial_end),
+        )
+        conn.commit()
+        uid = cursor.lastrowid
+    except sqlite3.IntegrityError:
+        conn.close()
+        return None
+    conn.close()
+    return {"id": uid, "username": username, "email": email,
+            "plan": "trial", "trial_ends_at": trial_end, "role": "user"}
 
 
 def hash_password(password: str) -> str:
@@ -102,42 +155,31 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return hash_password(plain_password) == hashed_password
 
 
-def authenticate_user(username: str, password: str) -> Optional[dict]:
-    """
-    用户认证
-    
-    验证用户名和密码，返回用户信息或None
-    """
+def authenticate_user(login: str, password: str) -> Optional[dict]:
+    """用户认证。`login` 既支持 username 也支持 email。"""
     conn = _get_db_connection()
     cursor = conn.cursor()
-    
     cursor.execute(
-        "SELECT id, username, password_hash, is_active FROM users WHERE username = ?",
-        (username,)
+        "SELECT id, username, email, password_hash, is_active, plan, trial_ends_at, role "
+        "FROM users WHERE username = ? OR email = ?",
+        (login, login)
     )
     row = cursor.fetchone()
     conn.close()
-    
     if not row:
-        print(f"[Auth] 用户不存在: {username}")
         return None
-    
-    input_hash = hash_password(password)
-    stored_hash = row["password_hash"]
-    print(f"[Auth] 密码验证: input_hash={input_hash[:20]}... stored_hash={stored_hash[:20]}...")
-    
-    if not verify_password(password, stored_hash):
-        print(f"[Auth] 密码不匹配")
+    if not verify_password(password, row["password_hash"]):
         return None
-    
     if not row["is_active"]:
-        print(f"[Auth] 用户已禁用")
         return None
-    
     return {
         "id": row["id"],
         "username": row["username"],
-        "is_active": bool(row["is_active"])
+        "email": row["email"],
+        "is_active": bool(row["is_active"]),
+        "plan": row["plan"] or "trial",
+        "trial_ends_at": row["trial_ends_at"],
+        "role": row["role"] or "user",
     }
 
 
@@ -209,25 +251,58 @@ def verify_token(token: str) -> Optional[dict]:
 
 
 def get_user_by_id(user_id: int) -> Optional[dict]:
-    """根据ID获取用户信息"""
+    """根据ID获取用户信息（含 SaaS 字段）"""
     conn = _get_db_connection()
     cursor = conn.cursor()
-    
     cursor.execute(
-        "SELECT id, username, is_active FROM users WHERE id = ?",
+        "SELECT id, username, email, is_active, plan, trial_ends_at, role "
+        "FROM users WHERE id = ?",
         (user_id,)
     )
     row = cursor.fetchone()
     conn.close()
-    
     if not row:
         return None
-    
     return {
         "id": row["id"],
         "username": row["username"],
-        "is_active": bool(row["is_active"])
+        "email": row["email"],
+        "is_active": bool(row["is_active"]),
+        "plan": row["plan"] or "trial",
+        "trial_ends_at": row["trial_ends_at"],
+        "role": row["role"] or "user",
     }
+
+
+def list_users() -> list:
+    """管理员用：列出所有用户。"""
+    conn = _get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, username, email, is_active, plan, trial_ends_at, role, created_at "
+        "FROM users ORDER BY id DESC"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_user_admin(user_id: int, **fields) -> bool:
+    """管理员修改某个用户的 plan、is_active、role 等。"""
+    allowed = {"plan", "is_active", "role", "trial_ends_at"}
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in allowed and v is not None:
+            sets.append(f"{k}=?"); vals.append(v)
+    if not sets:
+        return False
+    vals.append(user_id)
+    conn = _get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(f"UPDATE users SET {','.join(sets)} WHERE id=?", vals)
+    conn.commit()
+    conn.close()
+    return True
 
 
 def create_user(username: str, password: str) -> Optional[dict]:

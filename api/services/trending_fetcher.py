@@ -58,6 +58,19 @@ async def search_trending_notes(
                         body.get("data", {}).get("items", [])
                         or body.get("items", [])
                     )
+                    if items:
+                        import json as _json
+                        sample = items[0]
+                        note_obj = sample.get("note_card") or sample
+                        logger.info(f"[trending][DEBUG] note keys: {list(note_obj.keys())}")
+                        cv = note_obj.get('cover')
+                        logger.info(f"[trending][DEBUG] cover keys: {list(cv.keys()) if isinstance(cv, dict) else cv}")
+                        il = note_obj.get('image_list') or []
+                        logger.info(f"[trending][DEBUG] image_list len={len(il)}")
+                        if il and isinstance(il[0], dict):
+                            logger.info(f"[trending][DEBUG] image_list[0] keys: {list(il[0].keys())}")
+                            il0_first = (il[0].get('info_list') or [{}])[0]
+                            logger.info(f"[trending][DEBUG] img0 info_list[0]: {_json.dumps(il0_first, ensure_ascii=False)[:300]}")
                     for item in items:
                         note = item.get("note_card") or item
                         interact = note.get("interact_info", {})
@@ -81,6 +94,40 @@ async def search_trending_notes(
                             or ""
                         )
                         nick = author_info.get("nick_name") or author_info.get("nickname") or ""
+
+                        # Cover image: search API returns 'cover' with multiple
+                        # URL variants (default / pre / etc).
+                        cover_url = ""
+                        cover = note.get("cover") or {}
+                        if isinstance(cover, dict):
+                            cover_url = (
+                                cover.get("url_default")
+                                or cover.get("url_pre")
+                                or cover.get("url")
+                                or ""
+                            )
+
+                        # Image list: each item has info_list with multiple
+                        # resolution URLs; pick the largest-looking one.
+                        images = []
+                        for img in (note.get("image_list") or []):
+                            if not isinstance(img, dict):
+                                continue
+                            info_list = img.get("info_list") or []
+                            picked = ""
+                            for info in info_list:
+                                if info.get("image_scene") == "WB_DFT":
+                                    picked = info.get("url", "")
+                                    break
+                            if not picked and info_list:
+                                picked = info_list[0].get("url", "")
+                            if not picked:
+                                picked = img.get("url", "") or img.get("url_default", "")
+                            if picked:
+                                images.append(picked)
+
+                        note_type = note.get("type") or "normal"
+
                         collected.append({
                             "note_id": note_id,
                             "title": title[:200],
@@ -94,6 +141,10 @@ async def search_trending_notes(
                             "collected_count": collected_cnt,
                             "comment_count": comment,
                             "author": nick,
+                            "cover_url": cover_url,
+                            "images": images,           # List[str]
+                            "video_url": "",            # search payload 不含视频流，等详情页 enrich
+                            "note_type": note_type,
                         })
                 except Exception as e:
                     logger.debug(f"[trending] parse response error: {e}")

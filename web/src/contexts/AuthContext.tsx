@@ -11,6 +11,8 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   login: (credentials: LoginRequest) => Promise<void>;
+  register: (email: string, password: string) => Promise<void>;
+  setToken: (token: string) => void;
   logout: () => void;
 }
 
@@ -51,6 +53,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.setItem('token', response.access_token);
   };
 
+  const register = async (email: string, password: string) => {
+    const r = await fetch("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || "注册失败");
+    setToken(data.access_token);
+    localStorage.setItem("token", data.access_token);
+    // 立刻拉取用户信息
+    try {
+      const userData = await authApi.getCurrentUser(data.access_token);
+      setUser(userData);
+    } catch {
+      // 忽略，下次刷新会重新拉
+    }
+  };
+
+  const updateToken = (newToken: string) => {
+    setToken(newToken);
+    localStorage.setItem("token", newToken);
+    authApi.getCurrentUser(newToken).then(setUser).catch(() => {});
+  };
+
   const logout = () => {
     if (token) {
       authApi.logout(token).catch(console.error);
@@ -68,6 +95,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isAuthenticated: !!token && !!user,
         isLoading,
         login,
+        register,
+        setToken: updateToken,
         logout,
       }}
     >

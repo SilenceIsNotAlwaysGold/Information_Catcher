@@ -1,7 +1,10 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 
 from ..schemas.monitor import (
     AddPostsRequest,
+    UpdatePostRequest,
     AddAccountRequest,
     UpdateAccountRequest,
     UpdateSettingsRequest,
@@ -10,6 +13,8 @@ from ..schemas.monitor import (
     UpdatePromptRequest,
     RewriteTrendingRequest,
     SyncBitableRequest,
+    CreateGroupRequest,
+    UpdateGroupRequest,
 )
 from ..services import monitor_db as db
 from ..services import monitor_fetcher as fetcher
@@ -18,9 +23,18 @@ from ..services import qr_login
 from ..services import cookie_health
 from ..services import ai_rewriter
 from ..services import feishu_bitable
+from ..services import proxy_forwarder
+from ..services.account_browser import validate_proxy_url
 from .auth import get_current_user
 
 router = APIRouter(prefix="/monitor", tags=["监控"])
+
+
+def _scope_uid(current_user: dict) -> Optional[int]:
+    """admin 看全局（返回 None 不过滤）；普通用户只能看到自己的数据。"""
+    if (current_user.get("role") or "user") == "admin":
+        return None
+    return current_user["id"]
 
 
 # ── Posts ────────────────────────────────────────────────────────────────────
@@ -29,7 +43,7 @@ router = APIRouter(prefix="/monitor", tags=["监控"])
 async def add_posts(
     req: AddPostsRequest,
     background_tasks: BackgroundTasks,
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     results = []
     for raw_link in req.links:
@@ -50,11 +64,16 @@ async def add_posts(
                 info = {
                     "note_id": parts[1],
                     "xsec_token": params.get("xsec_token", [""])[0],
-                    "xsec_source": params.get("xsec_source", ["app_share"])[0],
+                    # 强制写 app_share：实测任何 source 的 token 都能用 app_share
+                    # 路径匿名访问，pc_feed 偶尔会被风控，统一改写避免兜底
+                    "xsec_source": "app_share",
                     "note_url": link,
                 }
             else:
                 info = None
+        if info:
+            # 短链 resolve 出来的 source 也强制改写
+            info["xsec_source"] = "app_share"
 
         if not info or not info.get("note_id"):
             results.append({"link": link, "ok": False, "reason": "无法解析链接"})
@@ -70,6 +89,8 @@ async def add_posts(
             xsec_source=info["xsec_source"],
             account_id=req.account_id,
             post_type=req.post_type,
+            group_id=req.group_id,
+            user_id=current_user["id"],
         )
         results.append({"link": link, "ok": True, "note_id": note_id})
 
@@ -79,14 +100,21 @@ async def add_posts(
 
 
 @router.get("/posts", summary="获取监控列表")
-async def list_posts(_: dict = Depends(get_current_user)):
-    return {"posts": await db.get_posts()}
+async def list_posts(current_user: dict = Depends(get_current_user)):
+    return {"posts": await db.get_posts(user_id=_scope_uid(current_user))}
 
 
 @router.delete("/posts/{note_id}", summary="删除监控帖子")
-async def delete_post(note_id: str, _: dict = Depends(get_current_user)):
-    await db.delete_post(note_id)
+async def delete_post(note_id: str, current_user: dict = Depends(get_current_user)):
+    await db.delete_post(note_id, user_id=_scope_uid(current_user))
     return {"ok": True}
+
+
+@router.post("/posts/cleanup-dead", summary="批量清理失效帖子")
+async def cleanup_dead_posts(current_user: dict = Depends(get_current_user)):
+    """连续抓取失败 ≥ 阈值次数的帖子，批量设为非激活状态。"""
+    n = await db.cleanup_dead_posts(user_id=_scope_uid(current_user))
+    return {"ok": True, "cleaned": n}
 
 
 @router.get("/posts/{note_id}/history", summary="帖子历史数据")
@@ -105,34 +133,71 @@ async def manual_check(
     return {"ok": True, "message": "检测任务已触发"}
 
 
+@router.post("/trending/check", summary="立即触发热门搜索（admin only，调试用）")
+async def manual_trending(
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+):
+    if (current_user.get("role") or "user") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    background_tasks.add_task(sched.run_trending_monitor)
+    return {"ok": True, "message": "trending 任务已触发"}
+
+
+@router.post("/daily-report/check", summary="立即触发日报推送（admin only，调试用）")
+async def manual_daily_report(
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+):
+    if (current_user.get("role") or "user") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    background_tasks.add_task(sched.run_daily_report)
+    return {"ok": True, "message": "日报任务已触发"}
+
+
+@router.get("/proxy-forwarders", summary="查看本地代理转发状态（admin only）")
+async def proxy_forwarder_status(current_user: dict = Depends(get_current_user)):
+    if (current_user.get("role") or "user") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return proxy_forwarder.status_dump()
+
+
 # ── Alerts ───────────────────────────────────────────────────────────────────
 
 @router.get("/alerts", summary="告警记录")
-async def list_alerts(limit: int = 50, _: dict = Depends(get_current_user)):
-    return {"alerts": await db.get_alerts(limit)}
+async def list_alerts(limit: int = 50, current_user: dict = Depends(get_current_user)):
+    return {"alerts": await db.get_alerts(limit, user_id=_scope_uid(current_user))}
 
 
 @router.delete("/alerts", summary="清空告警记录")
-async def clear_all_alerts(_: dict = Depends(get_current_user)):
-    deleted = await db.clear_alerts()
+async def clear_all_alerts(current_user: dict = Depends(get_current_user)):
+    deleted = await db.clear_alerts(user_id=_scope_uid(current_user))
     return {"ok": True, "deleted": deleted}
 
 
 @router.delete("/alerts/{alert_id}", summary="删除单条告警")
-async def remove_alert(alert_id: int, _: dict = Depends(get_current_user)):
-    await db.delete_alert(alert_id)
+async def remove_alert(alert_id: int, current_user: dict = Depends(get_current_user)):
+    await db.delete_alert(alert_id, user_id=_scope_uid(current_user))
     return {"ok": True}
 
 
 # ── Accounts ─────────────────────────────────────────────────────────────────
 
 @router.get("/accounts", summary="账号列表")
-async def list_accounts(_: dict = Depends(get_current_user)):
-    return {"accounts": await db.get_accounts()}
+async def list_accounts(current_user: dict = Depends(get_current_user)):
+    return {"accounts": await db.get_accounts(user_id=_scope_uid(current_user))}
 
 
 @router.post("/accounts", summary="添加账号")
-async def add_account(req: AddAccountRequest, _: dict = Depends(get_current_user)):
+async def add_account(req: AddAccountRequest, current_user: dict = Depends(get_current_user)):
+    is_admin = (current_user.get("role") or "user") == "admin"
+    # 只有 admin 才能把账号标记为共享池资源
+    is_shared = bool(req.is_shared) and is_admin
+
+    # 代理校验：拒绝实际不会生效的 SOCKS5 鉴权代理等
+    err = validate_proxy_url(req.proxy_url or "")
+    if err:
+        raise HTTPException(status_code=400, detail=err)
     aid = await db.add_account(
         name=req.name,
         cookie=req.cookie,
@@ -144,7 +209,14 @@ async def add_account(req: AddAccountRequest, _: dict = Depends(get_current_user
         fp_browser_type=req.fp_browser_type or "builtin",
         fp_profile_id=req.fp_profile_id or "",
         fp_api_url=req.fp_api_url or "",
+        user_id=current_user["id"],
+        is_shared=is_shared,
     )
+    # 如果代理是 socks5+鉴权，启动本地转发
+    if proxy_forwarder.needs_forwarder(req.proxy_url or ""):
+        acc = await db.get_account(aid)
+        if acc:
+            await proxy_forwarder.ensure_forwarder(acc)
     return {"ok": True, "id": aid}
 
 
@@ -152,17 +224,36 @@ async def add_account(req: AddAccountRequest, _: dict = Depends(get_current_user
 async def update_account(
     account_id: int,
     req: UpdateAccountRequest,
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
-    changed = await db.update_account(account_id, **req.model_dump(exclude_none=True))
+    fields = req.model_dump(exclude_none=True)
+    # is_shared 仅 admin 可改，普通用户的请求会静默丢弃这个字段
+    if (current_user.get("role") or "user") != "admin":
+        fields.pop("is_shared", None)
+    # 代理校验
+    if "proxy_url" in fields:
+        err = validate_proxy_url(fields["proxy_url"] or "")
+        if err:
+            raise HTTPException(status_code=400, detail=err)
+    changed = await db.update_account(account_id, **fields)
     if not changed:
         raise HTTPException(status_code=400, detail="no fields to update")
+    # 代理变化时同步本地转发
+    if "proxy_url" in fields:
+        new_proxy = fields.get("proxy_url") or ""
+        if proxy_forwarder.needs_forwarder(new_proxy):
+            acc = await db.get_account(account_id)
+            if acc:
+                await proxy_forwarder.ensure_forwarder(acc)
+        else:
+            await proxy_forwarder.drop_forwarder(account_id)
     return {"ok": True}
 
 
 @router.delete("/accounts/{account_id}", summary="删除账号")
-async def delete_account(account_id: int, _: dict = Depends(get_current_user)):
-    await db.delete_account(account_id)
+async def delete_account(account_id: int, current_user: dict = Depends(get_current_user)):
+    await db.delete_account(account_id, user_id=_scope_uid(current_user))
+    await proxy_forwarder.drop_forwarder(account_id)
     return {"ok": True}
 
 
@@ -215,15 +306,31 @@ async def qr_login_cancel(session_id: str, _: dict = Depends(get_current_user)):
 
 # ── Settings ─────────────────────────────────────────────────────────────────
 
+# 仅 admin 可见或可改的全局配置：AI 模型/Key、飞书应用密钥、共享池调度时间等。
+# 普通用户拿到的 settings 会把这些字段抹掉，前端也不会显示。
+_ADMIN_ONLY_SETTING_KEYS = {
+    "ai_base_url", "ai_api_key", "ai_model", "ai_rewrite_prompt",
+    "feishu_app_id", "feishu_app_secret",
+    "check_interval_minutes", "daily_report_time", "daily_report_enabled",
+    "trending_account_ids",
+}
+
+
 @router.get("/settings", summary="获取设置")
-async def get_settings(_: dict = Depends(get_current_user)):
-    return await db.get_all_settings()
+async def get_settings(current_user: dict = Depends(get_current_user)):
+    all_settings = await db.get_all_settings()
+    if (current_user.get("role") or "user") == "admin":
+        return all_settings
+    # 普通用户：屏蔽全局配置字段，但保留 ai_rewrite_enabled（用户自己的开关）
+    return {k: v for k, v in all_settings.items() if k not in _ADMIN_ONLY_SETTING_KEYS}
 
 
 @router.put("/settings", summary="更新设置")
 async def update_settings(
-    req: UpdateSettingsRequest, _: dict = Depends(get_current_user)
+    req: UpdateSettingsRequest,
+    current_user: dict = Depends(get_current_user),
 ):
+    is_admin = (current_user.get("role") or "user") == "admin"
     bool_val = lambda v: "1" if v else "0"
 
     simple_fields = [
@@ -232,9 +339,10 @@ async def update_settings(
         "feishu_app_id", "feishu_app_secret",
         "feishu_bitable_app_token", "feishu_bitable_table_id",
         "trending_keywords", "trending_account_ids",
-
     ]
     for key in simple_fields:
+        if key in _ADMIN_ONLY_SETTING_KEYS and not is_admin:
+            continue
         val = getattr(req, key, None)
         if val is not None:
             await db.set_setting(key, val)
@@ -243,9 +351,10 @@ async def update_settings(
         "daily_report_enabled", "likes_alert_enabled", "collects_alert_enabled",
         "comments_alert_enabled", "ai_rewrite_enabled", "trending_enabled",
         "comments_fetch_enabled",
-        "observe_use_cookie_fallback",
     ]
     for key in bool_fields:
+        if key in _ADMIN_ONLY_SETTING_KEYS and not is_admin:
+            continue
         val = getattr(req, key, None)
         if val is not None:
             await db.set_setting(key, bool_val(val))
@@ -254,15 +363,70 @@ async def update_settings(
         "likes_threshold", "collects_threshold", "comments_threshold", "trending_min_likes",
     ]
     for key in int_fields:
+        if key in _ADMIN_ONLY_SETTING_KEYS and not is_admin:
+            continue
         val = getattr(req, key, None)
         if val is not None:
             await db.set_setting(key, str(val))
 
-    if req.check_interval_minutes is not None:
+    if req.check_interval_minutes is not None and is_admin:
         await db.set_setting("check_interval_minutes", str(req.check_interval_minutes))
         settings = await db.get_all_settings()
         sched.reschedule(req.check_interval_minutes, settings.get("daily_report_time", "09:00"))
 
+    return {"ok": True}
+
+
+# ── Monitor Groups ───────────────────────────────────────────────────────────
+
+@router.get("/groups", summary="监控分组列表")
+async def list_groups(current_user: dict = Depends(get_current_user)):
+    return {"groups": await db.list_groups(user_id=_scope_uid(current_user))}
+
+
+@router.post("/groups", summary="新建分组")
+async def create_group(req: CreateGroupRequest, current_user: dict = Depends(get_current_user)):
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="分组名不能为空")
+    try:
+        gid = await db.create_group(name, user_id=current_user["id"])
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"创建失败：{e}")
+    return {"ok": True, "id": gid}
+
+
+@router.patch("/groups/{group_id}", summary="更新分组")
+async def update_group(
+    group_id: int, req: UpdateGroupRequest, _: dict = Depends(get_current_user)
+):
+    payload = req.model_dump(exclude_none=True)
+    # 把 bool 转成 0/1 存数据库
+    for k in ("likes_alert_enabled", "collects_alert_enabled", "comments_alert_enabled"):
+        if k in payload and isinstance(payload[k], bool):
+            payload[k] = 1 if payload[k] else 0
+    await db.update_group(group_id, **payload)
+    return {"ok": True}
+
+
+@router.delete("/groups/{group_id}", summary="删除分组")
+async def delete_group(
+    group_id: int,
+    fallback: Optional[int] = None,
+    _: dict = Depends(get_current_user),
+):
+    try:
+        await db.delete_group(group_id, fallback_group_id=fallback)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True}
+
+
+@router.patch("/posts/{note_id}/group", summary="修改帖子的分组")
+async def update_post_group(
+    note_id: str, req: UpdatePostRequest, current_user: dict = Depends(get_current_user)
+):
+    await db.update_post_group(note_id, req.group_id, user_id=_scope_uid(current_user))
     return {"ok": True}
 
 
@@ -285,15 +449,15 @@ async def manual_trending_check(
 # ── Rewrite Prompts (manage saved prompt templates) ──────────────────────────
 
 @router.get("/prompts", summary="改写 prompt 列表")
-async def list_prompts(_: dict = Depends(get_current_user)):
-    return {"prompts": await db.list_prompts()}
+async def list_prompts(current_user: dict = Depends(get_current_user)):
+    return {"prompts": await db.list_prompts(user_id=_scope_uid(current_user))}
 
 
 @router.post("/prompts", summary="新建 prompt")
-async def create_prompt(req: CreatePromptRequest, _: dict = Depends(get_current_user)):
+async def create_prompt(req: CreatePromptRequest, current_user: dict = Depends(get_current_user)):
     if not req.name.strip() or not req.content.strip():
         raise HTTPException(status_code=400, detail="name and content are required")
-    pid = await db.create_prompt(req.name.strip(), req.content)
+    pid = await db.create_prompt(req.name.strip(), req.content, user_id=current_user["id"])
     return {"ok": True, "id": pid}
 
 
@@ -316,6 +480,126 @@ async def set_default_prompt_route(prompt_id: int, _: dict = Depends(get_current
 
 
 # ── Manual rewrite + Bitable sync ────────────────────────────────────────────
+
+@router.post("/trending/backfill-media", summary="批量补全所有热门帖子的封面/图集/视频")
+async def backfill_trending_media(
+    background_tasks: BackgroundTasks,
+    only_missing: bool = True,
+    _: dict = Depends(get_current_user),
+):
+    """对所有 trending_posts 批量调用 detail page 抓图。后台跑。"""
+    async def _job():
+        import json as _json
+        import asyncio
+        # Pick the first usable account once.
+        account = None
+        for acc in await db.get_accounts(include_secrets=True):
+            if acc.get("is_active") and acc.get("cookie") and acc.get("cookie_status") != "expired":
+                account = acc
+                break
+        all_posts = await db.get_trending_posts(limit=500)
+        if only_missing:
+            targets = [p for p in all_posts if not (p.get("cover_url") or p.get("images"))]
+        else:
+            targets = all_posts
+        sem = __import__("asyncio").Semaphore(3)
+        ok_count = 0
+        fail_count = 0
+
+        async def _one(p):
+            nonlocal ok_count, fail_count
+            async with sem:
+                try:
+                    metrics, status = await fetcher.fetch_note_metrics(
+                        p["note_id"], p.get("xsec_token", ""), "pc_search", account=account,
+                    )
+                    if metrics:
+                        await db.update_trending_media(
+                            p["note_id"],
+                            cover_url=metrics.get("cover_url") or "",
+                            images_json=_json.dumps(metrics.get("images") or [], ensure_ascii=False) if metrics.get("images") else "",
+                            video_url=metrics.get("video_url") or "",
+                            note_type=metrics.get("note_type") or "",
+                        )
+                        if metrics.get("desc") and not p.get("desc_text"):
+                            await db.update_trending_desc(p["note_id"], metrics["desc"])
+                        ok_count += 1
+                    else:
+                        fail_count += 1
+                except Exception:
+                    fail_count += 1
+                await asyncio.sleep(0.6)
+
+        await asyncio.gather(*[_one(p) for p in targets])
+
+    background_tasks.add_task(_job)
+    return {"ok": True, "message": "批量补全任务已触发，请稍后刷新页面查看结果"}
+
+
+@router.post("/trending/posts/{note_id}/fetch-content", summary="抓取热门帖子的正文")
+async def fetch_trending_content(
+    note_id: str,
+    _: dict = Depends(get_current_user),
+):
+    """The XHS search API only returns titles. Hit the note detail page to grab
+    the real body text and backfill `desc_text`. Costs one extra request per call,
+    so it's exposed as an explicit user action (not run on every trending fetch)."""
+    post = await db.get_trending_post(note_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="帖子不存在")
+
+    # Try with the first usable account's cookie (note pages are now mostly
+    # login-walled). Fall back to anonymous if no usable account.
+    account = None
+    for acc in await db.get_accounts(include_secrets=True):
+        if acc.get("is_active") and acc.get("cookie") and acc.get("cookie_status") != "expired":
+            account = acc
+            break
+
+    metrics, status = await fetcher.fetch_note_metrics(
+        note_id,
+        post.get("xsec_token", ""),
+        "pc_search",
+        account=account,
+    )
+    if not metrics:
+        if status == "login_required":
+            raise HTTPException(
+                status_code=400,
+                detail="该帖子需要登录才能查看正文，请先添加一个有效账号"
+                       if not account else "登录态无效，请检查账号 Cookie 是否过期",
+            )
+        raise HTTPException(status_code=400, detail=f"抓取失败：{status}")
+
+    desc = metrics.get("desc") or ""
+    title = metrics.get("title") or post.get("title") or ""
+    images = metrics.get("images") or []
+    video_url = metrics.get("video_url") or ""
+    cover_url = metrics.get("cover_url") or ""
+    note_type = metrics.get("note_type") or "normal"
+
+    if desc:
+        await db.update_trending_desc(note_id, desc)
+    # Persist media too — they may not have come from search.
+    import json as _json
+    await db.update_trending_media(
+        note_id,
+        cover_url=cover_url,
+        images_json=_json.dumps(images, ensure_ascii=False) if images else "",
+        video_url=video_url,
+        note_type=note_type,
+    )
+    return {
+        "ok": True,
+        "title": title,
+        "desc_text": desc,
+        "desc_length": len(desc),
+        "cover_url": cover_url,
+        "images": images,
+        "video_url": video_url,
+        "note_type": note_type,
+    }
+
 
 @router.post("/trending/posts/{note_id}/rewrite", summary="改写指定热门帖子")
 async def rewrite_trending_post(

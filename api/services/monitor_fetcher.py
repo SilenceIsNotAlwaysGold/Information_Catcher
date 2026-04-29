@@ -65,13 +65,62 @@ def _extract_from_html(note_id: str, html: str) -> Optional[Dict]:
         return None
 
     interact = note.get("interact_info", {})
-    title = note.get("title") or note.get("desc", "")
+    raw_title = note.get("title") or ""
+    raw_desc  = note.get("desc") or ""
+
+    # Image list — detail page exposes higher-res URLs than search.
+    images: list = []
+    for img in (note.get("image_list") or []):
+        if not isinstance(img, dict):
+            continue
+        info_list = img.get("info_list") or []
+        picked = ""
+        for info in info_list:
+            if info.get("image_scene") == "WB_DFT":
+                picked = info.get("url", "")
+                break
+        if not picked and info_list:
+            picked = info_list[0].get("url", "")
+        if not picked:
+            picked = img.get("url", "") or img.get("url_default", "")
+        if picked:
+            images.append(picked)
+
+    # Cover (rare to differ from images[0], but normalize anyway)
+    cover = note.get("cover") or {}
+    cover_url = ""
+    if isinstance(cover, dict):
+        cover_url = (cover.get("url_default") or cover.get("url_pre")
+                     or cover.get("url") or "")
+
+    # Video URL — only present on video notes.
+    video_url = ""
+    note_type = note.get("type") or "normal"
+    if note_type == "video":
+        video = note.get("video") or {}
+        media = (video.get("media") or {}) if isinstance(video, dict) else {}
+        stream = (media.get("stream") or {}) if isinstance(media, dict) else {}
+        # Try several quality keys: h264 (most common) > h265 > av1
+        for key in ("h264", "h265", "av1"):
+            arr = stream.get(key)
+            if isinstance(arr, list) and arr:
+                first = arr[0]
+                if isinstance(first, dict):
+                    video_url = first.get("master_url") or first.get("backup_urls", [""])[0] or ""
+                    if video_url:
+                        break
+
     return {
-        "title": title[:200] if title else "",
+        "title": (raw_title or raw_desc)[:200] if (raw_title or raw_desc) else "",
+        "desc":  raw_desc[:5000],
         "liked_count": _parse_count(interact.get("liked_count")),
         "collected_count": _parse_count(interact.get("collected_count")),
         "comment_count": _parse_count(interact.get("comment_count")),
         "share_count": _parse_count(interact.get("share_count")),
+        "cover_url": cover_url,
+        "images": images,
+        "video_url": video_url,
+        "note_type": note_type,
     }
 
 
@@ -147,12 +196,11 @@ async def fetch_note_metrics(
         ua = (account.get("user_agent") or "").strip()
         if ua:
             headers["User-Agent"] = ua
-        raw_proxy = (account.get("proxy_url") or "").strip() or None
-        # Skip SOCKS5 proxies — httpx needs the socksio extra and our auth-bearing
-        # SOCKS5 URLs aren't supported by Playwright either, so users have already
-        # been told to use HTTP/HTTPS proxies if they need authenticated proxying.
-        if raw_proxy and not raw_proxy.lower().startswith("socks"):
-            proxy = raw_proxy
+        # effective_proxy_url：socks5+鉴权会被转成本地 http://127.0.0.1:port
+        from . import proxy_forwarder
+        eff = proxy_forwarder.effective_proxy_url(account)
+        if eff:
+            proxy = eff
     elif cookie:
         headers["Cookie"] = cookie
 

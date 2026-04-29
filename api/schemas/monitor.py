@@ -5,7 +5,32 @@ from pydantic import BaseModel, Field
 class AddPostsRequest(BaseModel):
     links: List[str]
     account_id: Optional[int] = None
-    post_type: str = "observe"  # "own" | "observe"
+    post_type: str = "observe"  # legacy, kept for compat
+    group_id: Optional[int] = None  # 推荐用 group_id 替代 post_type
+
+
+class UpdatePostRequest(BaseModel):
+    group_id: Optional[int] = None
+
+
+class CreateGroupRequest(BaseModel):
+    name: str
+
+
+class UpdateGroupRequest(BaseModel):
+    name: Optional[str] = None
+    feishu_webhook_url: Optional[str] = None
+    wecom_webhook_url: Optional[str] = None
+    likes_alert_enabled: Optional[bool] = None
+    likes_threshold: Optional[int] = None
+    collects_alert_enabled: Optional[bool] = None
+    collects_threshold: Optional[int] = None
+    comments_alert_enabled: Optional[bool] = None
+    comments_threshold: Optional[int] = None
+    message_prefix: Optional[str] = None
+    template_likes: Optional[str] = None
+    template_collects: Optional[str] = None
+    template_comments: Optional[str] = None
 
 
 class CreatePromptRequest(BaseModel):
@@ -42,6 +67,8 @@ class AddAccountRequest(BaseModel):
     fp_browser_type: Optional[str] = "builtin"  # builtin | adspower | bitbrowser
     fp_profile_id: Optional[str] = ""
     fp_api_url: Optional[str] = ""
+    # 仅 admin 可设：勾选后该账号进入平台共享池，被所有用户的任务复用
+    is_shared: Optional[bool] = False
 
 
 class QRLoginStartRequest(BaseModel):
@@ -65,6 +92,7 @@ class UpdateAccountRequest(BaseModel):
     fp_browser_type: Optional[str] = None
     fp_profile_id: Optional[str] = None
     fp_api_url: Optional[str] = None
+    is_shared: Optional[bool] = None
 
 
 class UpdateSettingsRequest(BaseModel):
@@ -93,4 +121,3 @@ class UpdateSettingsRequest(BaseModel):
     trending_min_likes: Optional[int] = None
     trending_account_ids: Optional[str] = None
     comments_fetch_enabled: Optional[bool] = None
-    observe_use_cookie_fallback: Optional[bool] = None

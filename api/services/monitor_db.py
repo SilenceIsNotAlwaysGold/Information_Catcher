@@ -81,6 +81,10 @@ INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_bitable_table_id', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('trending_enabled', '0');
 INSERT OR IGNORE INTO monitor_settings VALUES ('trending_keywords', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('trending_min_likes', '1000');
+INSERT OR IGNORE INTO monitor_settings VALUES ('trending_enrich_desc', '1');
+INSERT OR IGNORE INTO monitor_settings VALUES ('trending_enrich_concurrency', '3');
+-- Deprecated 2026-04: 观测帖子改为永远走匿名（app_share 通道），无需 cookie 兜底。
+-- 留 key 不删避免 SELECT 报错；新部署不会再读它。
 INSERT OR IGNORE INTO monitor_settings VALUES ('observe_use_cookie_fallback', '0');
 
 CREATE TABLE IF NOT EXISTS trending_posts (
@@ -148,6 +152,29 @@ CREATE TABLE IF NOT EXISTS rewrite_prompts (
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS monitor_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    -- 推送渠道：留空时用全局 settings
+    feishu_webhook_url TEXT DEFAULT '',
+    wecom_webhook_url TEXT DEFAULT '',
+    -- 告警阈值开关 + 阈值（NULL 表示沿用全局 settings）
+    likes_alert_enabled INTEGER,
+    likes_threshold INTEGER,
+    collects_alert_enabled INTEGER,
+    collects_threshold INTEGER,
+    comments_alert_enabled INTEGER,
+    comments_threshold INTEGER,
+    -- 推送内容：前缀拼在消息开头；template_* 留空时用内置默认文案
+    message_prefix TEXT DEFAULT '',
+    template_likes TEXT DEFAULT '',
+    template_collects TEXT DEFAULT '',
+    template_comments TEXT DEFAULT '',
+    -- 内置分组（我的帖子/观测帖子）不能删除
+    is_builtin INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+
 INSERT OR IGNORE INTO monitor_settings VALUES ('self_monitor_enabled', '0');
 INSERT OR IGNORE INTO monitor_settings VALUES ('self_monitor_account_id', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('self_monitor_account_ids', '');
@@ -179,6 +206,11 @@ _ACCOUNT_EXTRA_COLUMNS: List[tuple] = [
     ("fp_api_url",        "TEXT DEFAULT ''"),
     ("cookie_status",     "TEXT DEFAULT 'unknown'"),  # valid | expired | unknown
     ("cookie_checked_at", "TEXT"),
+    # SaaS 共享池：admin 标记 is_shared=1 的账号会进入平台共享池，
+    # 用于热门搜索和观测帖子（用户不消耗自己账号）。
+    ("is_shared",         "INTEGER DEFAULT 0"),
+    ("last_used_at",      "TEXT"),
+    ("usage_count",       "INTEGER DEFAULT 0"),
 ]
 
 
@@ -191,6 +223,53 @@ async def _ensure_column(db, table: str, name: str, coldef: str):
     cols = await _table_columns(db, table)
     if name not in cols:
         await db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {coldef}")
+
+
+async def _migrate_monitor_posts_unique(db):
+    """把 monitor_posts.note_id 全局 UNIQUE 改成 (note_id, user_id) 复合 UNIQUE。
+
+    SQLite 不能原地修改列级 UNIQUE 约束，所以重建表（仅当尚未迁移时执行）。
+    依据 sqlite_master 的 SQL 字符串里是否还含 'note_id TEXT NOT NULL UNIQUE' 来识别。
+    """
+    row = await (await db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='monitor_posts'"
+    )).fetchone()
+    if not row:
+        return
+    sql_text = (row[0] or "")
+    if "note_id TEXT NOT NULL UNIQUE" not in sql_text:
+        # 已经是新结构，跳过
+        return
+    # 取出旧列清单（迁移期间老部署可能比新表多/少几列，这里按 PRAGMA 拿当前实际列）
+    cols = await _table_columns(db, "monitor_posts")
+    cols_csv = ", ".join(cols)
+    await db.executescript(f"""
+        DROP TABLE IF EXISTS monitor_posts_new;
+        CREATE TABLE monitor_posts_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            note_id TEXT NOT NULL,
+            title TEXT,
+            short_url TEXT,
+            note_url TEXT,
+            xsec_token TEXT,
+            xsec_source TEXT DEFAULT 'app_share',
+            account_id INTEGER REFERENCES monitor_accounts(id),
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            post_type TEXT DEFAULT 'observe',
+            last_fetch_status TEXT DEFAULT 'unknown',
+            last_fetch_at TEXT,
+            fail_count INTEGER DEFAULT 0,
+            group_id INTEGER,
+            user_id INTEGER
+        );
+        INSERT INTO monitor_posts_new ({cols_csv})
+        SELECT {cols_csv} FROM monitor_posts;
+        DROP TABLE monitor_posts;
+        ALTER TABLE monitor_posts_new RENAME TO monitor_posts;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_monitor_posts_note_user
+            ON monitor_posts(note_id, COALESCE(user_id, 0));
+    """)
 
 
 async def _migrate_own_messages_schema(db):
@@ -231,12 +310,46 @@ async def _migrate(db):
     # monitor_accounts columns for proxy / fingerprint
     for col, coldef in _ACCOUNT_EXTRA_COLUMNS:
         await _ensure_column(db, "monitor_accounts", col, coldef)
-    # post grouping: 'own' = my posts, 'observe' = others' posts
+    # post grouping: 'own' = my posts, 'observe' = others' posts (legacy)
     await _ensure_column(db, "monitor_posts", "post_type", "TEXT DEFAULT 'observe'")
     # Track per-post fetch outcome so the UI can flag XHS-locked / deleted notes.
     # Values: ok | login_required | deleted | error | unknown
     await _ensure_column(db, "monitor_posts", "last_fetch_status", "TEXT DEFAULT 'unknown'")
     await _ensure_column(db, "monitor_posts", "last_fetch_at", "TEXT")
+    # 连续失败次数：达到阈值后由调度器自动跳过，避免持续打无效请求
+    await _ensure_column(db, "monitor_posts", "fail_count", "INTEGER DEFAULT 0")
+    # New: custom monitor groups. group_id references monitor_groups.id.
+    await _ensure_column(db, "monitor_posts", "group_id", "INTEGER")
+    await _seed_default_groups(db)
+    await _migrate_post_type_to_group(db)
+    # Trending posts: media URLs (cover / images JSON / video URL / type)
+    await _ensure_column(db, "trending_posts", "cover_url", "TEXT DEFAULT ''")
+    await _ensure_column(db, "trending_posts", "images", "TEXT DEFAULT ''")  # JSON list
+    await _ensure_column(db, "trending_posts", "video_url", "TEXT DEFAULT ''")
+    await _ensure_column(db, "trending_posts", "note_type", "TEXT DEFAULT 'normal'")
+
+    # SaaS multi-tenant: each tenant-owned table gets a user_id column.
+    # monitor_settings 保持全局 key-value（管理员维护：AI key、检测间隔等），
+    # 用户级偏好（推送 webhook、告警阈值）通过 monitor_groups 配置。
+    for tbl in (
+        "monitor_posts", "monitor_groups", "monitor_accounts",
+        "rewrite_prompts", "monitor_alerts",
+    ):
+        await _ensure_column(db, tbl, "user_id", "INTEGER")
+    # 已有数据归属 admin (id=1)
+    for tbl in ("monitor_posts", "monitor_accounts", "monitor_alerts"):
+        await db.execute(f"UPDATE {tbl} SET user_id=1 WHERE user_id IS NULL")
+    # 把 monitor_posts.note_id 的全局 UNIQUE 改为 (note_id, user_id) 复合
+    await _migrate_monitor_posts_unique(db)
+    # 历史 xsec_source 统一改写为 app_share：
+    # 实测 search/pc_feed 来源的 token 配 app_share 也能匿名抓到详情，
+    # 而 pc_feed 直接访问偶尔被风控 302。统一改写后所有观测帖子都能匿名抓。
+    await db.execute(
+        "UPDATE monitor_posts SET xsec_source='app_share' "
+        "WHERE xsec_source IS NULL OR xsec_source != 'app_share'"
+    )
+    # 内置 monitor_groups 和默认 rewrite_prompts 保持 user_id=NULL（全局可见，所有用户共用）
+    # 用户自建的（未来）会带 user_id
     # own_comments needs account_id
     await _ensure_column(db, "own_comments", "account_id", "INTEGER")
     # own_messages schema rebuild (adds account_id + drops old UNIQUE)
@@ -264,6 +377,51 @@ async def _migrate(db):
                 "INSERT OR REPLACE INTO monitor_settings VALUES ('self_monitor_account_ids', ?)",
                 (old_val,),
             )
+
+
+async def _seed_default_groups(db):
+    """Make sure '我的帖子' and '观测帖子' exist as builtin groups."""
+    cur = await db.execute("SELECT COUNT(*) FROM monitor_groups WHERE is_builtin=1")
+    (count,) = await cur.fetchone()
+    if count >= 2:
+        return
+    builtin = [
+        ("我的帖子",
+         "[我的帖子]",
+         "「{title}」点赞 **+{liked_delta}**（当前 {liked_count}）"),
+        ("观测帖子",
+         "[观测]",
+         "「{title}」点赞 **+{liked_delta}**（当前 {liked_count}）"),
+    ]
+    for name, prefix, _tpl in builtin:
+        await db.execute(
+            "INSERT OR IGNORE INTO monitor_groups (name, message_prefix, is_builtin) VALUES (?, ?, 1)",
+            (name, prefix),
+        )
+
+
+async def _migrate_post_type_to_group(db):
+    """Backfill monitor_posts.group_id from legacy post_type values."""
+    cur = await db.execute(
+        "SELECT id FROM monitor_groups WHERE name='我的帖子' AND is_builtin=1"
+    )
+    row = await cur.fetchone()
+    own_id = row[0] if row else None
+    cur = await db.execute(
+        "SELECT id FROM monitor_groups WHERE name='观测帖子' AND is_builtin=1"
+    )
+    row = await cur.fetchone()
+    observe_id = row[0] if row else None
+    if own_id:
+        await db.execute(
+            "UPDATE monitor_posts SET group_id=? WHERE group_id IS NULL AND post_type='own'",
+            (own_id,),
+        )
+    if observe_id:
+        await db.execute(
+            "UPDATE monitor_posts SET group_id=? WHERE group_id IS NULL AND post_type='observe'",
+            (observe_id,),
+        )
 
 
 async def _seed_default_prompt(db):
@@ -334,7 +492,7 @@ async def get_all_settings() -> Dict[str, str]:
 _ACCOUNT_COLUMNS_SELECT = (
     "id, name, cookie, proxy_url, user_agent, viewport, timezone, locale, "
     "fp_browser_type, fp_profile_id, fp_api_url, created_at, is_active, "
-    "cookie_status, cookie_checked_at"
+    "cookie_status, cookie_checked_at, is_shared, last_used_at, usage_count, user_id"
 )
 
 
@@ -349,15 +507,18 @@ async def add_account(
     fp_browser_type: str = "builtin",
     fp_profile_id: str = "",
     fp_api_url: str = "",
+    user_id: Optional[int] = None,
+    is_shared: bool = False,
 ) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO monitor_accounts
                (name, cookie, proxy_url, user_agent, viewport, timezone, locale,
-                fp_browser_type, fp_profile_id, fp_api_url)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                fp_browser_type, fp_profile_id, fp_api_url, user_id, is_shared)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (name, cookie, proxy_url, user_agent, viewport, timezone or "Asia/Shanghai",
-             locale or "zh-CN", fp_browser_type or "builtin", fp_profile_id, fp_api_url),
+             locale or "zh-CN", fp_browser_type or "builtin", fp_profile_id, fp_api_url,
+             user_id, 1 if is_shared else 0),
         )
         await db.commit()
         return cur.lastrowid
@@ -366,7 +527,7 @@ async def add_account(
 async def update_account(account_id: int, **fields) -> bool:
     allowed = {
         "name", "cookie", "proxy_url", "user_agent", "viewport", "timezone",
-        "locale", "fp_browser_type", "fp_profile_id", "fp_api_url",
+        "locale", "fp_browser_type", "fp_profile_id", "fp_api_url", "is_shared",
     }
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
@@ -379,13 +540,34 @@ async def update_account(account_id: int, **fields) -> bool:
     return True
 
 
-async def get_accounts(include_secrets: bool = False) -> List[Dict]:
-    """Return active accounts. When include_secrets is False, cookie is omitted."""
+async def get_accounts(
+    include_secrets: bool = False,
+    user_id: Optional[int] = None,
+    only_shared: bool = False,
+    only_owned: bool = False,
+) -> List[Dict]:
+    """Active accounts.
+
+    - admin（user_id=None）默认看全部；
+    - 普通用户默认看「自己的 + 平台共享池」；
+    - only_owned=True 时只看用户自己；
+    - only_shared=True 时只看共享池（用于热门搜索调度）。
+    """
+    sql = f"SELECT {_ACCOUNT_COLUMNS_SELECT} FROM monitor_accounts WHERE is_active=1"
+    params: list = []
+    if only_shared:
+        sql += " AND is_shared = 1"
+    elif user_id is not None:
+        if only_owned:
+            sql += " AND user_id = ?"
+            params.append(user_id)
+        else:
+            sql += " AND (user_id = ? OR is_shared = 1)"
+            params.append(user_id)
+    sql += " ORDER BY id"
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            f"SELECT {_ACCOUNT_COLUMNS_SELECT} FROM monitor_accounts WHERE is_active=1 ORDER BY id"
-        ) as cur:
+        async with db.execute(sql, params) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
     if not include_secrets:
         for r in rows:
@@ -393,16 +575,56 @@ async def get_accounts(include_secrets: bool = False) -> List[Dict]:
     return rows
 
 
-async def get_account(account_id: int) -> Optional[Dict]:
-    """Full account record (including cookie) for the browser factory."""
+async def get_account(account_id: int, user_id: Optional[int] = None) -> Optional[Dict]:
+    """Full account record (including cookie). If user_id is given, also enforce ownership.
+
+    Note: shared accounts (is_shared=1) bypass the ownership check — any user can
+    read them so the scheduler can pick a shared cookie regardless of who owns
+    the post.
+    """
+    sql = f"SELECT {_ACCOUNT_COLUMNS_SELECT} FROM monitor_accounts WHERE id=?"
+    params: list = [account_id]
+    if user_id is not None:
+        sql += " AND (user_id = ? OR is_shared = 1)"
+        params.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            f"SELECT {_ACCOUNT_COLUMNS_SELECT} FROM monitor_accounts WHERE id=?",
-            (account_id,),
-        ) as cur:
+        async with db.execute(sql, params) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
+
+
+async def pick_shared_account() -> Optional[Dict]:
+    """从平台共享池里挑一个最久未用、状态健康的账号（LRU）。
+
+    用于热门搜索 / 观测帖子兜底等不绑定具体用户的抓取任务。
+    """
+    sql = (
+        f"SELECT {_ACCOUNT_COLUMNS_SELECT} FROM monitor_accounts "
+        "WHERE is_active=1 AND is_shared=1 "
+        "  AND cookie != '' "
+        "  AND (cookie_status IS NULL OR cookie_status != 'expired') "
+        "ORDER BY COALESCE(last_used_at, '1970-01-01') ASC, id ASC "
+        "LIMIT 1"
+    )
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def mark_account_used(account_id: int) -> None:
+    """记录账号最近一次被调度的时间，供 LRU 排序。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE monitor_accounts "
+            "SET last_used_at = datetime('now', 'localtime'), "
+            "    usage_count  = COALESCE(usage_count, 0) + 1 "
+            "WHERE id=?",
+            (account_id,),
+        )
+        await db.commit()
 
 
 async def update_cookie_status(account_id: int, status: str) -> None:
@@ -424,9 +646,15 @@ async def get_account_cookie(account_id: int) -> Optional[str]:
             return row[0] if row else None
 
 
-async def delete_account(account_id: int):
+async def delete_account(account_id: int, user_id: Optional[int] = None):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE monitor_accounts SET is_active=0 WHERE id=?", (account_id,))
+        if user_id is not None:
+            await db.execute(
+                "UPDATE monitor_accounts SET is_active=0 WHERE id=? AND user_id=?",
+                (account_id, user_id),
+            )
+        else:
+            await db.execute("UPDATE monitor_accounts SET is_active=0 WHERE id=?", (account_id,))
         await db.commit()
 
 
@@ -441,38 +669,83 @@ async def add_post(
     xsec_source: str,
     account_id: Optional[int],
     post_type: str = "observe",
+    group_id: Optional[int] = None,
+    user_id: Optional[int] = None,
 ) -> int:
+    """添加监控帖子。多租户场景下同一 note_id 可被多个用户独立添加。"""
     async with aiosqlite.connect(DB_PATH) as db:
+        # 先按 (note_id, user_id) 找一条已有的（含 is_active=0 的）
         cur = await db.execute(
-            """INSERT OR REPLACE INTO monitor_posts
-               (note_id, title, short_url, note_url, xsec_token, xsec_source, account_id, post_type, is_active)
-               VALUES (?,?,?,?,?,?,?,?,1)""",
-            (note_id, title, short_url, note_url, xsec_token, xsec_source, account_id, post_type),
+            "SELECT id FROM monitor_posts "
+            "WHERE note_id=? AND COALESCE(user_id, 0)=COALESCE(?, 0)",
+            (note_id, user_id),
+        )
+        row = await cur.fetchone()
+        if row:
+            existing_id = row[0]
+            await db.execute(
+                "UPDATE monitor_posts SET title=?, short_url=?, note_url=?, "
+                "xsec_token=?, xsec_source=?, account_id=?, post_type=?, "
+                "group_id=?, is_active=1 WHERE id=?",
+                (title, short_url, note_url, xsec_token, xsec_source,
+                 account_id, post_type, group_id, existing_id),
+            )
+            await db.commit()
+            return existing_id
+        cur = await db.execute(
+            """INSERT INTO monitor_posts
+               (note_id, title, short_url, note_url, xsec_token, xsec_source,
+                account_id, post_type, group_id, user_id, is_active)
+               VALUES (?,?,?,?,?,?,?,?,?,?,1)""",
+            (note_id, title, short_url, note_url, xsec_token, xsec_source,
+             account_id, post_type, group_id, user_id),
         )
         await db.commit()
         return cur.lastrowid
 
 
-async def get_posts() -> List[Dict]:
+async def get_posts(user_id: Optional[int] = None) -> List[Dict]:
+    sql = """
+        SELECT p.*,
+               a.name  AS account_name,
+               g.name  AS group_name,
+               s.liked_count, s.collected_count, s.comment_count, s.share_count,
+               s.checked_at
+        FROM monitor_posts p
+        LEFT JOIN monitor_accounts a ON p.account_id = a.id
+        LEFT JOIN monitor_groups g ON p.group_id = g.id
+        LEFT JOIN (
+            SELECT note_id, liked_count, collected_count, comment_count,
+                   share_count, checked_at
+            FROM monitor_snapshots
+            WHERE id IN (SELECT MAX(id) FROM monitor_snapshots GROUP BY note_id)
+        ) s ON p.note_id = s.note_id
+        WHERE p.is_active = 1
+    """
+    params: list = []
+    if user_id is not None:
+        sql += " AND p.user_id = ?"
+        params.append(user_id)
+    sql += " ORDER BY p.created_at DESC"
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("""
-            SELECT p.*,
-                   a.name  AS account_name,
-                   s.liked_count, s.collected_count, s.comment_count, s.share_count,
-                   s.checked_at
-            FROM monitor_posts p
-            LEFT JOIN monitor_accounts a ON p.account_id = a.id
-            LEFT JOIN (
-                SELECT note_id, liked_count, collected_count, comment_count,
-                       share_count, checked_at
-                FROM monitor_snapshots
-                WHERE id IN (SELECT MAX(id) FROM monitor_snapshots GROUP BY note_id)
-            ) s ON p.note_id = s.note_id
-            WHERE p.is_active = 1
-            ORDER BY p.created_at DESC
-        """) as cur:
+        async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+async def update_post_group(note_id: str, group_id: Optional[int], user_id: Optional[int] = None) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        if user_id is not None:
+            await db.execute(
+                "UPDATE monitor_posts SET group_id=? WHERE note_id=? AND user_id=?",
+                (group_id, note_id, user_id),
+            )
+        else:
+            await db.execute(
+                "UPDATE monitor_posts SET group_id=? WHERE note_id=?",
+                (group_id, note_id),
+            )
+        await db.commit()
 
 
 async def get_active_posts() -> List[Dict]:
@@ -487,9 +760,15 @@ async def get_active_posts() -> List[Dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
-async def delete_post(note_id: str):
+async def delete_post(note_id: str, user_id: Optional[int] = None):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE monitor_posts SET is_active=0 WHERE note_id=?", (note_id,))
+        if user_id is not None:
+            await db.execute(
+                "UPDATE monitor_posts SET is_active=0 WHERE note_id=? AND user_id=?",
+                (note_id, user_id),
+            )
+        else:
+            await db.execute("UPDATE monitor_posts SET is_active=0 WHERE note_id=?", (note_id,))
         await db.commit()
 
 
@@ -530,43 +809,97 @@ async def save_snapshot(
 
 
 async def update_post_fetch_status(note_id: str, status: str) -> None:
+    """更新最近一次抓取状态。
+
+    - status='ok' → fail_count 重置为 0
+    - 其他（login_required/deleted/error）→ fail_count += 1
+    """
+    is_ok = status == "ok"
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE monitor_posts SET last_fetch_status=?, "
-            "last_fetch_at=datetime('now', 'localtime') WHERE note_id=?",
-            (status, note_id),
-        )
+        if is_ok:
+            await db.execute(
+                "UPDATE monitor_posts SET last_fetch_status=?, "
+                "last_fetch_at=datetime('now', 'localtime'), fail_count=0 "
+                "WHERE note_id=?",
+                (status, note_id),
+            )
+        else:
+            await db.execute(
+                "UPDATE monitor_posts SET last_fetch_status=?, "
+                "last_fetch_at=datetime('now', 'localtime'), "
+                "fail_count = COALESCE(fail_count, 0) + 1 "
+                "WHERE note_id=?",
+                (status, note_id),
+            )
         await db.commit()
 
 
-async def save_alert(note_id: str, title: str, alert_type: str, message: str):
+# 连续失败 N 次后停抓。阈值定在 5：login_required 触发频率较低，
+# 5 次后基本可以判定 token 永久失效。
+DEAD_POST_FAIL_THRESHOLD = 5
+
+
+async def cleanup_dead_posts(user_id: Optional[int] = None) -> int:
+    """把 fail_count >= 阈值的帖子设置 is_active=0，返回处理条数。"""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO monitor_alerts (note_id,title,alert_type,message) VALUES (?,?,?,?)",
-            (note_id, title, alert_type, message),
-        )
-        await db.commit()
-
-
-async def get_alerts(limit: int = 50) -> List[Dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM monitor_alerts ORDER BY created_at DESC LIMIT ?", (limit,)
-        ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
-
-
-async def clear_alerts() -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("DELETE FROM monitor_alerts")
+        if user_id is not None:
+            cur = await db.execute(
+                "UPDATE monitor_posts SET is_active=0 "
+                "WHERE is_active=1 AND COALESCE(fail_count, 0) >= ? AND user_id=?",
+                (DEAD_POST_FAIL_THRESHOLD, user_id),
+            )
+        else:
+            cur = await db.execute(
+                "UPDATE monitor_posts SET is_active=0 "
+                "WHERE is_active=1 AND COALESCE(fail_count, 0) >= ?",
+                (DEAD_POST_FAIL_THRESHOLD,),
+            )
         await db.commit()
         return cur.rowcount or 0
 
 
-async def delete_alert(alert_id: int):
+async def save_alert(note_id: str, title: str, alert_type: str, message: str, user_id: Optional[int] = None):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM monitor_alerts WHERE id=?", (alert_id,))
+        await db.execute(
+            "INSERT INTO monitor_alerts (note_id,title,alert_type,message,user_id) VALUES (?,?,?,?,?)",
+            (note_id, title, alert_type, message, user_id),
+        )
+        await db.commit()
+
+
+async def get_alerts(limit: int = 50, user_id: Optional[int] = None) -> List[Dict]:
+    sql = "SELECT * FROM monitor_alerts"
+    params: list = []
+    if user_id is not None:
+        sql += " WHERE user_id=?"
+        params.append(user_id)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def clear_alerts(user_id: Optional[int] = None) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        if user_id is not None:
+            cur = await db.execute("DELETE FROM monitor_alerts WHERE user_id=?", (user_id,))
+        else:
+            cur = await db.execute("DELETE FROM monitor_alerts")
+        await db.commit()
+        return cur.rowcount or 0
+
+
+async def delete_alert(alert_id: int, user_id: Optional[int] = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        if user_id is not None:
+            await db.execute(
+                "DELETE FROM monitor_alerts WHERE id=? AND user_id=?",
+                (alert_id, user_id),
+            )
+        else:
+            await db.execute("DELETE FROM monitor_alerts WHERE id=?", (alert_id,))
         await db.commit()
 
 
@@ -576,31 +909,39 @@ async def add_or_update_trending_post(
     note_id: str, title: str, desc_text: str, note_url: str,
     xsec_token: str, liked_count: int, collected_count: int,
     comment_count: int, keyword: str, author: str,
+    cover_url: str = "", images: str = "", video_url: str = "", note_type: str = "normal",
 ) -> bool:
     """Insert new trending post. Returns True if it was newly inserted."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT id FROM trending_posts WHERE note_id=?", (note_id,))
         exists = await cur.fetchone()
         if exists:
-            # Backfill title/author when the existing row has them empty (older
-            # rows captured before we knew the correct field paths).
+            # Backfill text + media fields when the existing row had them empty.
             await db.execute(
                 """UPDATE trending_posts
                    SET liked_count=?, collected_count=?, comment_count=?,
                        title    = CASE WHEN title    IS NULL OR title    = '' THEN ? ELSE title    END,
                        author   = CASE WHEN author   IS NULL OR author   = '' THEN ? ELSE author   END,
-                       desc_text= CASE WHEN desc_text IS NULL OR desc_text= '' THEN ? ELSE desc_text END
+                       desc_text= CASE WHEN desc_text IS NULL OR desc_text= '' THEN ? ELSE desc_text END,
+                       cover_url= CASE WHEN cover_url IS NULL OR cover_url = '' THEN ? ELSE cover_url END,
+                       images   = CASE WHEN images    IS NULL OR images    = '' THEN ? ELSE images    END,
+                       video_url= CASE WHEN video_url IS NULL OR video_url = '' THEN ? ELSE video_url END,
+                       note_type= CASE WHEN note_type IS NULL OR note_type = '' THEN ? ELSE note_type END
                    WHERE note_id=?""",
-                (liked_count, collected_count, comment_count, title, author, desc_text, note_id),
+                (liked_count, collected_count, comment_count,
+                 title, author, desc_text,
+                 cover_url, images, video_url, note_type, note_id),
             )
             await db.commit()
             return False
         await db.execute(
             """INSERT INTO trending_posts
-               (note_id,title,desc_text,note_url,xsec_token,liked_count,collected_count,comment_count,keyword,author)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+               (note_id,title,desc_text,note_url,xsec_token,liked_count,collected_count,comment_count,
+                keyword,author,cover_url,images,video_url,note_type)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (note_id, title, desc_text, note_url, xsec_token,
-             liked_count, collected_count, comment_count, keyword, author),
+             liked_count, collected_count, comment_count, keyword, author,
+             cover_url, images, video_url, note_type),
         )
         await db.commit()
         return True
@@ -613,6 +954,55 @@ async def get_trending_posts(limit: int = 50) -> List[Dict]:
             "SELECT * FROM trending_posts ORDER BY found_at DESC LIMIT ?", (limit,)
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+async def update_trending_desc(note_id: str, desc_text: str) -> None:
+    """Backfill desc_text after fetching the note detail page."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE trending_posts SET desc_text=? WHERE note_id=?",
+            (desc_text, note_id),
+        )
+        await db.commit()
+
+
+async def update_trending_media(
+    note_id: str,
+    cover_url: str = "",
+    images_json: str = "",
+    video_url: str = "",
+    note_type: str = "",
+) -> None:
+    """Only overwrite fields that come in non-empty (preserve existing data).
+
+    Fallback: if no explicit cover_url but images_json has at least one URL,
+    use images[0] as the cover.
+    """
+    if not cover_url and images_json:
+        try:
+            import json as _json
+            arr = _json.loads(images_json)
+            if isinstance(arr, list) and arr and isinstance(arr[0], str):
+                cover_url = arr[0]
+        except Exception:
+            pass
+    async with aiosqlite.connect(DB_PATH) as db:
+        sets, vals = [], []
+        if cover_url:
+            sets.append("cover_url=?"); vals.append(cover_url)
+        if images_json:
+            sets.append("images=?"); vals.append(images_json)
+        if video_url:
+            sets.append("video_url=?"); vals.append(video_url)
+        if note_type:
+            sets.append("note_type=?"); vals.append(note_type)
+        if not sets:
+            return
+        vals.append(note_id)
+        await db.execute(
+            f"UPDATE trending_posts SET {','.join(sets)} WHERE note_id=?", vals
+        )
+        await db.commit()
 
 
 async def update_trending_rewrite(note_id: str, rewritten_text: str, status: str = "done"):
@@ -651,14 +1041,104 @@ async def get_unsynced_trending_posts() -> List[Dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
-# ── Rewrite Prompts ──────────────────────────────────────────────────────────
+# ── Monitor Groups ───────────────────────────────────────────────────────────
 
-async def list_prompts() -> List[Dict]:
+_GROUP_COLUMNS = (
+    "id, name, feishu_webhook_url, wecom_webhook_url, "
+    "likes_alert_enabled, likes_threshold, "
+    "collects_alert_enabled, collects_threshold, "
+    "comments_alert_enabled, comments_threshold, "
+    "message_prefix, template_likes, template_collects, template_comments, "
+    "is_builtin, created_at"
+)
+
+
+async def list_groups(user_id: Optional[int] = None) -> List[Dict]:
+    """内置分组对所有用户可见；自定义分组按 user_id 过滤。"""
+    sql = f"SELECT {_GROUP_COLUMNS} FROM monitor_groups"
+    params: list = []
+    if user_id is not None:
+        sql += " WHERE is_builtin=1 OR user_id=?"
+        params.append(user_id)
+    sql += " ORDER BY is_builtin DESC, id"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_group(group_id: int) -> Optional[Dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM rewrite_prompts ORDER BY is_default DESC, id"
+            f"SELECT {_GROUP_COLUMNS} FROM monitor_groups WHERE id=?", (group_id,)
         ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def create_group(name: str, user_id: Optional[int] = None) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO monitor_groups (name, user_id) VALUES (?, ?)", (name, user_id)
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def update_group(group_id: int, **fields) -> None:
+    """Update any subset of group fields."""
+    allowed = {
+        "name", "feishu_webhook_url", "wecom_webhook_url",
+        "likes_alert_enabled", "likes_threshold",
+        "collects_alert_enabled", "collects_threshold",
+        "comments_alert_enabled", "comments_threshold",
+        "message_prefix", "template_likes", "template_collects", "template_comments",
+    }
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in allowed and v is not None:
+            sets.append(f"{k}=?"); vals.append(v)
+    if not sets:
+        return
+    vals.append(group_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            f"UPDATE monitor_groups SET {','.join(sets)} WHERE id=?", vals
+        )
+        await db.commit()
+
+
+async def delete_group(group_id: int, fallback_group_id: Optional[int] = None) -> None:
+    """Delete a non-builtin group. Posts are reassigned to fallback (or NULL)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT is_builtin FROM monitor_groups WHERE id=?", (group_id,)
+        )
+        row = await cur.fetchone()
+        if row and row[0]:
+            raise ValueError("内置分组不能删除")
+        await db.execute(
+            "UPDATE monitor_posts SET group_id=? WHERE group_id=?",
+            (fallback_group_id, group_id),
+        )
+        await db.execute("DELETE FROM monitor_groups WHERE id=?", (group_id,))
+        await db.commit()
+
+
+# ── Rewrite Prompts ──────────────────────────────────────────────────────────
+
+async def list_prompts(user_id: Optional[int] = None) -> List[Dict]:
+    """默认 prompt 全局可见；用户自定义按 user_id 过滤。"""
+    sql = "SELECT * FROM rewrite_prompts"
+    params: list = []
+    if user_id is not None:
+        sql += " WHERE user_id IS NULL OR user_id = ?"
+        params.append(user_id)
+    sql += " ORDER BY is_default DESC, id"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
 
@@ -689,11 +1169,11 @@ async def get_default_prompt() -> Optional[Dict]:
             return dict(row) if row else None
 
 
-async def create_prompt(name: str, content: str) -> int:
+async def create_prompt(name: str, content: str, user_id: Optional[int] = None) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO rewrite_prompts (name, content) VALUES (?, ?)",
-            (name, content),
+            "INSERT INTO rewrite_prompts (name, content, user_id) VALUES (?, ?, ?)",
+            (name, content, user_id),
         )
         await db.commit()
         return cur.lastrowid

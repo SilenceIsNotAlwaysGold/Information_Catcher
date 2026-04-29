@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { Input, Button } from "@nextui-org/react";
 import { Eye, EyeOff } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
@@ -81,6 +82,12 @@ export default function LoginPage() {
               登录
             </Button>
           </form>
+          <div className="text-center text-sm text-gray-500">
+            还没有账号？
+            <Link href="/register" className="text-primary hover:underline ml-1">立即注册</Link>
+            <span className="text-gray-300 mx-1">·</span>
+            <span className="text-gray-400">注册即享 7 天试用</span>
+          </div>
         </div>
 
         <p className="text-center text-xs text-gray-300 mt-6">Pulse © 2025</p>

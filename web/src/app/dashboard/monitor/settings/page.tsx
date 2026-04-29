@@ -11,6 +11,7 @@ import {
 import { Trash2, Save, Pencil, QrCode, RefreshCw, ShieldCheck } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PromptTemplatesCard } from "@/components/PromptTemplatesCard";
+import { MonitorGroupsCard } from "@/components/MonitorGroupsCard";
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -56,7 +57,6 @@ type Settings = {
   trending_min_likes: string;
   trending_account_ids: string;
   comments_fetch_enabled: string;
-  observe_use_cookie_fallback: string;
 };
 
 const DEFAULTS: Settings = {
@@ -85,15 +85,15 @@ const DEFAULTS: Settings = {
   trending_min_likes: "1000",
   trending_account_ids: "",
   comments_fetch_enabled: "0",
-  observe_use_cookie_fallback: "0",
 };
 
 const emptyAccountForm = { name: "", proxy_url: "" };
 const emptyEditForm = { name: "", cookie: "", proxy_url: "" };
 
 export default function MonitorSettingsPage() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+  const isAdmin = user?.role === "admin";
 
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -229,35 +229,40 @@ export default function MonitorSettingsPage() {
   const idsArrToCsv = (arr: string[]): string => arr.join(",");
 
   const saveSettings = async () => {
-    await fetch(API("/settings"), {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({
-        webhook_url: settings.webhook_url,
-        feishu_webhook_url: settings.feishu_webhook_url,
+    // 用户级字段：所有用户都能保存
+    const payload: Record<string, any> = {
+      webhook_url: settings.webhook_url,
+      feishu_webhook_url: settings.feishu_webhook_url,
+      likes_alert_enabled: bool("likes_alert_enabled"),
+      likes_threshold: parseInt(settings.likes_threshold),
+      collects_alert_enabled: bool("collects_alert_enabled"),
+      collects_threshold: parseInt(settings.collects_threshold),
+      comments_alert_enabled: bool("comments_alert_enabled"),
+      comments_threshold: parseInt(settings.comments_threshold),
+      ai_rewrite_enabled: bool("ai_rewrite_enabled"),
+      feishu_bitable_app_token: settings.feishu_bitable_app_token,
+      feishu_bitable_table_id: settings.feishu_bitable_table_id,
+      trending_enabled: bool("trending_enabled"),
+      trending_keywords: settings.trending_keywords,
+      trending_min_likes: parseInt(settings.trending_min_likes),
+      comments_fetch_enabled: bool("comments_fetch_enabled"),
+    };
+    // admin only：仅 admin 才把这些字段加入 payload
+    if (isAdmin) {
+      Object.assign(payload, {
         check_interval_minutes: parseInt(settings.check_interval_minutes),
         daily_report_enabled: bool("daily_report_enabled"),
         daily_report_time: settings.daily_report_time,
-        likes_alert_enabled: bool("likes_alert_enabled"),
-        likes_threshold: parseInt(settings.likes_threshold),
-        collects_alert_enabled: bool("collects_alert_enabled"),
-        collects_threshold: parseInt(settings.collects_threshold),
-        comments_alert_enabled: bool("comments_alert_enabled"),
-        comments_threshold: parseInt(settings.comments_threshold),
         ai_base_url: settings.ai_base_url,
         ai_api_key: settings.ai_api_key,
         ai_model: settings.ai_model,
         feishu_app_id: settings.feishu_app_id,
         feishu_app_secret: settings.feishu_app_secret,
-        feishu_bitable_app_token: settings.feishu_bitable_app_token,
-        feishu_bitable_table_id: settings.feishu_bitable_table_id,
-        trending_enabled: bool("trending_enabled"),
-        trending_keywords: settings.trending_keywords,
-        trending_min_likes: parseInt(settings.trending_min_likes),
         trending_account_ids: settings.trending_account_ids,
-        comments_fetch_enabled: bool("comments_fetch_enabled"),
-        observe_use_cookie_fallback: bool("observe_use_cookie_fallback"),
-      }),
+      });
+    }
+    await fetch(API("/settings"), {
+      method: "PUT", headers, body: JSON.stringify(payload),
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -351,15 +356,22 @@ export default function MonitorSettingsPage() {
             value={settings.feishu_webhook_url}
             onValueChange={(v) => set("feishu_webhook_url", v)}
           />
-          <Input
-            label="检测间隔"
-            type="number"
-            value={settings.check_interval_minutes}
-            onValueChange={(v) => set("check_interval_minutes", v)}
-            endContent={<span className="text-default-400 text-sm">分钟</span>}
-          />
+          {isAdmin ? (
+            <Input
+              label="检测间隔"
+              type="number"
+              value={settings.check_interval_minutes}
+              onValueChange={(v) => set("check_interval_minutes", v)}
+              endContent={<span className="text-default-400 text-sm">分钟</span>}
+            />
+          ) : (
+            <p className="text-xs text-default-400">检测间隔由管理员统一配置（默认 30 分钟）</p>
+          )}
         </CardBody>
       </Card>
+
+      {/* Monitor Groups */}
+      <MonitorGroupsCard token={token} />
 
       {/* Alert Rules */}
       <Card>
@@ -399,18 +411,20 @@ export default function MonitorSettingsPage() {
         </CardBody>
       </Card>
 
-      {/* Daily Report */}
-      <Card>
-        <CardHeader className="font-semibold">每日日报</CardHeader>
-        <CardBody className="space-y-4">
-          <div className="flex items-center justify-between">
-            <span className="text-sm">启用每日日报</span>
-            <Switch isSelected={bool("daily_report_enabled")} onValueChange={() => toggleBool("daily_report_enabled")} color="primary" />
-          </div>
-          <Input label="日报发送时间" type="time" value={settings.daily_report_time}
-            onValueChange={(v) => set("daily_report_time", v)} />
-        </CardBody>
-      </Card>
+      {/* Daily Report：仅 admin 可配置 */}
+      {isAdmin && (
+        <Card>
+          <CardHeader className="font-semibold">每日日报</CardHeader>
+          <CardBody className="space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="text-sm">启用每日日报</span>
+              <Switch isSelected={bool("daily_report_enabled")} onValueChange={() => toggleBool("daily_report_enabled")} color="primary" />
+            </div>
+            <Input label="日报发送时间" type="time" value={settings.daily_report_time}
+              onValueChange={(v) => set("daily_report_time", v)} />
+          </CardBody>
+        </Card>
+      )}
 
       {/* Trending Monitor */}
       <Card>
@@ -438,11 +452,11 @@ export default function MonitorSettingsPage() {
                 onValueChange={(v) => set("trending_min_likes", v)}
                 endContent={<span className="text-default-400 text-xs">赞</span>}
               />
-              {accounts.length > 0 && (
+              {isAdmin && accounts.length > 0 && (
                 <div className="space-y-2">
                   <div>
-                    <p className="text-sm font-medium">参与搜索的账号（不选=全部，按关键词轮询）</p>
-                    <p className="text-xs text-default-400">多选时每个关键词会轮流用一个账号的代理+指纹发起搜索</p>
+                    <p className="text-sm font-medium">参与搜索的账号（不选=自动从共享池里挑）</p>
+                    <p className="text-xs text-default-400">仅管理员可配置。多选时按关键词轮询账号。</p>
                   </div>
                   <CheckboxGroup
                     orientation="horizontal"
@@ -455,51 +469,61 @@ export default function MonitorSettingsPage() {
                   </CheckboxGroup>
                 </div>
               )}
+              {!isAdmin && (
+                <p className="text-xs text-default-400">
+                  搜索使用平台共享账号池，不消耗你自己的账号。
+                </p>
+              )}
             </>
           )}
         </CardBody>
       </Card>
 
-      {/* AI Config */}
-      <Card>
-        <CardHeader className="font-semibold">AI 配置（用于热门内容改写）</CardHeader>
-        <CardBody className="space-y-4">
-          <p className="text-xs text-default-400">
-            填好 API Key 后，到「热门内容」页可以选中帖子手动改写。改写支持选择不同 prompt 模板。
-          </p>
-          <Input label="API Base URL（OpenAI 格式）"
-            placeholder="https://api.openai.com/v1"
-            value={settings.ai_base_url}
-            onValueChange={(v) => set("ai_base_url", v)} />
-          <Input label="API Key" type="password"
-            placeholder="sk-..."
-            value={settings.ai_api_key}
-            onValueChange={(v) => set("ai_api_key", v)} />
-          <Input label="模型名称"
-            placeholder="gpt-4o-mini"
-            value={settings.ai_model}
-            onValueChange={(v) => set("ai_model", v)} />
-        </CardBody>
-      </Card>
+      {/* AI Config — 仅 admin 可见。普通用户不需要配置 API Key，平台已统一提供 */}
+      {isAdmin && (
+        <Card>
+          <CardHeader className="font-semibold">AI 配置（仅管理员可见）</CardHeader>
+          <CardBody className="space-y-4">
+            <p className="text-xs text-default-400">
+              这里的 API Key 给全平台所有用户共用。普通用户在「热门内容」页直接点改写即可。
+            </p>
+            <Input label="API Base URL（OpenAI 格式）"
+              placeholder="https://api.openai.com/v1"
+              value={settings.ai_base_url}
+              onValueChange={(v) => set("ai_base_url", v)} />
+            <Input label="API Key" type="password"
+              placeholder="sk-..."
+              value={settings.ai_api_key}
+              onValueChange={(v) => set("ai_api_key", v)} />
+            <Input label="模型名称"
+              placeholder="gpt-4o-mini"
+              value={settings.ai_model}
+              onValueChange={(v) => set("ai_model", v)} />
+          </CardBody>
+        </Card>
+      )}
 
       {/* Prompt Templates */}
       <PromptTemplatesCard token={token} />
 
 
-      {/* Feishu Bitable */}
+      {/* Feishu Bitable — App ID/Secret 仅 admin；表格地址普通用户也能配置（属于自己的目的地） */}
       <Card>
         <CardHeader className="font-semibold">飞书多维表格同步</CardHeader>
         <CardBody className="space-y-4">
           <p className="text-xs text-default-400">
-            AI 改写完成后自动同步到飞书多维表格。需要飞书自建应用的 App ID + Secret，以及目标表格的 App Token 和 Table ID。
+            AI 改写完成后自动同步到飞书多维表格。
+            {!isAdmin && " 飞书应用 App ID/Secret 由管理员统一配置；你只需要填目标表格地址。"}
           </p>
-          <div className="grid grid-cols-2 gap-3">
-            <Input label="App ID" placeholder="cli_..." value={settings.feishu_app_id}
-              onValueChange={(v) => set("feishu_app_id", v)} />
-            <Input label="App Secret" type="password" placeholder="..."
-              value={settings.feishu_app_secret}
-              onValueChange={(v) => set("feishu_app_secret", v)} />
-          </div>
+          {isAdmin && (
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="App ID（管理员）" placeholder="cli_..." value={settings.feishu_app_id}
+                onValueChange={(v) => set("feishu_app_id", v)} />
+              <Input label="App Secret（管理员）" type="password" placeholder="..."
+                value={settings.feishu_app_secret}
+                onValueChange={(v) => set("feishu_app_secret", v)} />
+            </div>
+          )}
           <Input label="Bitable App Token" placeholder="从多维表格 URL 中获取"
             value={settings.feishu_bitable_app_token}
             onValueChange={(v) => set("feishu_bitable_app_token", v)} />
@@ -520,17 +544,6 @@ export default function MonitorSettingsPage() {
             </div>
             <Switch isSelected={bool("comments_fetch_enabled")} onValueChange={() => toggleBool("comments_fetch_enabled")} color="primary" />
           </div>
-          <Divider />
-          <div className="flex items-center justify-between">
-            <div className="pr-4">
-              <p className="text-sm font-medium">观测帖子使用 Cookie 兜底</p>
-              <p className="text-xs text-default-400">
-                小红书已收紧匿名访问，未绑定账号的观测帖子大多需要登录态才能抓取。开启后会用任一有效账号的 Cookie 兜底访问，
-                <span className="text-warning"> 注意：相当于用你的账号去访问别人的帖子，长期可能影响账号风控。</span>
-              </p>
-            </div>
-            <Switch isSelected={bool("observe_use_cookie_fallback")} onValueChange={() => toggleBool("observe_use_cookie_fallback")} color="primary" />
-          </div>
         </CardBody>
       </Card>
 
@@ -538,9 +551,18 @@ export default function MonitorSettingsPage() {
         {saved ? "已保存 ✓" : "保存设置"}
       </Button>
 
-      <Divider />
+      {!isAdmin && (
+        <Card>
+          <CardBody className="text-center text-sm text-default-500 py-6">
+            🔐 平台已为你配置好搜索账号和 AI 改写所需的 API Key，无需自行管理。
+          </CardBody>
+        </Card>
+      )}
 
-      {/* Account Management */}
+      {isAdmin && <Divider />}
+
+      {/* Account Management — 仅 admin 才需要看到 cookie 录入面板 */}
+      {isAdmin && (
       <Card>
         <CardHeader className="font-semibold">账号管理</CardHeader>
         <CardBody className="space-y-4">
@@ -635,6 +657,7 @@ export default function MonitorSettingsPage() {
           </div>
         </CardBody>
       </Card>
+      )}
 
       {/* Edit Account Modal */}
       <Modal isOpen={editModal.isOpen} onClose={editModal.onClose} size="md">

@@ -4,6 +4,10 @@
 export interface User {
   id: number;
   username: string;
+  email?: string;
+  role?: "user" | "admin";
+  plan?: string;
+  trial_ends_at?: string | null;
 }
 
 export interface LoginRequest {

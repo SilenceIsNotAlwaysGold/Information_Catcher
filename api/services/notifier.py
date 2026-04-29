@@ -98,18 +98,27 @@ async def notify_daily_report(
     wecom_url: str,
     feishu_url: str,
     rows: List[Dict],
+    group_name: str = "",
+    prefix: str = "",
 ) -> None:
     if not rows:
         return
-    lines = ["**每日数据日报**\n"]
+    title_label = (
+        f"每日数据日报｜{group_name}（共 {len(rows)} 条）"
+        if group_name else f"每日数据日报（共 {len(rows)} 条）"
+    )
+    header = f"{prefix}**{title_label}**\n" if prefix else f"**{title_label}**\n"
+    lines = [header]
     for i, r in enumerate(rows[:20], 1):
         title = (r.get("title") or r.get("note_id", ""))[:30]
         liked = r.get("liked_count", 0)
         collected = r.get("collected_count", 0)
         comment = r.get("comment_count", 0)
         lines.append(f"{i}. **{title}**  点赞 {liked} | 收藏 {collected} | 评论 {comment}")
+    if len(rows) > 20:
+        lines.append(f"\n（仅展示前 20 条，共 {len(rows)} 条）")
     content = "\n".join(lines)
-    await _push(wecom_url, feishu_url, "每日数据日报", content, template="blue")
+    await _push(wecom_url, feishu_url, title_label, content, template="blue")
 
 
 # ── New comments on monitored posts ──────────────────────────────────────────

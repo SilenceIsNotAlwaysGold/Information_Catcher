@@ -24,9 +24,12 @@ type Post = {
   collected_count: number | null;
   comment_count: number | null;
   checked_at: string | null;
-  post_type: string; // "own" | "observe"
-  last_fetch_status?: string; // ok | login_required | deleted | error | unknown
+  post_type: string; // legacy
+  group_id: number | null;
+  group_name: string | null;
+  last_fetch_status?: string;
   last_fetch_at?: string | null;
+  fail_count?: number;
 };
 
 type Alert = {
@@ -39,6 +42,7 @@ type Alert = {
 };
 
 type Account = { id: number; name: string };
+type Group = { id: number; name: string; is_builtin: number };
 
 export default function MonitorPage() {
   const { token } = useAuth();
@@ -47,9 +51,10 @@ export default function MonitorPage() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
   const [links, setLinks] = useState("");
   const [selectedAccount, setSelectedAccount] = useState<string>("");
-  const [postType, setPostType] = useState<"own" | "observe">("observe");
+  const [selectedGroupId, setSelectedGroupId] = useState<string>("");
   const [adding, setAdding] = useState(false);
   const [checking, setChecking] = useState(false);
   const [addResults, setAddResults] = useState<{ link: string; ok: boolean; reason?: string }[]>([]);
@@ -57,13 +62,15 @@ export default function MonitorPage() {
   const { isOpen, onOpen, onClose } = useDisclosure();
 
   const load = useCallback(async () => {
-    const [p, a, ac] = await Promise.all([
+    const [p, a, ac, gr] = await Promise.all([
       fetch(API("/posts"), { headers }).then((r) => r.json()),
       fetch(API("/alerts?limit=30"), { headers }).then((r) => r.json()),
       fetch(API("/accounts"), { headers }).then((r) => r.json()),
+      fetch(API("/groups"), { headers }).then((r) => r.json()),
     ]);
     setPosts(p.posts ?? []);
     setAlerts(a.alerts ?? []);
+    setGroups(gr.groups ?? []);
     setAccounts(ac.accounts ?? []);
   }, [token]);
 
@@ -78,7 +85,11 @@ export default function MonitorPage() {
       const res = await fetch(API("/posts"), {
         method: "POST",
         headers,
-        body: JSON.stringify({ links: items, account_id: selectedAccount ? parseInt(selectedAccount) : null, post_type: postType }),
+        body: JSON.stringify({
+        links: items,
+        account_id: selectedAccount ? parseInt(selectedAccount) : null,
+        group_id: selectedGroupId ? parseInt(selectedGroupId) : null,
+      }),
       });
       const data = await res.json();
       setAddResults(data.results ?? []);
@@ -117,11 +128,20 @@ export default function MonitorPage() {
   const alertTypeLabel = (t: string) =>
     t === "likes" ? "点赞飙升" : t === "collects" ? "收藏飙升" : "新评论";
 
-  const fetchStatusChip = (s?: string) => {
+  const fetchStatusChip = (p: Post) => {
+    const s = p.last_fetch_status;
+    const fc = p.fail_count ?? 0;
+    if (fc >= 5) {
+      return (
+        <Tooltip content={`连续 ${fc} 次抓取失败，调度器已停止抓取该帖子。点上方"清理失效"批量删除。`}>
+          <Chip size="sm" color="danger" variant="flat">⚠️ 已停抓</Chip>
+        </Tooltip>
+      );
+    }
     if (s === "login_required") {
       return (
-        <Tooltip content="XHS 已对该帖子加登录墙，匿名抓取永远 302。绑定一个有效 Cookie 才能继续监控。">
-          <Chip size="sm" color="warning" variant="flat">🔒 需登录</Chip>
+        <Tooltip content={`XHS 对该帖子加了登录墙，匿名 ${fc} 次都失败。token 失效，建议删除。`}>
+          <Chip size="sm" color="warning" variant="flat">🔒 需登录 {fc > 0 ? `(${fc})` : ""}</Chip>
         </Tooltip>
       );
     }
@@ -129,12 +149,25 @@ export default function MonitorPage() {
       return <Chip size="sm" color="danger" variant="flat">已删除</Chip>;
     }
     if (s === "error") {
-      return <Chip size="sm" color="danger" variant="flat">抓取异常</Chip>;
+      return <Chip size="sm" color="danger" variant="flat">抓取异常 {fc > 0 ? `(${fc})` : ""}</Chip>;
     }
     if (s === "ok") {
       return <Chip size="sm" color="success" variant="flat">正常</Chip>;
     }
     return <Chip size="sm" color="default" variant="flat">未检测</Chip>;
+  };
+
+  const handleCleanupDead = async () => {
+    const dead = posts.filter((p) => (p.fail_count ?? 0) >= 5);
+    if (!dead.length) {
+      alert("没有连续失败超过 5 次的帖子");
+      return;
+    }
+    if (!confirm(`将停抓 ${dead.length} 条已失效的帖子（不可撤销，但帖子不会真删除，可以重新添加）？`)) return;
+    const r = await fetch(API("/posts/cleanup-dead"), { method: "POST", headers });
+    const d = await r.json();
+    alert(`已清理 ${d.cleaned} 条失效帖子`);
+    await load();
   };
 
   return (
@@ -150,6 +183,15 @@ export default function MonitorPage() {
           >
             立即检测
           </Button>
+          {posts.some((p) => (p.fail_count ?? 0) >= 5) && (
+            <Tooltip content="连续 5 次以上抓取失败的帖子停止抓取（token 已失效）">
+              <Button size="sm" variant="flat" color="warning"
+                startContent={<Trash2 size={14} />}
+                onPress={handleCleanupDead}>
+                清理失效 ({posts.filter((p) => (p.fail_count ?? 0) >= 5).length})
+              </Button>
+            </Tooltip>
+          )}
           <Button size="sm" variant="flat" as={Link} href="/dashboard/monitor/settings"
             startContent={<Settings size={16} />}>
             设置
@@ -160,18 +202,18 @@ export default function MonitorPage() {
         </div>
       </div>
 
-      {/* Tabs */}
+      {/* Tabs — 一个分组一个 Tab */}
       <Tabs>
-        {(["own", "observe"] as const).map((group) => (
+        {groups.map((g) => {
+          const groupPosts = posts.filter((p) => p.group_id === g.id);
+          return (
           <Tab
-            key={group}
-            title={group === "own"
-              ? `我的帖子 (${posts.filter((p) => p.post_type === "own").length})`
-              : `观测帖子 (${posts.filter((p) => p.post_type !== "own").length})`}
+            key={`g-${g.id}`}
+            title={`${g.name} (${groupPosts.length})`}
           >
             <Card>
               <CardBody className="p-0">
-                <Table aria-label={group === "own" ? "my posts" : "observed posts"} removeWrapper>
+                <Table aria-label={`group-${g.id}`} removeWrapper>
                   <TableHeader>
                     <TableColumn>标题 / ID</TableColumn>
                     <TableColumn>状态</TableColumn>
@@ -182,10 +224,8 @@ export default function MonitorPage() {
                     <TableColumn>最后检测</TableColumn>
                     <TableColumn>操作</TableColumn>
                   </TableHeader>
-                  <TableBody emptyContent={`暂无${group === "own" ? "我的帖子" : "观测帖子"}，点击「添加帖子」开始`}>
-                    {posts
-                      .filter((p) => group === "own" ? p.post_type === "own" : p.post_type !== "own")
-                      .map((p) => (
+                  <TableBody emptyContent={`「${g.name}」分组下暂无帖子`}>
+                    {groupPosts.map((p) => (
                         <TableRow key={p.note_id}>
                           <TableCell>
                             <div className="flex flex-col">
@@ -196,7 +236,7 @@ export default function MonitorPage() {
                               <span className="text-xs text-default-400">{p.note_id}</span>
                             </div>
                           </TableCell>
-                          <TableCell>{fetchStatusChip(p.last_fetch_status)}</TableCell>
+                          <TableCell>{fetchStatusChip(p)}</TableCell>
                           <TableCell><span className="font-medium">{p.liked_count ?? "—"}</span></TableCell>
                           <TableCell><span className="font-medium">{p.collected_count ?? "—"}</span></TableCell>
                           <TableCell><span className="font-medium">{p.comment_count ?? "—"}</span></TableCell>
@@ -231,7 +271,8 @@ export default function MonitorPage() {
               </CardBody>
             </Card>
           </Tab>
-        ))}
+          );
+        })}
 
         <Tab key="alerts" title={`告警记录 (${alerts.length})`}>
           <Card>
@@ -293,11 +334,13 @@ export default function MonitorPage() {
           <ModalBody className="space-y-4">
             <Select
               label="分组"
-              selectedKeys={new Set([postType])}
-              onSelectionChange={(keys) => setPostType(Array.from(keys)[0] as "own" | "observe")}
+              placeholder="选择分组"
+              selectedKeys={selectedGroupId ? new Set([selectedGroupId]) : new Set()}
+              onSelectionChange={(keys) => setSelectedGroupId(Array.from(keys)[0] as string ?? "")}
             >
-              <SelectItem key="own">我的帖子（自己账号发布的内容）</SelectItem>
-              <SelectItem key="observe">观测帖子（他人帖子或竞品内容）</SelectItem>
+              {groups.map((g) => (
+                <SelectItem key={String(g.id)}>{g.name}</SelectItem>
+              ))}
             </Select>
             <Textarea
               label="帖子链接"

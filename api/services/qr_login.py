@@ -45,31 +45,63 @@ def _reap_old():
 
 
 async def _capture_qr(page) -> Optional[str]:
-    """Return the QR code <img> src data-URL stripped to just the base64 body."""
-    try:
-        await page.wait_for_selector("img.qrcode-img", timeout=8000)
-    except Exception:
-        # Dialog may not be open — click the top-right login button and retry
+    """Return the QR code <img> src data-URL stripped to just the base64 body.
+
+    Tries multiple selectors; XHS occasionally renames the QR image class.
+    """
+    # Try a list of possible selectors. The first hit wins.
+    candidates = [
+        "img.qrcode-img",
+        ".qrcode-img img",
+        ".login-container img[src^='data:image']",
+        "img[src^='data:image/png;base64']",
+    ]
+
+    matched: Optional[str] = None
+    for sel in candidates:
         try:
-            btn = page.locator(
-                "xpath=//*[@id='app']/div[1]/div[2]/div[1]/ul/div[1]/button"
-            )
-            await btn.click(timeout=4000)
-            await page.wait_for_selector("img.qrcode-img", timeout=8000)
-        except Exception as e:
-            logger.warning(f"[qr_login] QR not found: {e}")
-            return None
+            await page.wait_for_selector(sel, timeout=15000, state="visible")
+            matched = sel
+            break
+        except Exception:
+            continue
+
+    if not matched:
+        # Fallback: try clicking the top-right 登录 button to surface the modal,
+        # then retry the candidate list.
+        try:
+            await page.get_by_text("登录", exact=True).first.click(timeout=4000)
+        except Exception:
+            try:
+                btn = page.locator(
+                    "xpath=//*[@id='app']/div[1]/div[2]/div[1]/ul/div[1]/button"
+                )
+                await btn.click(timeout=4000)
+            except Exception as e:
+                logger.warning(f"[qr_login] login button not found: {e}")
+                return None
+        for sel in candidates:
+            try:
+                await page.wait_for_selector(sel, timeout=10000, state="visible")
+                matched = sel
+                break
+            except Exception:
+                continue
+
+    if not matched:
+        logger.warning(
+            f"[qr_login] QR image not found after retries; final URL={page.url}"
+        )
+        return None
 
     try:
-        src = await page.eval_on_selector("img.qrcode-img", "el => el.src")
+        src = await page.eval_on_selector(matched, "el => el.src")
     except Exception as e:
-        logger.warning(f"[qr_login] QR src read failed: {e}")
+        logger.warning(f"[qr_login] QR src read failed (sel={matched}): {e}")
         return None
 
     if not src:
         return None
-    # src is typically "data:image/png;base64,AAAA..." — keep the full data URL,
-    # frontend sets it directly as <img src>.
     return src
 
 
@@ -110,14 +142,16 @@ async def start_session(account_template: Dict) -> Dict:
     page = await context.new_page()
 
     try:
+        # Open the dedicated login page — QR code shows by default, no need
+        # to click anything to surface the modal.
         await page.goto(
-            "https://www.xiaohongshu.com",
+            "https://www.xiaohongshu.com/login",
             wait_until="domcontentloaded",
-            timeout=20000,
+            timeout=25000,
         )
     except Exception as e:
         await close_session(pw, browser)
-        raise RuntimeError(f"无法访问小红书首页: {e}") from e
+        raise RuntimeError(f"无法访问小红书登录页: {e}") from e
 
     qr_image = await _capture_qr(page)
     if not qr_image:
@@ -152,6 +186,13 @@ async def _watch(session_id: str):
     session = _sessions.get(session_id)
     if not session:
         return
+    logger.info(
+        f"[qr_login] watcher started: session={session_id} "
+        f"initial_web_session={session['_no_logged']!r}"
+    )
+    last_cookie_names: set = set()
+    last_url: str = ""
+    poll_count = 0
     try:
         start = time.time()
         while True:
@@ -159,24 +200,73 @@ async def _watch(session_id: str):
                 break
             if time.time() - start > _SESSION_TTL:
                 session["status"] = "expired"
+                logger.info(f"[qr_login] {session_id} expired (ttl)")
                 break
+
+            ctx = session["_context"]
+            page = session.get("_page")
             try:
-                ws = await _current_web_session(session["_context"])
+                cookies = await ctx.cookies()
             except Exception as e:
                 session["status"] = "failed"
                 session["error"] = f"浏览器会话异常: {e}"
+                logger.error(f"[qr_login] {session_id} ctx.cookies() failed: {e}")
                 break
-            if ws and ws != session["_no_logged"]:
-                # Logged in — capture cookies and save account.
+
+            # Trace cookie / URL changes — XHS occasionally renames the session
+            # cookie, so logging *all* cookie names lets us spot a working name.
+            cookie_names = {c.get("name") for c in cookies if c.get("name")}
+            new_cookies = cookie_names - last_cookie_names
+            try:
+                cur_url = page.url if page else ""
+            except Exception:
+                cur_url = ""
+            if new_cookies:
+                logger.info(
+                    f"[qr_login] {session_id} new cookies: {sorted(new_cookies)}"
+                )
+            if cur_url != last_url:
+                logger.info(f"[qr_login] {session_id} url changed: {cur_url}")
+            last_cookie_names = cookie_names
+            last_url = cur_url
+
+            # Login success heuristic: web_session changed, OR the page URL
+            # navigated away from the home/login page after a scan.
+            web_session = ""
+            for c in cookies:
+                if c.get("name") == "web_session":
+                    web_session = c.get("value", "") or ""
+                    break
+
+            success = bool(web_session) and web_session != session["_no_logged"]
+            if not success and "web_session" in new_cookies:
+                # Cookie just appeared this poll — count as success even if it
+                # equals the (empty) baseline by some race.
+                success = True
+
+            if success:
                 try:
-                    cookie_str = await _snapshot_cookie_str(session["_context"])
+                    cookie_str = await _snapshot_cookie_str(ctx)
                     acc_id = await _save_account(session, cookie_str)
                     session["account_id"] = acc_id
                     session["status"] = "success"
+                    logger.info(
+                        f"[qr_login] {session_id} login SUCCESS, account_id={acc_id}, "
+                        f"cookie len={len(cookie_str)}"
+                    )
                 except Exception as e:
                     session["status"] = "failed"
                     session["error"] = f"保存账号失败: {e}"
+                    logger.error(f"[qr_login] {session_id} save failed: {e}")
                 break
+
+            poll_count += 1
+            if poll_count % 10 == 0:
+                logger.info(
+                    f"[qr_login] {session_id} still waiting "
+                    f"(poll #{poll_count}, web_session={web_session!r}, "
+                    f"cookie_count={len(cookie_names)})"
+                )
             await asyncio.sleep(_POLL_INTERVAL)
     finally:
         await _close_browser(session)

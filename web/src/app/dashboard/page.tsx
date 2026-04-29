@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Card, CardBody, Button, Chip } from "@nextui-org/react";
 import { Activity, Upload, Bell, RefreshCw, TrendingUp, MessageCircle, Heart, Bookmark } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { UpdateNoticeBanner } from "@/components/UpdateNoticeBanner";
 
 const API = (p: string) => `/api/monitor${p}`;
 
@@ -64,6 +65,7 @@ export default function DashboardPage() {
 
   return (
     <div className="p-6 space-y-6 max-w-4xl">
+      <UpdateNoticeBanner />
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>

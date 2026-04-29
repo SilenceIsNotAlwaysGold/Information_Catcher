@@ -35,9 +35,13 @@ API_ONLY = os.environ.get("API_ONLY", "").lower() in ("1", "true", "yes")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await monitor_db.init_db()
+    # 拉起 socks5+鉴权 代理的本地 HTTP 转发
+    from .services import proxy_forwarder
+    await proxy_forwarder.ensure_all_from_db()
     await monitor_scheduler.start_scheduler()
     yield
     monitor_scheduler.scheduler.shutdown(wait=False)
+    await proxy_forwarder.stop_all()
 
 
 app = FastAPI(

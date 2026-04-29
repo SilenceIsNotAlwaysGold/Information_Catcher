@@ -217,7 +217,17 @@ data/
 
 # Runtime data — never commit
 database/*.db
+database/*.db.*
+database/*.with_*
 database/.jwt_secret
+database/backups/
+
+# Logs
+*.log
+/tmp/gost-*.log
+
+# Local deploy artifacts
+/tmp/redbook-*.tgz
 
 # Frontend build artifacts & deps
 web/node_modules/

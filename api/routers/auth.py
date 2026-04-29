@@ -11,12 +11,18 @@
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from ..schemas.auth import UserLogin, Token, UserInfo
+from ..schemas.auth import (
+    UserLogin, Token, UserInfo,
+    RegisterRequest, AdminUpdateUserRequest,
+)
 from ..services.auth_service import (
     authenticate_user,
     create_access_token,
     verify_token,
     get_user_by_id,
+    register_user,
+    list_users,
+    update_user_admin,
 )
 
 router = APIRouter(prefix="/auth", tags=["认证"])
@@ -99,12 +105,60 @@ async def login(request: UserLogin):
             detail="用户名或密码错误"
         )
     
-    # 生成Token
+    # 生成Token (含 role，方便前端判断是否管理员)
     access_token = create_access_token(
-        data={"user_id": user["id"], "username": user["username"]}
+        data={
+            "user_id": user["id"],
+            "username": user["username"],
+            "role": user.get("role", "user"),
+        }
     )
-    
     return Token(access_token=access_token, token_type="bearer")
+
+
+@router.post("/register", response_model=Token, summary="新用户注册")
+async def register(request: RegisterRequest):
+    """注册新用户，自动开 7 天试用，返回 token 直接登录。"""
+    if not request.email.strip() or not request.password:
+        raise HTTPException(status_code=400, detail="邮箱和密码不能为空")
+    if "@" not in request.email:
+        raise HTTPException(status_code=400, detail="邮箱格式不正确")
+    if len(request.password) < 6:
+        raise HTTPException(status_code=400, detail="密码至少 6 位")
+    user = register_user(request.email.strip().lower(), request.password, request.username)
+    if not user:
+        raise HTTPException(status_code=400, detail="该邮箱或用户名已被注册")
+    token = create_access_token(
+        data={"user_id": user["id"], "username": user["username"], "role": user["role"]}
+    )
+    return Token(access_token=token, token_type="bearer")
+
+
+# ── 管理员路由 ───────────────────────────────────────────────────────────────
+
+async def get_admin_user(current_user: dict = Depends(get_current_user)) -> dict:
+    if (current_user.get("role") or "user") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return current_user
+
+
+@router.get("/admin/users", summary="管理员：用户列表")
+async def admin_list_users(_: dict = Depends(get_admin_user)):
+    return {"users": list_users()}
+
+
+@router.patch("/admin/users/{user_id}", summary="管理员：更新用户")
+async def admin_update_user(
+    user_id: int,
+    req: AdminUpdateUserRequest,
+    _: dict = Depends(get_admin_user),
+):
+    payload = req.model_dump(exclude_none=True)
+    # bool → 0/1
+    if "is_active" in payload and isinstance(payload["is_active"], bool):
+        payload["is_active"] = 1 if payload["is_active"] else 0
+    update_user_admin(user_id, **payload)
+    return {"ok": True}
 
 
 @router.get("/me", response_model=UserInfo, summary="获取当前用户")
