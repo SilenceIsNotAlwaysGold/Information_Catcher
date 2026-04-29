@@ -385,6 +385,8 @@ async def _migrate(db):
     # AI 摘要（公众号长文 / 抖音视频文案/小红书干货笔记 都能用）
     await _ensure_column(db, "monitor_posts", "summary", "TEXT DEFAULT ''")
     await _ensure_column(db, "monitor_posts", "summary_at", "TEXT")
+    # 作者：公众号 nickname / 抖音/XHS 博主昵称，用于按号分组
+    await _ensure_column(db, "monitor_posts", "author", "TEXT DEFAULT ''")
     # 公众号原创/转载/合规标识
     # copyright_stat: '11' = 原创, '100' = 转载, 其他/空 = 普通
     await _ensure_column(db, "monitor_posts", "copyright_stat", "TEXT DEFAULT ''")

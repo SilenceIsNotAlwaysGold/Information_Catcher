@@ -29,6 +29,7 @@ type Post = {
   // 公众号专属：copyright_stat 11=原创 / 100=转载（其他视为普通）
   copyright_stat?: string | null;
   source_url?: string | null;
+  author?: string | null;  // 公众号名 / 抖音博主名
 };
 
 function CopyrightChip({ stat }: { stat?: string | null }) {
@@ -51,6 +52,7 @@ export default function MpPage() {
   const [summarizingId, setSummarizingId] = useState<string | null>(null);
   const [expandedSummary, setExpandedSummary] = useState<Set<string>>(new Set());
   const [searchQ, setSearchQ] = useState("");
+  const [activeAuthor, setActiveAuthor] = useState<string | null>(null);
 
   // 跨平台改写
   const crossModal = useDisclosure();
@@ -83,15 +85,30 @@ export default function MpPage() {
     }
   };
 
-  // 客户端过滤（数据量小直接前端筛）
+  // 列出所有 author（按出现次数倒序）
+  const authorCounts = (() => {
+    const m: Record<string, number> = {};
+    for (const p of posts) {
+      const a = (p.author || "").trim();
+      if (!a) continue;
+      m[a] = (m[a] || 0) + 1;
+    }
+    return Object.entries(m).sort((a, b) => b[1] - a[1]);
+  })();
+
+  // 客户端过滤：搜索 + author chip
   const filteredPosts = (() => {
+    let arr = posts;
+    if (activeAuthor) arr = arr.filter((p) => (p.author || "") === activeAuthor);
     const q = searchQ.trim().toLowerCase();
-    if (!q) return posts;
-    const tokens = q.split(/\s+/).filter(Boolean);
-    return posts.filter((p) => {
-      const hay = `${p.title || ""} ${p.summary || ""} ${p.note_id}`.toLowerCase();
-      return tokens.every((t) => hay.includes(t));
-    });
+    if (q) {
+      const tokens = q.split(/\s+/).filter(Boolean);
+      arr = arr.filter((p) => {
+        const hay = `${p.title || ""} ${p.summary || ""} ${p.note_id} ${p.author || ""}`.toLowerCase();
+        return tokens.every((t) => hay.includes(t));
+      });
+    }
+    return arr;
   })();
 
   const handleSummarize = async (note_id: string) => {
@@ -195,15 +212,40 @@ export default function MpPage() {
         <CardHeader className="flex-col items-start gap-2">
           <Input
             size="sm"
-            placeholder="搜索标题或摘要（支持多关键词，空格分隔）"
+            placeholder="搜索标题/摘要/作者（多关键词空格分隔）"
             startContent={<Search size={14} className="text-default-400" />}
             value={searchQ}
             onValueChange={setSearchQ}
             className="max-w-md"
             isClearable
           />
+          {authorCounts.length > 0 && (
+            <div className="flex items-center gap-1 flex-wrap">
+              <span className="text-xs text-default-400 mr-1">公众号：</span>
+              <Chip
+                size="sm"
+                variant={activeAuthor === null ? "solid" : "flat"}
+                color={activeAuthor === null ? "primary" : "default"}
+                className="cursor-pointer"
+                onClick={() => setActiveAuthor(null)}
+              >
+                全部 ({posts.length})
+              </Chip>
+              {authorCounts.map(([name, n]) => (
+                <Chip key={name}
+                  size="sm"
+                  variant={activeAuthor === name ? "solid" : "flat"}
+                  color={activeAuthor === name ? "primary" : "default"}
+                  className="cursor-pointer"
+                  onClick={() => setActiveAuthor(activeAuthor === name ? null : name)}
+                >
+                  {name} ({n})
+                </Chip>
+              ))}
+            </div>
+          )}
           <div className="text-xs text-default-400 flex items-center gap-2">
-            <span>共 {posts.length} 篇{searchQ ? `（匹配 ${filteredPosts.length}）` : ""}</span>
+            <span>共 {posts.length} 篇{(searchQ || activeAuthor) ? `（匹配 ${filteredPosts.length}）` : ""}</span>
             <span>·</span>
             <span>原创/转载标识 · AI 摘要 · 阅读数（开发中 #22）</span>
           </div>
@@ -240,17 +282,19 @@ export default function MpPage() {
                             </Tooltip>
                           )}
                         </div>
-                        {p.source_url && (
-                          <a href={p.source_url} target="_blank" rel="noreferrer"
-                            className="text-xs text-default-400 truncate max-w-md hover:underline">
-                            转自：{p.source_url.slice(0, 60)}
-                          </a>
-                        )}
-                        {!p.source_url && (
-                          <span className="text-xs text-default-400 truncate max-w-md">
-                            {p.note_id}
-                          </span>
-                        )}
+                        <div className="flex items-center gap-2 text-xs text-default-400">
+                          {p.author && (
+                            <span className="text-success">📢 {p.author}</span>
+                          )}
+                          {p.source_url ? (
+                            <a href={p.source_url} target="_blank" rel="noreferrer"
+                              className="truncate max-w-sm hover:underline">
+                              转自：{p.source_url.slice(0, 50)}
+                            </a>
+                          ) : (
+                            <span className="truncate max-w-sm">{p.note_id.slice(0, 24)}</span>
+                          )}
+                        </div>
                       </div>
                     </TableCell>
                     <TableCell>{statusChip(p)}</TableCell>
