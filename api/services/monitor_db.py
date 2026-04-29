@@ -393,6 +393,10 @@ async def _migrate(db):
     await _ensure_column(db, "monitor_posts", "source_url", "TEXT DEFAULT ''")
     # New: custom monitor groups. group_id references monitor_groups.id.
     await _ensure_column(db, "monitor_posts", "group_id", "INTEGER")
+    # 告警规则 JSON：[{type, metric, threshold, ...}, ...]
+    # type: delta（现有 +N 触发）/ cumulative（首次累计达到 N）/ percent（24h 涨幅 N%）
+    # 留 NULL 时仍然兼容旧 likes_alert_enabled / threshold 老字段
+    await _ensure_column(db, "monitor_groups", "alert_rules", "TEXT DEFAULT ''")
     await _seed_default_groups(db)
     await _migrate_post_type_to_group(db)
     # Trending posts: media URLs (cover / images JSON / video URL / type)
@@ -870,6 +874,21 @@ async def get_post_history(note_id: str, limit: int = 100) -> List[Dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
+async def get_snapshot_at_or_before(note_id: str, hours_ago: int = 24) -> Optional[Dict]:
+    """拿 hours_ago 小时之前最近的一条 snapshot，用于「N 小时涨幅」规则。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT liked_count, collected_count, comment_count, share_count, checked_at "
+            "FROM monitor_snapshots "
+            "WHERE note_id=? AND checked_at <= datetime('now','localtime', ?) "
+            "ORDER BY checked_at DESC LIMIT 1",
+            (note_id, f"-{int(hours_ago)} hours"),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
 async def get_latest_snapshot(note_id: str) -> Optional[Dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -1020,6 +1039,28 @@ async def cleanup_dead_posts(user_id: Optional[int] = None) -> int:
             )
         await db.commit()
         return cur.rowcount or 0
+
+
+async def has_recent_alert(note_id: str, alert_type: str, hours: int = 4) -> bool:
+    """4 小时去抖动用：最近 N 小时内同 (note_id, alert_type) 是否已经告警过。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT 1 FROM monitor_alerts "
+            "WHERE note_id=? AND alert_type=? "
+            "  AND created_at >= datetime('now','localtime', ?) LIMIT 1",
+            (note_id, alert_type, f"-{int(hours)} hours"),
+        )
+        return (await cur.fetchone()) is not None
+
+
+async def has_ever_alerted(note_id: str, alert_type: str) -> bool:
+    """累计触发用：该 (note_id, alert_type) 是否曾经告警过（用于"首次达到"语义）。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT 1 FROM monitor_alerts WHERE note_id=? AND alert_type=? LIMIT 1",
+            (note_id, alert_type),
+        )
+        return (await cur.fetchone()) is not None
 
 
 async def save_alert(note_id: str, title: str, alert_type: str, message: str, user_id: Optional[int] = None):
@@ -1213,6 +1254,7 @@ _GROUP_COLUMNS = (
     "collects_alert_enabled, collects_threshold, "
     "comments_alert_enabled, comments_threshold, "
     "message_prefix, template_likes, template_collects, template_comments, "
+    "COALESCE(alert_rules,'') AS alert_rules, "
     "is_builtin, created_at"
 )
 
@@ -1258,6 +1300,7 @@ async def update_group(group_id: int, **fields) -> None:
         "collects_alert_enabled", "collects_threshold",
         "comments_alert_enabled", "comments_threshold",
         "message_prefix", "template_likes", "template_collects", "template_comments",
+        "alert_rules",
     }
     sets, vals = [], []
     for k, v in fields.items():

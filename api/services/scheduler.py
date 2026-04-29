@@ -146,23 +146,112 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
             return default.format(**ctx)
 
     post_user_id = post.get("user_id")
-    if likes_on and liked_delta >= likes_thr:
-        await db.save_alert(note_id, title, "likes", f"点赞 +{liked_delta}", user_id=post_user_id)
-        body = _fmt(group and group.get("template_likes"),
-                    "「{title}」点赞 **+{liked_delta}**（当前 {liked_count}）")
+
+    # 升级版：先解析 group.alert_rules（JSON）。如果配了 rules 就用 rules，
+    # 否则保持原有 likes/collects/comments 三大件兼容逻辑。
+    rules = []
+    if group and (group.get("alert_rules") or "").strip():
+        try:
+            rules = __import__("json").loads(group["alert_rules"])
+            if not isinstance(rules, list):
+                rules = []
+        except Exception as e:
+            logger.warning(f"[monitor] group {group.get('id')} alert_rules JSON 解析失败: {e}")
+
+    metric_value = {
+        "liked": metrics["liked_count"],
+        "collected": metrics["collected_count"],
+        "comment": metrics["comment_count"],
+    }
+    metric_delta = {
+        "liked": liked_delta,
+        "collected": collected_delta,
+        "comment": comment_delta,
+    }
+    metric_label = {"liked": "点赞", "collected": "收藏", "comment": "评论"}
+
+    async def _maybe_alert(alert_type: str, message: str, body_default: str, template: str | None,
+                           dedup_hours: int = 4) -> None:
+        # 4 小时去抖动：同 (note_id, alert_type) 内不重复通知
+        if dedup_hours > 0 and await db.has_recent_alert(note_id, alert_type, dedup_hours):
+            return
+        await db.save_alert(note_id, title, alert_type, message, user_id=post_user_id)
         await notifier.notify_metric(
             g_wecom, g_feishu, title, note_id, post["xsec_token"],
-            f"{prefix}点赞飙升".strip(), body,
+            f"{prefix}{metric_label.get(alert_type.split('_')[0], '指标')}告警".strip(),
+            _fmt(template, body_default),
         )
 
-    if collects_on and collected_delta >= collects_thr:
-        await db.save_alert(note_id, title, "collects", f"收藏 +{collected_delta}", user_id=post_user_id)
-        body = _fmt(group and group.get("template_collects"),
-                    "「{title}」收藏 **+{collected_delta}**（当前 {collected_count}）")
-        await notifier.notify_metric(
-            g_wecom, g_feishu, title, note_id, post["xsec_token"],
-            f"{prefix}收藏飙升".strip(), body,
-        )
+    if rules:
+        for r in rules:
+            try:
+                rtype = r.get("type")
+                metric = r.get("metric")  # liked / collected / comment
+                if metric not in metric_value:
+                    continue
+                cur_val = metric_value[metric]
+                delta_val = metric_delta[metric]
+
+                if rtype == "delta":
+                    thr = int(r.get("threshold", 50))
+                    if delta_val >= thr:
+                        await _maybe_alert(
+                            f"{metric}_delta",
+                            f"{metric_label[metric]} +{delta_val}",
+                            f"「{{title}}」{metric_label[metric]} **+{delta_val}**（当前 {cur_val}）",
+                            r.get("template"),
+                        )
+                elif rtype == "cumulative":
+                    # 累计首次触达：当前值 >= threshold 且历史从未告警过这个 type
+                    thr = int(r.get("threshold", 10000))
+                    alert_type = f"{metric}_cum_{thr}"
+                    if cur_val >= thr and not await db.has_ever_alerted(note_id, alert_type):
+                        await _maybe_alert(
+                            alert_type,
+                            f"{metric_label[metric]} 首次达到 {thr}",
+                            f"🎉「{{title}}」{metric_label[metric]} **累计达到 {thr}**（当前 {cur_val}）",
+                            r.get("template"),
+                            dedup_hours=0,  # 一次性通知，不需要去抖
+                        )
+                elif rtype == "percent":
+                    # 24 小时涨幅 ≥ N%
+                    pct = float(r.get("threshold_pct", 30))
+                    hours_window = int(r.get("window_hours", 24))
+                    base = await db.get_snapshot_at_or_before(note_id, hours_window)
+                    if base and base.get(f"{metric}_count"):
+                        old = base[f"{metric}_count"]
+                        if old > 0:
+                            growth = (cur_val - old) * 100.0 / old
+                            if growth >= pct:
+                                await _maybe_alert(
+                                    f"{metric}_pct",
+                                    f"{metric_label[metric]} {hours_window}h 涨幅 {growth:.0f}%",
+                                    f"📈「{{title}}」{metric_label[metric]} **{hours_window}h 涨幅 {growth:.0f}%**（当前 {cur_val}，{hours_window}h 前 {old}）",
+                                    r.get("template"),
+                                )
+            except Exception as e:
+                logger.warning(f"[monitor] rule eval error: {e}")
+    else:
+        # 旧规则（向后兼容）：likes/collects/comments delta + 4h 去抖
+        if likes_on and liked_delta >= likes_thr:
+            if not await db.has_recent_alert(note_id, "likes", 4):
+                await db.save_alert(note_id, title, "likes", f"点赞 +{liked_delta}", user_id=post_user_id)
+                body = _fmt(group and group.get("template_likes"),
+                            "「{title}」点赞 **+{liked_delta}**（当前 {liked_count}）")
+                await notifier.notify_metric(
+                    g_wecom, g_feishu, title, note_id, post["xsec_token"],
+                    f"{prefix}点赞飙升".strip(), body,
+                )
+
+        if collects_on and collected_delta >= collects_thr:
+            if not await db.has_recent_alert(note_id, "collects", 4):
+                await db.save_alert(note_id, title, "collects", f"收藏 +{collected_delta}", user_id=post_user_id)
+                body = _fmt(group and group.get("template_collects"),
+                            "「{title}」收藏 **+{collected_delta}**（当前 {collected_count}）")
+                await notifier.notify_metric(
+                    g_wecom, g_feishu, title, note_id, post["xsec_token"],
+                    f"{prefix}收藏飙升".strip(), body,
+                )
 
     # Fetch actual comment content when threshold triggered
     if comments_on and comment_delta >= comments_thr:

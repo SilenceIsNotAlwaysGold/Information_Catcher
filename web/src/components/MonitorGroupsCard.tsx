@@ -27,6 +27,7 @@ type Group = {
   template_likes: string;
   template_collects: string;
   template_comments: string;
+  alert_rules: string;  // JSON array
   is_builtin: number;
 };
 
@@ -46,6 +47,7 @@ const EMPTY: Form = {
   template_likes: "",
   template_collects: "",
   template_comments: "",
+  alert_rules: "",
 };
 
 export function MonitorGroupsCard({ token }: { token: string | null }) {
@@ -93,6 +95,7 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
       const passthrough: (keyof Form)[] = [
         "feishu_webhook_url", "wecom_webhook_url",
         "message_prefix", "template_likes", "template_collects", "template_comments",
+        "alert_rules",
       ];
       for (const k of passthrough) {
         body[k] = (form[k] as string) || "";
@@ -301,6 +304,31 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
                     value={form.template_comments || ""}
                     onValueChange={(v) => set("template_comments", v)}
                     minRows={2} />
+                </div>
+              </AccordionItem>
+
+              <AccordionItem key="rules" title="高级告警规则（JSON，留空 = 用上面阈值）" classNames={{ title: "text-sm" }}>
+                <div className="space-y-2 pt-2">
+                  <p className="text-xs text-default-500">
+                    支持的规则类型：
+                  </p>
+                  <ul className="text-xs text-default-500 ml-3 space-y-0.5">
+                    <li>· <code>delta</code>：单次涨幅 ≥ threshold（同上面阈值）</li>
+                    <li>· <code>cumulative</code>：累计 ≥ threshold 时<b>首次</b>通知一次（不重复）</li>
+                    <li>· <code>percent</code>：window_hours 内涨幅 ≥ threshold_pct%</li>
+                  </ul>
+                  <p className="text-xs text-default-500 mt-2">所有规则都自带 4h 去抖动（同帖子同指标 4h 内不重复）。</p>
+                  <Textarea
+                    label="alert_rules JSON"
+                    placeholder={`[
+  {"type": "delta",      "metric": "liked",     "threshold": 100},
+  {"type": "cumulative", "metric": "liked",     "threshold": 10000},
+  {"type": "percent",    "metric": "comment",   "threshold_pct": 50, "window_hours": 24}
+]`}
+                    value={form.alert_rules || ""}
+                    onValueChange={(v) => set("alert_rules", v)}
+                    minRows={6} className="font-mono text-xs"
+                  />
                 </div>
               </AccordionItem>
             </Accordion>

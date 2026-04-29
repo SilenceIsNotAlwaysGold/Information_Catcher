@@ -31,6 +31,7 @@ class UpdateGroupRequest(BaseModel):
     template_likes: Optional[str] = None
     template_collects: Optional[str] = None
     template_comments: Optional[str] = None
+    alert_rules: Optional[str] = None  # JSON array string
 
 
 class CreatePromptRequest(BaseModel):
