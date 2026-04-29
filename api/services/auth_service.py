@@ -89,6 +89,8 @@ def init_user_db():
     # 多租户 webhook：每个用户独立配置自己的推送渠道
     _ensure_column(cursor, "users", "feishu_webhook_url", "TEXT DEFAULT ''")
     _ensure_column(cursor, "users", "wecom_webhook_url",  "TEXT DEFAULT ''")
+    # 配额：监控帖子上限（trial=50, team=500, enterprise=10000；admin/老用户走默认 200）
+    _ensure_column(cursor, "users", "max_monitor_posts", "INTEGER DEFAULT 200")
 
     # email 唯一索引（NULL 允许多个）
     cursor.execute(
@@ -260,7 +262,8 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
     cursor.execute(
         "SELECT id, username, email, is_active, plan, trial_ends_at, role, "
         "       COALESCE(feishu_webhook_url,'') AS feishu_webhook_url, "
-        "       COALESCE(wecom_webhook_url,'')  AS wecom_webhook_url "
+        "       COALESCE(wecom_webhook_url,'')  AS wecom_webhook_url, "
+        "       COALESCE(max_monitor_posts, 200) AS max_monitor_posts "
         "FROM users WHERE id = ?",
         (user_id,)
     )
@@ -278,6 +281,7 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "role": row["role"] or "user",
         "feishu_webhook_url": row["feishu_webhook_url"] or "",
         "wecom_webhook_url":  row["wecom_webhook_url"]  or "",
+        "max_monitor_posts": int(row["max_monitor_posts"] or 200),
     }
 
 
@@ -309,7 +313,8 @@ def list_users() -> list:
     conn = _get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, username, email, is_active, plan, trial_ends_at, role, created_at "
+        "SELECT id, username, email, is_active, plan, trial_ends_at, role, "
+        "       COALESCE(max_monitor_posts, 200) AS max_monitor_posts, created_at "
         "FROM users ORDER BY id DESC"
     )
     rows = cursor.fetchall()
@@ -319,7 +324,7 @@ def list_users() -> list:
 
 def update_user_admin(user_id: int, **fields) -> bool:
     """管理员修改某个用户的 plan、is_active、role 等。"""
-    allowed = {"plan", "is_active", "role", "trial_ends_at"}
+    allowed = {"plan", "is_active", "role", "trial_ends_at", "max_monitor_posts"}
     sets, vals = [], []
     for k, v in fields.items():
         if k in allowed and v is not None:

@@ -51,3 +51,4 @@ class AdminUpdateUserRequest(BaseModel):
     is_active: Optional[bool] = None
     role: Optional[str] = None
     trial_ends_at: Optional[str] = None
+    max_monitor_posts: Optional[int] = None

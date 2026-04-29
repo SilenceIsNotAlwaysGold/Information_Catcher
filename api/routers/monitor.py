@@ -50,6 +50,19 @@ async def add_posts(
     background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user),
 ):
+    # 配额检查（admin 不限）
+    if (current_user.get("role") or "user") != "admin":
+        from ..services import auth_service
+        u = auth_service.get_user_by_id(current_user["id"]) or {}
+        max_posts = int(u.get("max_monitor_posts", 200))
+        existing = await db.get_posts(user_id=current_user["id"])
+        if len(existing) + len([l for l in req.links if l.strip()]) > max_posts:
+            raise HTTPException(
+                status_code=429,
+                detail=f"超出配额：当前 {len(existing)} / 上限 {max_posts}。"
+                       f"联系管理员升级套餐。",
+            )
+
     results = []
     for raw_link in req.links:
         link = raw_link.strip()

@@ -22,6 +22,7 @@ type AdminUser = {
   trial_ends_at: string | null;
   is_active: number;
   created_at: string;
+  max_monitor_posts?: number;
 };
 
 type SharedAccount = {
@@ -330,6 +331,7 @@ export default function AdminPage() {
                   <TableColumn>邮箱 / 用户名</TableColumn>
                   <TableColumn>角色</TableColumn>
                   <TableColumn>套餐</TableColumn>
+                  <TableColumn>帖子配额</TableColumn>
                   <TableColumn>试用到期</TableColumn>
                   <TableColumn>状态</TableColumn>
                   <TableColumn>操作</TableColumn>
@@ -355,6 +357,17 @@ export default function AdminPage() {
                             setUsers((arr) => arr.map((x) => (x.id === u.id ? { ...x, plan: v } : x)))
                           }
                           onBlur={() => updateUser(u.id, { plan: u.plan })}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          size="sm" type="number"
+                          value={String(u.max_monitor_posts ?? 200)}
+                          className="max-w-[90px]"
+                          onValueChange={(v) =>
+                            setUsers((arr) => arr.map((x) => (x.id === u.id ? { ...x, max_monitor_posts: parseInt(v) || 0 } : x)))
+                          }
+                          onBlur={() => updateUser(u.id, { max_monitor_posts: u.max_monitor_posts })}
                         />
                       </TableCell>
                       <TableCell>
