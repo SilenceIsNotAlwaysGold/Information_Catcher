@@ -30,7 +30,7 @@ const baseNavItems: NavItem[] = [
   { key: "xhs-monitor",  href: "/dashboard/monitor",          icon: xhsIcon,                       label: "帖子监控", module: "xhs" },
   { key: "xhs-trending", href: "/dashboard/trending",         icon: <TrendingUp size={18} />,      label: "热门内容", module: "xhs" },
 
-  { key: "douyin",       href: "/dashboard/douyin",           icon: <Music2 size={20} />,          label: "抖音",     module: "douyin", wip: true },
+  { key: "douyin",       href: "/dashboard/douyin",           icon: <Music2 size={20} />,          label: "抖音监控", module: "douyin" },
 
   { key: "mp",           href: "/dashboard/mp",               icon: <Newspaper size={20} />,       label: "公众号",   module: "mp",     wip: true },
 
@@ -77,7 +77,6 @@ export function Sidebar() {
       : pathname === it.href || pathname.startsWith(it.href + "/"))
     .sort((a, b) => b.href.length - a.href.length);
   const activeKey = candidates[0]?.key;
-  const activeModule = candidates[0]?.module;
 
   // 按 module 分桶但保留原序
   const blocks: { module: ModuleId; items: NavItem[] }[] = [];
@@ -98,8 +97,8 @@ export function Sidebar() {
         <ul className="space-y-1 px-2">
           {blocks.map((blk, bi) => {
             const isPlatformGroup = blk.module === "xhs" || blk.module === "douyin" || blk.module === "mp";
-            // 当前 active 在该组里就强制展开（避免用户找不到自己在哪儿）
-            const isOpen = !isPlatformGroup || activeModule === blk.module || !collapsed[blk.module];
+            // 完全由用户控制；折叠后即使当前 active 在该组也收起，仅靠 chevron 视觉反馈
+            const isOpen = !isPlatformGroup || !collapsed[blk.module];
             return (
               <div key={bi} className="mb-1">
                 {isPlatformGroup && (

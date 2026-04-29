@@ -32,9 +32,12 @@ router = APIRouter(prefix="/monitor", tags=["监控"])
 
 
 def _scope_uid(current_user: dict) -> Optional[int]:
-    """admin 看全局（返回 None 不过滤）；普通用户只能看到自己的数据。"""
-    if (current_user.get("role") or "user") == "admin":
-        return None
+    """所有用户（含 admin）在业务页面只看自己的数据。
+
+    admin 想看全平台数据要去 /dashboard/admin，那里有专门的 admin 接口
+    （/auth/admin/users、/monitor/proxy-forwarders 等），不走 _scope_uid。
+    这样 admin 就是平台超管，但他/她在监控/告警等业务页面只是普通租户。
+    """
     return current_user["id"]
 
 
@@ -90,8 +93,13 @@ async def add_posts(
 
 
 @router.get("/posts", summary="获取监控列表")
-async def list_posts(current_user: dict = Depends(get_current_user)):
-    return {"posts": await db.get_posts(user_id=_scope_uid(current_user))}
+async def list_posts(
+    platform: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    return {"posts": await db.get_posts(
+        user_id=_scope_uid(current_user), platform=platform,
+    )}
 
 
 @router.delete("/posts/{note_id}", summary="删除监控帖子")
@@ -174,8 +182,14 @@ async def remove_alert(alert_id: int, current_user: dict = Depends(get_current_u
 # ── Accounts ─────────────────────────────────────────────────────────────────
 
 @router.get("/accounts", summary="账号列表")
-async def list_accounts(current_user: dict = Depends(get_current_user)):
-    return {"accounts": await db.get_accounts(user_id=_scope_uid(current_user))}
+async def list_accounts(
+    all: bool = False,
+    current_user: dict = Depends(get_current_user),
+):
+    """普通用户：自己 + 共享池。admin + ?all=true：全平台所有账号（用于 /dashboard/admin）。"""
+    is_admin = (current_user.get("role") or "user") == "admin"
+    user_id = None if (is_admin and all) else current_user["id"]
+    return {"accounts": await db.get_accounts(user_id=user_id)}
 
 
 @router.post("/accounts", summary="添加账号")

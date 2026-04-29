@@ -86,7 +86,8 @@ export default function AdminPage() {
     try {
       const [u, a, s] = await Promise.all([
         fetch(API("/auth/admin/users"), { headers }).then((r) => r.json()),
-        fetch(API("/monitor/accounts"), { headers }).then((r) => r.json()),
+        // admin 视角拿全平台账号（含其他租户拥有的、共享池的）
+        fetch(API("/monitor/accounts?all=true"), { headers }).then((r) => r.json()),
         fetch(API("/monitor/settings"), { headers }).then((r) => r.json()),
       ]);
       setUsers(u.users ?? []);

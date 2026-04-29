@@ -716,7 +716,10 @@ async def add_post(
         return cur.lastrowid
 
 
-async def get_posts(user_id: Optional[int] = None) -> List[Dict]:
+async def get_posts(
+    user_id: Optional[int] = None,
+    platform: Optional[str] = None,
+) -> List[Dict]:
     sql = """
         SELECT p.*,
                a.name  AS account_name,
@@ -738,6 +741,9 @@ async def get_posts(user_id: Optional[int] = None) -> List[Dict]:
     if user_id is not None:
         sql += " AND p.user_id = ?"
         params.append(user_id)
+    if platform:
+        sql += " AND p.platform = ?"
+        params.append(platform)
     sql += " ORDER BY p.created_at DESC"
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
