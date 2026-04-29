@@ -32,7 +32,7 @@ const baseNavItems: NavItem[] = [
 
   { key: "douyin",       href: "/dashboard/douyin",           icon: <Music2 size={20} />,          label: "抖音监控", module: "douyin" },
 
-  { key: "mp",           href: "/dashboard/mp",               icon: <Newspaper size={20} />,       label: "公众号",   module: "mp",     wip: true },
+  { key: "mp",           href: "/dashboard/mp",               icon: <Newspaper size={20} />,       label: "公众号文章", module: "mp" },
 
   { key: "import",       href: "/dashboard/import",           icon: <Upload size={20} />,          label: "数据导入", module: "common" },
   { key: "settings",     href: "/dashboard/monitor/settings", icon: <Settings size={20} />,        label: "设置",     module: "common" },

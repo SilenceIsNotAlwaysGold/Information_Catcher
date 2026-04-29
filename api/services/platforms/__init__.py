@@ -12,17 +12,19 @@ from typing import Dict, Optional
 from .base import Platform
 from .xhs import XHSPlatform
 from .douyin import DouyinPlatform
+from .mp import MpPlatform
 
 
 # 单例注册表：name → Platform 实例
 _REGISTRY: Dict[str, Platform] = {
     XHSPlatform.name: XHSPlatform(),
     DouyinPlatform.name: DouyinPlatform(),
+    MpPlatform.name: MpPlatform(),
 }
 
 
 # URL 自动识别时的尝试顺序
-_DETECT_ORDER = [XHSPlatform, DouyinPlatform]
+_DETECT_ORDER = [XHSPlatform, DouyinPlatform, MpPlatform]
 
 
 def get_platform(name: str) -> Optional[Platform]:
