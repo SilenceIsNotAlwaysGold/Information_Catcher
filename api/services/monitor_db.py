@@ -323,6 +323,9 @@ async def _migrate(db):
     await db.execute(
         "UPDATE monitor_posts SET platform='xhs' WHERE platform IS NULL OR platform=''"
     )
+    # AI 摘要（公众号长文 / 抖音视频文案/小红书干货笔记 都能用）
+    await _ensure_column(db, "monitor_posts", "summary", "TEXT DEFAULT ''")
+    await _ensure_column(db, "monitor_posts", "summary_at", "TEXT")
     # New: custom monitor groups. group_id references monitor_groups.id.
     await _ensure_column(db, "monitor_posts", "group_id", "INTEGER")
     await _seed_default_groups(db)
@@ -823,6 +826,38 @@ async def save_snapshot(
             "INSERT INTO monitor_snapshots (note_id,liked_count,collected_count,comment_count,share_count) VALUES (?,?,?,?,?)",
             (note_id, liked_count, collected_count, comment_count, share_count),
         )
+        await db.commit()
+
+
+async def get_post_by_note_id(note_id: str, user_id: Optional[int] = None) -> Optional[Dict]:
+    """按 note_id（按 user_id 隔离）拿单条 active post 的所有字段。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        sql = "SELECT * FROM monitor_posts WHERE note_id=? AND is_active=1"
+        params: list = [note_id]
+        if user_id is not None:
+            sql += " AND user_id=?"
+            params.append(user_id)
+        async with db.execute(sql, params) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def save_post_summary(note_id: str, summary: str, user_id: Optional[int] = None) -> None:
+    """更新某帖子的 AI 摘要。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        if user_id is not None:
+            await db.execute(
+                "UPDATE monitor_posts SET summary=?, summary_at=datetime('now','localtime') "
+                "WHERE note_id=? AND user_id=?",
+                (summary, note_id, user_id),
+            )
+        else:
+            await db.execute(
+                "UPDATE monitor_posts SET summary=?, summary_at=datetime('now','localtime') "
+                "WHERE note_id=?",
+                (summary, note_id),
+            )
         await db.commit()
 
 

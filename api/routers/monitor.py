@@ -115,6 +115,65 @@ async def cleanup_dead_posts(current_user: dict = Depends(get_current_user)):
     return {"ok": True, "cleaned": n}
 
 
+_DEFAULT_SUMMARY_PROMPT = (
+    "你是一位精通中文阅读的助手。请用 200-300 字总结下面这篇文章的核心观点、关键论据和结论，"
+    "保留可执行建议或干货金句，去掉客套和软广。直接输出摘要正文，不要分段标题。\n\n"
+    "原文：\n{content}"
+)
+
+
+@router.post("/posts/{note_id}/summarize", summary="为帖子生成 AI 摘要")
+async def summarize_post(note_id: str, current_user: dict = Depends(get_current_user)):
+    """给一条 active post 生成 AI 摘要。
+
+    流程：
+      1. 按 (note_id, user_id) 取 post
+      2. 走对应平台的 fetch_detail 拿 desc/正文
+      3. 调用全局 AI 配置生成摘要
+      4. 写入 monitor_posts.summary
+    """
+    post = await db.get_post_by_note_id(note_id, user_id=_scope_uid(current_user))
+    if not post:
+        raise HTTPException(status_code=404, detail="帖子不存在或已删除")
+
+    plat = platform_registry.get_platform(post.get("platform") or "xhs")
+    if not plat:
+        raise HTTPException(status_code=400, detail=f"未知平台：{post.get('platform')}")
+
+    # 实时拉详情拿正文（avoid 加 body 列）
+    detail_post = {
+        "post_id": note_id, "note_id": note_id,
+        "url": post.get("note_url"),
+        "xsec_token": post.get("xsec_token", ""),
+        "xsec_source": post.get("xsec_source", "app_share"),
+    }
+    metrics, status = await plat.fetch_detail(detail_post, account=None)
+    if not metrics:
+        raise HTTPException(status_code=502, detail=f"无法抓取正文：{status}")
+
+    body = (metrics.get("desc") or "").strip()
+    if len(body) < 50:
+        raise HTTPException(status_code=400, detail="正文太短，无需摘要")
+
+    settings = await db.get_all_settings()
+    base_url = settings.get("ai_base_url", "")
+    api_key = settings.get("ai_api_key", "")
+    model = settings.get("ai_model", "gpt-4o-mini")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="平台未配置 AI Key（需要 admin 在后台设置）")
+
+    try:
+        summary = await ai_rewriter.rewrite_content(
+            base_url=base_url, api_key=api_key, model=model,
+            prompt_template=_DEFAULT_SUMMARY_PROMPT, content=body,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI 调用失败：{e}")
+
+    await db.save_post_summary(note_id, summary, user_id=_scope_uid(current_user))
+    return {"ok": True, "summary": summary, "fetch_status": status}
+
+
 @router.get("/posts/{note_id}/history", summary="帖子历史数据")
 async def post_history(
     note_id: str, limit: int = 100, _: dict = Depends(get_current_user)

@@ -6,7 +6,7 @@ import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure, Tooltip,
 } from "@nextui-org/react";
-import { Plus, RefreshCw, Trash2, Newspaper } from "lucide-react";
+import { Plus, RefreshCw, Trash2, Newspaper, Sparkles, ChevronDown } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 
 const API = (path: string) => `/api/monitor${path}`;
@@ -23,6 +23,8 @@ type Post = {
   last_fetch_status?: string;
   fail_count?: number;
   platform: string;
+  summary?: string | null;
+  summary_at?: string | null;
 };
 
 export default function MpPage() {
@@ -35,6 +37,37 @@ export default function MpPage() {
   const [checking, setChecking] = useState(false);
   const [results, setResults] = useState<{ link: string; ok: boolean; reason?: string }[]>([]);
   const { isOpen, onOpen, onClose } = useDisclosure();
+  const [summarizingId, setSummarizingId] = useState<string | null>(null);
+  const [expandedSummary, setExpandedSummary] = useState<Set<string>>(new Set());
+
+  const handleSummarize = async (note_id: string) => {
+    setSummarizingId(note_id);
+    try {
+      const r = await fetch(API(`/posts/${note_id}/summarize`), { method: "POST", headers });
+      if (!r.ok) {
+        let msg = `HTTP ${r.status}`;
+        try { const j = await r.json(); msg = j.detail || msg; } catch {}
+        alert(`摘要失败：${msg}`);
+        return;
+      }
+      await load();
+      setExpandedSummary((prev) => {
+        const next = new Set(prev);
+        next.add(note_id);
+        return next;
+      });
+    } finally {
+      setSummarizingId(null);
+    }
+  };
+
+  const toggleSummary = (note_id: string) => {
+    setExpandedSummary((prev) => {
+      const next = new Set(prev);
+      if (next.has(note_id)) next.delete(note_id); else next.add(note_id);
+      return next;
+    });
+  };
 
   const load = useCallback(async () => {
     const r = await fetch(API("/posts?platform=mp"), { headers });
@@ -125,35 +158,79 @@ export default function MpPage() {
               <TableColumn>操作</TableColumn>
             </TableHeader>
             <TableBody emptyContent="还没有添加任何公众号文章">
-              {posts.map((p) => (
-                <TableRow key={p.note_id}>
-                  <TableCell>
-                    <div className="flex flex-col">
-                      <a href={p.note_url} target="_blank" rel="noreferrer"
-                        className="text-primary text-sm truncate max-w-md hover:underline">
-                        {p.title || p.note_id}
-                      </a>
-                      <span className="text-xs text-default-400 truncate max-w-md">
-                        {p.note_id}
+              {posts.flatMap((p) => {
+                const hasSummary = !!(p.summary && p.summary.length > 0);
+                const expanded = expandedSummary.has(p.note_id);
+                const rows = [
+                  <TableRow key={p.note_id}>
+                    <TableCell>
+                      <div className="flex flex-col">
+                        <div className="flex items-center gap-2">
+                          <a href={p.note_url} target="_blank" rel="noreferrer"
+                            className="text-primary text-sm truncate max-w-md hover:underline">
+                            {p.title || p.note_id}
+                          </a>
+                          {hasSummary && (
+                            <Tooltip content={expanded ? "收起摘要" : "展开摘要"}>
+                              <Button isIconOnly size="sm" variant="light"
+                                onPress={() => toggleSummary(p.note_id)}>
+                                <ChevronDown size={14}
+                                  className={`transition-transform ${expanded ? "rotate-180" : ""}`} />
+                              </Button>
+                            </Tooltip>
+                          )}
+                        </div>
+                        <span className="text-xs text-default-400 truncate max-w-md">
+                          {p.note_id}
+                        </span>
+                      </div>
+                    </TableCell>
+                    <TableCell>{statusChip(p)}</TableCell>
+                    <TableCell>
+                      <span className="text-xs text-default-400">
+                        {p.checked_at ? p.checked_at.slice(0, 16) : "待抓取"}
                       </span>
-                    </div>
-                  </TableCell>
-                  <TableCell>{statusChip(p)}</TableCell>
-                  <TableCell>
-                    <span className="text-xs text-default-400">
-                      {p.checked_at ? p.checked_at.slice(0, 16) : "待抓取"}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <Tooltip content="删除" color="danger">
-                      <Button isIconOnly size="sm" variant="light" color="danger"
-                        onPress={() => handleDelete(p.note_id)}>
-                        <Trash2 size={15} />
-                      </Button>
-                    </Tooltip>
-                  </TableCell>
-                </TableRow>
-              ))}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex gap-1">
+                        <Tooltip content={hasSummary ? "重新生成摘要" : "AI 生成摘要"}>
+                          <Button isIconOnly size="sm" variant="light"
+                            isLoading={summarizingId === p.note_id}
+                            onPress={() => handleSummarize(p.note_id)}>
+                            <Sparkles size={15} className={hasSummary ? "text-primary" : ""} />
+                          </Button>
+                        </Tooltip>
+                        <Tooltip content="删除" color="danger">
+                          <Button isIconOnly size="sm" variant="light" color="danger"
+                            onPress={() => handleDelete(p.note_id)}>
+                            <Trash2 size={15} />
+                          </Button>
+                        </Tooltip>
+                      </div>
+                    </TableCell>
+                  </TableRow>,
+                ];
+                if (hasSummary && expanded) {
+                  rows.push(
+                    <TableRow key={`${p.note_id}-summary`}>
+                      <TableCell colSpan={4} className="bg-default-50">
+                        <div className="flex items-start gap-2 py-2">
+                          <Sparkles size={14} className="text-primary mt-1 shrink-0" />
+                          <div className="flex-1">
+                            <p className="text-xs text-default-400 mb-1">
+                              AI 摘要 · {p.summary_at?.slice(0, 16) || ""}
+                            </p>
+                            <p className="text-sm text-default-700 whitespace-pre-wrap">
+                              {p.summary}
+                            </p>
+                          </div>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                }
+                return rows;
+              })}
             </TableBody>
           </Table>
         </CardBody>
