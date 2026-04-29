@@ -92,40 +92,48 @@ async def _resolve_short_link(short_url: str) -> Optional[str]:
     return _extract_aweme_id_from_url(final)
 
 
-def _parse_render_data(html: str) -> Optional[Dict[str, Any]]:
-    """从 HTML 抠出 RENDER_DATA 并解 JSON。"""
-    m = re.search(
-        r'<script[^>]*id="RENDER_DATA"[^>]*>([^<]+)</script>',
-        html,
-    )
+def _parse_router_data(html: str) -> Optional[Dict[str, Any]]:
+    """从 HTML 抠出 window._ROUTER_DATA = {...} 并解 JSON。
+
+    注意：HTML 里 `_ROUTER_DATA = ...` 后面接的是 JS 代码而不是干净 JSON 结尾，
+    必须用 raw_decode 容忍剩余字符。
+    """
+    m = re.search(r'_ROUTER_DATA\s*=\s*(\{.+)', html, re.DOTALL)
     if not m:
         return None
+    raw = m.group(1)
     try:
-        return json.loads(unquote(m.group(1)))
+        decoder = json.JSONDecoder()
+        data, _end = decoder.raw_decode(raw)
+        return data
     except Exception as e:
-        logger.warning(f"[douyin] RENDER_DATA parse fail: {e}")
+        logger.warning(f"[douyin] _ROUTER_DATA parse fail: {e}")
         return None
 
 
 def _find_aweme_detail(data: Dict[str, Any], aweme_id: str) -> Optional[Dict[str, Any]]:
-    """RENDER_DATA 顶层是 {idx: {...aweme: {detail: {...}}}}，遍历找出 detail。"""
-    for v in (data or {}).values():
-        if not isinstance(v, dict):
-            continue
-        aw = v.get("aweme")
-        if not isinstance(aw, dict):
-            continue
-        detail = aw.get("detail") or aw.get("detailItem") or {}
-        if isinstance(detail, dict) and detail.get("awemeId") == aweme_id:
-            return detail
-        # 部分版本字段名 aweme_id
-        if isinstance(detail, dict) and detail.get("aweme_id") == aweme_id:
-            return detail
-        if isinstance(detail, dict) and detail.get("itemId") == aweme_id:
-            return detail
-        # 兜底：返回第一个看起来像 detail 的对象
-        if isinstance(detail, dict) and (detail.get("desc") or detail.get("video")):
-            return detail
+    """_ROUTER_DATA → loaderData → "video_(id)/page" → videoInfoRes → item_list[0]"""
+    try:
+        loader = (data or {}).get("loaderData") or {}
+    except AttributeError:
+        return None
+    # key 名带括号：'video_(id)/page'，先精确取，没有就遍历
+    page = loader.get("video_(id)/page")
+    if not isinstance(page, dict):
+        for k, v in loader.items():
+            if isinstance(v, dict) and "videoInfoRes" in v:
+                page = v
+                break
+    if not isinstance(page, dict):
+        return None
+    info = page.get("videoInfoRes") or {}
+    items = info.get("item_list") if isinstance(info, dict) else None
+    if not items or not isinstance(items, list):
+        return None
+    # item_list 通常只有 1 条；id 不一致也接受（避免老缓存）
+    for item in items:
+        if isinstance(item, dict) and (item.get("desc") or item.get("video")):
+            return item
     return None
 
 
@@ -175,58 +183,43 @@ class DouyinPlatform(Platform):
             return None, "deleted"
         if r.status_code != 200:
             return None, "error"
-        body_low = r.text.lower()
-        if ("verify" in body_low and "captcha" in body_low) or ("验证码" in r.text):
+        # 真实验证墙才算 login_required（avoid SDK 脚本里的 verify/captcha 字符串误伤）
+        if "安全验证" in r.text or "滑块验证" in r.text or "captcha-verify-image" in r.text:
             return None, "login_required"
-        data = _parse_render_data(r.text)
+        data = _parse_router_data(r.text)
         if not data:
-            logger.warning(f"[douyin] {aid}: 无 RENDER_DATA, head={r.text[:160]!r}")
+            logger.warning(f"[douyin] {aid}: 无 _ROUTER_DATA, head={r.text[:160]!r}")
             return None, "error"
         detail = _find_aweme_detail(data, aid)
         if not detail:
+            logger.warning(f"[douyin] {aid}: _ROUTER_DATA 无 item_list / detail")
             return None, "error"
 
-        stats = detail.get("statistics") or detail.get("stats") or {}
+        stats = detail.get("statistics") or {}
         author = detail.get("author") or {}
         video = detail.get("video") or {}
-        # 视频流 url：play_addr.url_list[0]，部分字段叫 playAddr
-        play = (
-            video.get("play_addr") or video.get("playAddr")
-            or video.get("play") or {}
-        )
+        # 视频流 url：play_addr.url_list[0]
+        play = video.get("play_addr") or {}
         url_list = play.get("url_list") if isinstance(play, dict) else None
-        if not url_list and isinstance(play, dict):
-            url_list = play.get("urlList")
         video_url = url_list[0] if url_list else ""
         # 封面
-        cover = video.get("cover") or video.get("origin_cover") or video.get("originCover") or {}
-        if isinstance(cover, dict):
-            cl = cover.get("url_list") or cover.get("urlList") or []
-            cover_url = cl[0] if cl else ""
-        else:
-            cover_url = ""
+        cover = video.get("cover") or video.get("origin_cover") or {}
+        cl = cover.get("url_list") if isinstance(cover, dict) else None
+        cover_url = cl[0] if cl else ""
 
         title = detail.get("desc") or ""
         return ({
             "title": title[:200],
             "desc": title[:5000],
-            "liked_count": _parse_count(
-                stats.get("digg_count") or stats.get("diggCount")
-            ),
-            "collected_count": _parse_count(
-                stats.get("collect_count") or stats.get("collectCount")
-            ),
-            "comment_count": _parse_count(
-                stats.get("comment_count") or stats.get("commentCount")
-            ),
-            "share_count": _parse_count(
-                stats.get("share_count") or stats.get("shareCount")
-            ),
+            "liked_count": _parse_count(stats.get("digg_count")),
+            "collected_count": _parse_count(stats.get("collect_count")),
+            "comment_count": _parse_count(stats.get("comment_count")),
+            "share_count": _parse_count(stats.get("share_count")),
             "cover_url": cover_url,
             "images": [],
             "video_url": video_url,
             "note_type": "video",
-            "author": author.get("nickname") or author.get("name") or "",
+            "author": author.get("nickname") or "",
         }, "ok")
 
     async def search_trending(
