@@ -186,8 +186,6 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
 async def run_monitor():
     """Periodic job: check all active monitored posts."""
     settings = await db.get_all_settings()
-    wecom_url  = settings.get("webhook_url", "")
-    feishu_url = settings.get("feishu_webhook_url", "")
 
     posts = await db.get_active_posts()
     logger.info(f"[monitor] checking {len(posts)} posts")
@@ -199,6 +197,19 @@ async def run_monitor():
         if aid and aid not in account_cache:
             acc = await db.get_account(aid)
             account_cache[aid] = acc  # may be None if deleted
+
+    # 多租户 webhook：按 post.user_id 查用户自己的 webhook
+    from . import auth_service
+    webhook_cache: dict = {}
+    def _user_webhooks(uid):
+        if uid is None:
+            return ("", "")
+        if uid in webhook_cache:
+            return webhook_cache[uid]
+        u = auth_service.get_user_by_id(uid) or {}
+        wh = (u.get("wecom_webhook_url", ""), u.get("feishu_webhook_url", ""))
+        webhook_cache[uid] = wh
+        return wh
 
     # 帖子抓取的账号策略（基于调研结论简化）：
     #   - 帖子绑定了具体 account_id（"我的帖子"组）→ 用那个账号
@@ -215,6 +226,7 @@ async def run_monitor():
             aid = post.get("account_id")
             account = account_cache.get(aid) if aid else None
             post["_account"] = account
+            wecom_url, feishu_url = _user_webhooks(post.get("user_id"))
             await _check_post(post, settings, wecom_url, feishu_url)
         except Exception as e:
             logger.error(f"[monitor] error on {post['note_id']}: {e}")
@@ -245,41 +257,43 @@ async def run_cookie_health_check():
 
 
 async def run_daily_report():
-    """Daily report job：按 group 拆分推送。
+    """Daily report job：按 user × group 拆分推送（多租户隔离）。
 
-    每个 monitor_group 的 posts 单独形成一份日报，发到该 group 的 webhook；
-    group 没配 webhook 时回退到全局 settings.feishu_webhook_url / webhook_url。
+    每个 (user, group) 单独一份日报：
+      - webhook 优先级：group 自己配的 > 该用户在 users 表的 webhook
+      - 都没配就跳过
     """
     settings = await db.get_all_settings()
     if settings.get("daily_report_enabled", "1") != "1":
         return
 
-    global_wecom  = settings.get("webhook_url", "")
-    global_feishu = settings.get("feishu_webhook_url", "")
-
-    # admin 视角拿所有 posts（含 group_id 与 group_name），不传 user_id 不过滤租户
     all_posts = await db.get_posts()
     if not all_posts:
         return
 
-    # 按 group_id 分桶；group_id 缺失（极少）的归到 "未分组"
-    by_group: dict = {}
+    # 按 (user_id, group_id) 分桶
+    by_uid_gid: dict = {}
     for p in all_posts:
-        gid = p.get("group_id")
-        by_group.setdefault(gid, []).append(p)
+        key = (p.get("user_id"), p.get("group_id"))
+        by_uid_gid.setdefault(key, []).append(p)
 
-    # 拿所有 group 的配置
     groups = await db.list_groups()
     group_map = {g["id"]: g for g in groups}
+    from . import auth_service
+    user_cache: dict = {}
 
     sent = 0
-    for gid, posts in by_group.items():
+    skipped = 0
+    for (uid, gid), posts in by_uid_gid.items():
         group = group_map.get(gid) if gid else None
-        # 选择 webhook：group 自己有 → 用 group 的；否则用全局
-        wecom = (group.get("wecom_webhook_url") if group else "") or global_wecom
-        feishu = (group.get("feishu_webhook_url") if group else "") or global_feishu
+        # 用户自己的 webhook
+        if uid is not None and uid not in user_cache:
+            user_cache[uid] = auth_service.get_user_by_id(uid) or {}
+        u = user_cache.get(uid) or {}
+        wecom = (group.get("wecom_webhook_url") if group else "") or u.get("wecom_webhook_url", "")
+        feishu = (group.get("feishu_webhook_url") if group else "") or u.get("feishu_webhook_url", "")
         if not wecom and not feishu:
-            logger.info(f"[daily_report] 跳过 group={gid}（{len(posts)} posts，无 webhook）")
+            skipped += 1
             continue
 
         prefix = (group.get("message_prefix") if group else "") or ""
@@ -294,7 +308,7 @@ async def run_daily_report():
         )
         sent += 1
 
-    logger.info(f"[daily_report] 共发送 {sent} 份日报（按 group 拆分）")
+    logger.info(f"[daily_report] 共发送 {sent} 份日报（按 user × group 拆分），跳过 {skipped} 桶（无 webhook）")
 
 
 def _is_usable(acc: dict) -> bool:

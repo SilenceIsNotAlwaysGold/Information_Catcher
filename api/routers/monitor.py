@@ -322,11 +322,21 @@ _ADMIN_ONLY_SETTING_KEYS = {
 
 @router.get("/settings", summary="获取设置")
 async def get_settings(current_user: dict = Depends(get_current_user)):
+    """settings 接口现在混合返回：
+       - 全局 monitor_settings（admin only 字段对普通用户屏蔽）
+       - 当前用户自己的 webhook（feishu_webhook_url / webhook_url），覆盖全局值
+    """
     all_settings = await db.get_all_settings()
-    if (current_user.get("role") or "user") == "admin":
-        return all_settings
-    # 普通用户：屏蔽全局配置字段，但保留 ai_rewrite_enabled（用户自己的开关）
-    return {k: v for k, v in all_settings.items() if k not in _ADMIN_ONLY_SETTING_KEYS}
+    is_admin = (current_user.get("role") or "user") == "admin"
+    base = all_settings if is_admin else {
+        k: v for k, v in all_settings.items() if k not in _ADMIN_ONLY_SETTING_KEYS
+    }
+    # 用户自己的 webhook 覆盖（多租户隔离）
+    from ..services import auth_service
+    me = auth_service.get_user_by_id(current_user["id"]) or {}
+    base["feishu_webhook_url"] = me.get("feishu_webhook_url", "") or ""
+    base["webhook_url"] = me.get("wecom_webhook_url", "") or ""
+    return base
 
 
 @router.put("/settings", summary="更新设置")
@@ -337,8 +347,17 @@ async def update_settings(
     is_admin = (current_user.get("role") or "user") == "admin"
     bool_val = lambda v: "1" if v else "0"
 
+    # webhook_url / feishu_webhook_url 现在写到 users 表（多租户独立）
+    from ..services import auth_service
+    if req.feishu_webhook_url is not None or req.webhook_url is not None:
+        auth_service.update_user_webhooks(
+            current_user["id"],
+            feishu_webhook_url=req.feishu_webhook_url,
+            wecom_webhook_url=req.webhook_url,
+        )
+
     simple_fields = [
-        "webhook_url", "feishu_webhook_url", "daily_report_time",
+        "daily_report_time",
         "ai_base_url", "ai_api_key", "ai_model", "ai_rewrite_prompt",
         "feishu_app_id", "feishu_app_secret",
         "feishu_bitable_app_token", "feishu_bitable_table_id",

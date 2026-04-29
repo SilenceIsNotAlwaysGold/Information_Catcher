@@ -86,6 +86,9 @@ def init_user_db():
     _ensure_column(cursor, "users", "plan",           "TEXT DEFAULT 'trial'")
     _ensure_column(cursor, "users", "trial_ends_at",  "TEXT")
     _ensure_column(cursor, "users", "role",           "TEXT DEFAULT 'user'")
+    # 多租户 webhook：每个用户独立配置自己的推送渠道
+    _ensure_column(cursor, "users", "feishu_webhook_url", "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "wecom_webhook_url",  "TEXT DEFAULT ''")
 
     # email 唯一索引（NULL 允许多个）
     cursor.execute(
@@ -251,11 +254,13 @@ def verify_token(token: str) -> Optional[dict]:
 
 
 def get_user_by_id(user_id: int) -> Optional[dict]:
-    """根据ID获取用户信息（含 SaaS 字段）"""
+    """根据ID获取用户信息（含 SaaS 字段 + webhook 配置）"""
     conn = _get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, username, email, is_active, plan, trial_ends_at, role "
+        "SELECT id, username, email, is_active, plan, trial_ends_at, role, "
+        "       COALESCE(feishu_webhook_url,'') AS feishu_webhook_url, "
+        "       COALESCE(wecom_webhook_url,'')  AS wecom_webhook_url "
         "FROM users WHERE id = ?",
         (user_id,)
     )
@@ -271,7 +276,32 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "plan": row["plan"] or "trial",
         "trial_ends_at": row["trial_ends_at"],
         "role": row["role"] or "user",
+        "feishu_webhook_url": row["feishu_webhook_url"] or "",
+        "wecom_webhook_url":  row["wecom_webhook_url"]  or "",
     }
+
+
+def update_user_webhooks(
+    user_id: int,
+    feishu_webhook_url: Optional[str] = None,
+    wecom_webhook_url: Optional[str] = None,
+) -> None:
+    """用户更新自己的推送渠道。"""
+    fields, values = [], []
+    if feishu_webhook_url is not None:
+        fields.append("feishu_webhook_url = ?")
+        values.append(feishu_webhook_url)
+    if wecom_webhook_url is not None:
+        fields.append("wecom_webhook_url = ?")
+        values.append(wecom_webhook_url)
+    if not fields:
+        return
+    values.append(user_id)
+    conn = _get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
+    conn.commit()
+    conn.close()
 
 
 def list_users() -> list:
