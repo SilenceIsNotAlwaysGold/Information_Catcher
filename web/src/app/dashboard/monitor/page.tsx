@@ -30,6 +30,7 @@ type Post = {
   last_fetch_status?: string;
   last_fetch_at?: string | null;
   fail_count?: number;
+  platform?: string; // "xhs" / "douyin" / "mp"，老数据为 "xhs"
 };
 
 type Alert = {
@@ -344,7 +345,7 @@ export default function MonitorPage() {
             </Select>
             <Textarea
               label="帖子链接"
-              placeholder={"每行粘贴一个链接，支持：\n- 小红书 App 分享短链（xhslink.com/...）\n- 完整帖子 URL"}
+              placeholder={"每行粘贴一个链接，自动识别平台：\n- 小红书：xhslink.com/... 或 explore/{id}\n- 抖音、公众号开发中"}
               value={links}
               onValueChange={setLinks}
               minRows={5}
@@ -387,3 +388,4 @@ export default function MonitorPage() {
     </div>
   );
 }
+

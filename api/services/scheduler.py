@@ -11,6 +11,7 @@ from . import notifier
 from . import trending_fetcher
 from . import comment_fetcher
 from . import cookie_health
+from . import platforms as platform_registry
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +37,20 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
         )
         account = None
 
-    metrics, fetch_status = await fetcher.fetch_note_metrics(
-        note_id,
-        post["xsec_token"],
-        post.get("xsec_source", "app_share"),
-        cookie=post.get("account_cookie"),
-        account=account,
-    )
+    # 按 platform 路由到对应实现（默认 xhs）
+    plat = platform_registry.get_platform(post.get("platform") or "xhs")
+    if not plat:
+        logger.warning(f"[monitor] {note_id}: 未知平台 {post.get('platform')}")
+        await db.update_post_fetch_status(note_id, "error")
+        return
+    detail_post = {
+        "note_id": note_id,
+        "post_id": note_id,
+        "xsec_token": post.get("xsec_token", ""),
+        "xsec_source": post.get("xsec_source", "app_share"),
+        "account_cookie": post.get("account_cookie"),
+    }
+    metrics, fetch_status = await plat.fetch_detail(detail_post, account=account)
     await db.update_post_fetch_status(note_id, fetch_status)
     if not metrics:
         logger.warning(f"[monitor] failed to fetch {note_id} ({fetch_status})")
@@ -364,10 +372,13 @@ async def run_trending_monitor():
     enrich = settings.get("trending_enrich_desc", "1") == "1"
     enrich_concurrency = int(settings.get("trending_enrich_concurrency", "3") or "3")
 
+    # 当前 trending 仅 XHS。后续接抖音时按 keyword 配置加 platform 字段拆分。
+    xhs_plat = platform_registry.get_platform("xhs")
+
     for idx, keyword in enumerate(keywords):
         account = accounts[idx % len(accounts)]
         try:
-            posts = await trending_fetcher.search_trending_notes(keyword, account, min_likes)
+            posts = await xhs_plat.search_trending(keyword, account, min_likes)
             if account.get("is_shared"):
                 await db.mark_account_used(account["id"])
 

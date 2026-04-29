@@ -318,6 +318,11 @@ async def _migrate(db):
     await _ensure_column(db, "monitor_posts", "last_fetch_at", "TEXT")
     # 连续失败次数：达到阈值后由调度器自动跳过，避免持续打无效请求
     await _ensure_column(db, "monitor_posts", "fail_count", "INTEGER DEFAULT 0")
+    # 平台标识：未来兼容抖音/公众号，老数据补 'xhs'
+    await _ensure_column(db, "monitor_posts", "platform", "TEXT NOT NULL DEFAULT 'xhs'")
+    await db.execute(
+        "UPDATE monitor_posts SET platform='xhs' WHERE platform IS NULL OR platform=''"
+    )
     # New: custom monitor groups. group_id references monitor_groups.id.
     await _ensure_column(db, "monitor_posts", "group_id", "INTEGER")
     await _seed_default_groups(db)
@@ -327,6 +332,10 @@ async def _migrate(db):
     await _ensure_column(db, "trending_posts", "images", "TEXT DEFAULT ''")  # JSON list
     await _ensure_column(db, "trending_posts", "video_url", "TEXT DEFAULT ''")
     await _ensure_column(db, "trending_posts", "note_type", "TEXT DEFAULT 'normal'")
+    await _ensure_column(db, "trending_posts", "platform", "TEXT NOT NULL DEFAULT 'xhs'")
+    await db.execute(
+        "UPDATE trending_posts SET platform='xhs' WHERE platform IS NULL OR platform=''"
+    )
 
     # SaaS multi-tenant: each tenant-owned table gets a user_id column.
     # monitor_settings 保持全局 key-value（管理员维护：AI key、检测间隔等），
@@ -671,14 +680,17 @@ async def add_post(
     post_type: str = "observe",
     group_id: Optional[int] = None,
     user_id: Optional[int] = None,
+    platform: str = "xhs",
 ) -> int:
-    """添加监控帖子。多租户场景下同一 note_id 可被多个用户独立添加。"""
+    """添加监控帖子。多租户场景下同一 note_id 可被多个用户独立添加。
+
+    note_id 字段在不同平台语义不同（xhs note_id / douyin aweme_id / 公众号文章 mid+idx）。
+    """
     async with aiosqlite.connect(DB_PATH) as db:
-        # 先按 (note_id, user_id) 找一条已有的（含 is_active=0 的）
         cur = await db.execute(
             "SELECT id FROM monitor_posts "
-            "WHERE note_id=? AND COALESCE(user_id, 0)=COALESCE(?, 0)",
-            (note_id, user_id),
+            "WHERE note_id=? AND COALESCE(user_id, 0)=COALESCE(?, 0) AND platform=?",
+            (note_id, user_id, platform),
         )
         row = await cur.fetchone()
         if row:
@@ -686,19 +698,19 @@ async def add_post(
             await db.execute(
                 "UPDATE monitor_posts SET title=?, short_url=?, note_url=?, "
                 "xsec_token=?, xsec_source=?, account_id=?, post_type=?, "
-                "group_id=?, is_active=1 WHERE id=?",
+                "group_id=?, platform=?, is_active=1 WHERE id=?",
                 (title, short_url, note_url, xsec_token, xsec_source,
-                 account_id, post_type, group_id, existing_id),
+                 account_id, post_type, group_id, platform, existing_id),
             )
             await db.commit()
             return existing_id
         cur = await db.execute(
             """INSERT INTO monitor_posts
                (note_id, title, short_url, note_url, xsec_token, xsec_source,
-                account_id, post_type, group_id, user_id, is_active)
-               VALUES (?,?,?,?,?,?,?,?,?,?,1)""",
+                account_id, post_type, group_id, user_id, platform, is_active)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,1)""",
             (note_id, title, short_url, note_url, xsec_token, xsec_source,
-             account_id, post_type, group_id, user_id),
+             account_id, post_type, group_id, user_id, platform),
         )
         await db.commit()
         return cur.lastrowid

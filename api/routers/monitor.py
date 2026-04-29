@@ -24,6 +24,7 @@ from ..services import cookie_health
 from ..services import ai_rewriter
 from ..services import feishu_bitable
 from ..services import proxy_forwarder
+from ..services import platforms as platform_registry
 from ..services.account_browser import validate_proxy_url
 from .auth import get_current_user
 
@@ -51,48 +52,37 @@ async def add_posts(
         if not link:
             continue
 
-        # Resolve short link or plain note URL
-        if "xhslink.com" in link or "xiaohongshu.com" not in link:
-            info = await fetcher.resolve_short_link(link)
-        else:
-            # Already a full URL — parse it directly
-            from urllib.parse import urlparse, parse_qs
-            parsed = urlparse(link)
-            params = parse_qs(parsed.query)
-            parts = parsed.path.strip("/").split("/")
-            if len(parts) >= 2 and parts[0] == "explore":
-                info = {
-                    "note_id": parts[1],
-                    "xsec_token": params.get("xsec_token", [""])[0],
-                    # 强制写 app_share：实测任何 source 的 token 都能用 app_share
-                    # 路径匿名访问，pc_feed 偶尔会被风控，统一改写避免兜底
-                    "xsec_source": "app_share",
-                    "note_url": link,
-                }
-            else:
-                info = None
-        if info:
-            # 短链 resolve 出来的 source 也强制改写
-            info["xsec_source"] = "app_share"
+        # 自动识别平台
+        plat = platform_registry.detect_platform(link)
+        if not plat:
+            results.append({
+                "link": link, "ok": False,
+                "reason": "无法识别平台（目前支持小红书；抖音/公众号开发中）",
+            })
+            continue
 
-        if not info or not info.get("note_id"):
+        info = await plat.resolve_url(link)
+        if not info or not info.get("post_id"):
             results.append({"link": link, "ok": False, "reason": "无法解析链接"})
             continue
 
-        note_id = info["note_id"]
         await db.add_post(
-            note_id=note_id,
+            note_id=info["post_id"],
             title="",
             short_url=link,
-            note_url=info["note_url"],
-            xsec_token=info["xsec_token"],
-            xsec_source=info["xsec_source"],
+            note_url=info["url"],
+            xsec_token=info.get("xsec_token", ""),
+            xsec_source=info.get("xsec_source", "app_share"),
             account_id=req.account_id,
             post_type=req.post_type,
             group_id=req.group_id,
             user_id=current_user["id"],
+            platform=plat.name,
         )
-        results.append({"link": link, "ok": True, "note_id": note_id})
+        results.append({
+            "link": link, "ok": True,
+            "note_id": info["post_id"], "platform": plat.name,
+        })
 
     # Immediately do a first snapshot in the background
     background_tasks.add_task(sched.run_monitor)
