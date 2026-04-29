@@ -6,7 +6,7 @@ import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure, Tooltip,
 } from "@nextui-org/react";
-import { Plus, RefreshCw, Trash2, Newspaper, Sparkles, ChevronDown, Search } from "lucide-react";
+import { Plus, RefreshCw, Trash2, Newspaper, Sparkles, ChevronDown, Search, Wand2, Copy } from "lucide-react";
 import { Input } from "@nextui-org/react";
 import { useAuth } from "@/contexts/AuthContext";
 
@@ -51,6 +51,37 @@ export default function MpPage() {
   const [summarizingId, setSummarizingId] = useState<string | null>(null);
   const [expandedSummary, setExpandedSummary] = useState<Set<string>>(new Set());
   const [searchQ, setSearchQ] = useState("");
+
+  // 跨平台改写
+  const crossModal = useDisclosure();
+  const [crossNoteId, setCrossNoteId] = useState<string | null>(null);
+  const [crossLoading, setCrossLoading] = useState(false);
+  const [crossVariants, setCrossVariants] = useState<string[]>([]);
+  const [crossError, setCrossError] = useState("");
+
+  const openCrossRewrite = async (note_id: string) => {
+    setCrossNoteId(note_id);
+    setCrossVariants([]);
+    setCrossError("");
+    setCrossLoading(true);
+    crossModal.onOpen();
+    try {
+      const r = await fetch(
+        API(`/posts/${note_id}/rewrite-cross-platform?target=xhs&variants=3`),
+        { method: "POST", headers },
+      );
+      if (!r.ok) {
+        let msg = "改写失败";
+        try { const j = await r.json(); msg = j.detail || msg; } catch {}
+        setCrossError(msg);
+        return;
+      }
+      const d = await r.json();
+      setCrossVariants(d.variants || []);
+    } finally {
+      setCrossLoading(false);
+    }
+  };
 
   // 客户端过滤（数据量小直接前端筛）
   const filteredPosts = (() => {
@@ -237,6 +268,12 @@ export default function MpPage() {
                             <Sparkles size={15} className={hasSummary ? "text-primary" : ""} />
                           </Button>
                         </Tooltip>
+                        <Tooltip content="改写为小红书风（生成 3 个变体）">
+                          <Button isIconOnly size="sm" variant="light"
+                            onPress={() => openCrossRewrite(p.note_id)}>
+                            <Wand2 size={15} />
+                          </Button>
+                        </Tooltip>
                         <Tooltip content="删除" color="danger">
                           <Button isIconOnly size="sm" variant="light" color="danger"
                             onPress={() => handleDelete(p.note_id)}>
@@ -295,6 +332,53 @@ export default function MpPage() {
           <ModalFooter>
             <Button variant="light" onPress={onClose}>取消</Button>
             <Button color="primary" onPress={handleAdd} isLoading={adding}>添加</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* 跨平台改写 modal */}
+      <Modal isOpen={crossModal.isOpen} onClose={crossModal.onClose} size="2xl" scrollBehavior="inside">
+        <ModalContent>
+          <ModalHeader className="flex items-center gap-2">
+            <Wand2 size={18} className="text-primary" />
+            改写为小红书风
+            <Chip size="sm" variant="flat">3 个变体</Chip>
+          </ModalHeader>
+          <ModalBody className="space-y-3">
+            {crossLoading && (
+              <div className="text-center py-8 text-default-500">
+                AI 改写中…（公众号长文，请稍候 10-30s）
+              </div>
+            )}
+            {crossError && (
+              <p className="text-sm text-danger">{crossError}</p>
+            )}
+            {!crossLoading && crossVariants.length > 0 && (
+              <>
+                <p className="text-xs text-default-500">
+                  生成了 {crossVariants.length} 个不同温度的变体，挑一个复制使用：
+                </p>
+                {crossVariants.map((v, i) => (
+                  <div key={i} className="rounded-lg p-3 border bg-default-50 border-default-200 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-medium text-default-500">变体 #{i + 1}</span>
+                      <Tooltip content="复制到剪贴板">
+                        <Button isIconOnly size="sm" variant="flat"
+                          onPress={async () => {
+                            await navigator.clipboard.writeText(v);
+                          }}>
+                          <Copy size={14} />
+                        </Button>
+                      </Tooltip>
+                    </div>
+                    <pre className="whitespace-pre-wrap text-sm text-default-700 font-sans">{v}</pre>
+                  </div>
+                ))}
+              </>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="light" onPress={crossModal.onClose}>关闭</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>

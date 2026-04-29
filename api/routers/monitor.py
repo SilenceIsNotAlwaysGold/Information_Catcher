@@ -167,6 +167,97 @@ _DEFAULT_SUMMARY_PROMPT = (
     "原文：\n{content}"
 )
 
+# 跨平台改写：源平台 → 目标平台。key = target，value = prompt 模板
+_CROSS_PLATFORM_PROMPTS = {
+    "xhs": (
+        "你是一位精通小红书爆款文案的创作者。请把下面这段公众号文章/抖音文案改写为"
+        "**一条小红书笔记**，要求：\n"
+        "1. 标题 18 字内，带数字 / 钩子句 / 反问，吸引点击\n"
+        "2. 正文 200-400 字，分 3-5 段，每段开头加 emoji，关键短语加粗（用 **）\n"
+        "3. 结尾给 3-5 个话题标签 #xxx#，与正文相关\n"
+        "4. 保留原文核心观点和事实，**去掉营销话术、广告、跳转链接**\n"
+        "5. 不要加任何 \"以下是改写\" 之类元语言\n\n"
+        "原文：\n{content}"
+    ),
+    "douyin": (
+        "你是一位精通抖音爆款短视频文案的创作者。请把下面这段文章改写为"
+        "**一条 30 秒抖音视频的口播脚本**，要求：\n"
+        "1. 开头 3 秒抓眼球（数字 / 反差 / 提问）\n"
+        "2. 正文按口播节奏分行，每行 15-25 字\n"
+        "3. 结尾留钩子（点关注 / 问问题）\n"
+        "4. 保留原文核心观点，**去掉书面语**\n\n"
+        "原文：\n{content}"
+    ),
+}
+
+
+@router.post(
+    "/posts/{note_id}/rewrite-cross-platform",
+    summary="跨平台改写（公众号→小红书 / 抖音）",
+)
+async def cross_platform_rewrite(
+    note_id: str,
+    target: str = "xhs",
+    variants: int = 3,
+    current_user: dict = Depends(get_current_user),
+):
+    """把当前帖子的正文改写为另一个平台的风格。
+
+    流程：实时 fetch_detail 拿正文 → 用对应 target 的 prompt → rewrite_variants 并行生成。
+    不持久化结果，返回数组让前端展示供运营选择。
+    """
+    if target not in _CROSS_PLATFORM_PROMPTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"target 必须是 {list(_CROSS_PLATFORM_PROMPTS.keys())} 之一",
+        )
+
+    post = await db.get_post_by_note_id(note_id, user_id=_scope_uid(current_user))
+    if not post:
+        raise HTTPException(status_code=404, detail="帖子不存在")
+
+    plat = platform_registry.get_platform(post.get("platform") or "xhs")
+    if not plat:
+        raise HTTPException(status_code=400, detail="未知平台")
+
+    metrics, status = await plat.fetch_detail({
+        "post_id": note_id, "note_id": note_id, "url": post.get("note_url"),
+        "xsec_token": post.get("xsec_token", ""),
+        "xsec_source": post.get("xsec_source", "app_share"),
+    }, account=None)
+    if not metrics:
+        raise HTTPException(status_code=502, detail=f"无法抓取正文：{status}")
+
+    body = (metrics.get("desc") or "").strip()
+    if len(body) < 50:
+        raise HTTPException(status_code=400, detail="正文太短，无需改写")
+
+    settings = await db.get_all_settings()
+    if not settings.get("ai_api_key"):
+        raise HTTPException(status_code=400, detail="平台未配置 AI Key")
+
+    n = max(1, min(int(variants or 3), 5))
+    try:
+        result = await ai_rewriter.rewrite_variants(
+            base_url=settings.get("ai_base_url", ""),
+            api_key=settings["ai_api_key"],
+            model=settings.get("ai_model", "gpt-4o-mini"),
+            prompt_template=_CROSS_PLATFORM_PROMPTS[target],
+            content=body,
+            n=n,
+        )
+        if not result:
+            raise RuntimeError("所有变体失败")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI 调用失败：{e}")
+
+    return {
+        "ok": True,
+        "source_platform": post.get("platform"),
+        "target_platform": target,
+        "variants": result,
+    }
+
 
 @router.post("/posts/{note_id}/summarize", summary="为帖子生成 AI 摘要")
 async def summarize_post(note_id: str, current_user: dict = Depends(get_current_user)):
