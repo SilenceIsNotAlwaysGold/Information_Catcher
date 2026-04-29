@@ -48,6 +48,10 @@ class RewriteTrendingRequest(BaseModel):
     prompt_text: Optional[str] = None  # or supply ad-hoc prompt text
 
 
+class LockVariantRequest(BaseModel):
+    variant: str
+
+
 class SyncBitableRequest(BaseModel):
     note_ids: List[str]
 

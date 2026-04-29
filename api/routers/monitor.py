@@ -12,6 +12,7 @@ from ..schemas.monitor import (
     CreatePromptRequest,
     UpdatePromptRequest,
     RewriteTrendingRequest,
+    LockVariantRequest,
     SyncBitableRequest,
     CreateGroupRequest,
     UpdateGroupRequest,
@@ -728,12 +729,19 @@ async def fetch_trending_content(
     }
 
 
-@router.post("/trending/posts/{note_id}/rewrite", summary="改写指定热门帖子")
+@router.post("/trending/posts/{note_id}/rewrite", summary="改写指定热门帖子（支持多变体）")
 async def rewrite_trending_post(
     note_id: str,
     req: RewriteTrendingRequest,
+    variants: int = 1,
     _: dict = Depends(get_current_user),
 ):
+    """variants=1 → 维持现有行为；variants>1 → 并行生成 N 个不同温度的变体。
+
+    返回：
+      {"ok": True, "rewritten": str, "variants": [str, ...]}
+      rewritten 永远是 variants[0]，写入 trending_posts.rewritten_text 用于飞书入库。
+    """
     post = await db.get_trending_post(note_id)
     if not post:
         raise HTTPException(status_code=404, detail="帖子不存在")
@@ -742,7 +750,6 @@ async def rewrite_trending_post(
     if not text:
         raise HTTPException(status_code=400, detail="该帖子没有文本可改写（标题和正文都为空）")
 
-    # Resolve prompt: explicit text > saved prompt id > default
     prompt_template = None
     if req.prompt_text and req.prompt_text.strip():
         prompt_template = req.prompt_text
@@ -764,16 +771,42 @@ async def rewrite_trending_post(
     if not ai_api_key:
         raise HTTPException(status_code=400, detail="未配置 AI API Key")
 
+    n = max(1, min(int(variants or 1), 5))
     try:
-        rewritten = await ai_rewriter.rewrite_content(
-            ai_base_url, ai_api_key, ai_model, prompt_template, text
-        )
+        if n == 1:
+            rewritten = await ai_rewriter.rewrite_content(
+                ai_base_url, ai_api_key, ai_model, prompt_template, text
+            )
+            variants_list = [rewritten]
+        else:
+            variants_list = await ai_rewriter.rewrite_variants(
+                ai_base_url, ai_api_key, ai_model, prompt_template, text, n=n,
+            )
+            if not variants_list:
+                raise RuntimeError("所有变体都失败")
+            rewritten = variants_list[0]
     except Exception as e:
         await db.update_trending_rewrite(note_id, "", "failed")
         raise HTTPException(status_code=500, detail=f"AI 改写失败: {e}")
 
     await db.update_trending_rewrite(note_id, rewritten, "done")
-    return {"ok": True, "rewritten": rewritten}
+    return {"ok": True, "rewritten": rewritten, "variants": variants_list}
+
+
+@router.post("/trending/posts/{note_id}/rewrite/lock", summary="锁定一个变体为最终版本")
+async def lock_rewrite_variant(
+    note_id: str,
+    req: LockVariantRequest,
+    _: dict = Depends(get_current_user),
+):
+    """运营从多变体里挑一个，把它替换 trending_posts.rewritten_text。"""
+    if not req.variant or not req.variant.strip():
+        raise HTTPException(status_code=400, detail="variant 不能为空")
+    post = await db.get_trending_post(note_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="帖子不存在")
+    await db.update_trending_rewrite(note_id, req.variant.strip(), "done")
+    return {"ok": True}
 
 
 @router.post("/trending/sync-bitable", summary="把选中的热门帖子同步到飞书多维表格")

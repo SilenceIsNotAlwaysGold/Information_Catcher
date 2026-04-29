@@ -61,6 +61,9 @@ export default function TrendingPage() {
   const [activePromptId, setActivePromptId] = useState<string>("");
   const [rewriting, setRewriting] = useState(false);
   const [rewritePreview, setRewritePreview] = useState<string>("");
+  const [rewriteVariants, setRewriteVariants] = useState<string[]>([]);
+  const [variantsCount, setVariantsCount] = useState<number>(1);
+  const [lockingIdx, setLockingIdx] = useState<number | null>(null);
   const [fetchingContent, setFetchingContent] = useState(false);
   const [backfilling, setBackfilling] = useState(false);
 
@@ -149,20 +152,44 @@ export default function TrendingPage() {
     if (!active) return;
     setRewriting(true);
     try {
-      const r = await fetch(API(`/trending/posts/${active.note_id}/rewrite`), {
-        method: "POST", headers,
-        body: JSON.stringify({ prompt_id: activePromptId ? parseInt(activePromptId) : null }),
-      });
+      const r = await fetch(
+        API(`/trending/posts/${active.note_id}/rewrite?variants=${variantsCount}`),
+        {
+          method: "POST", headers,
+          body: JSON.stringify({ prompt_id: activePromptId ? parseInt(activePromptId) : null }),
+        },
+      );
       const d = await r.json();
       if (!r.ok) {
         alert(d.detail || "改写失败");
         return;
       }
       setRewritePreview(d.rewritten);
-      // reload to update list status
+      setRewriteVariants(d.variants || [d.rewritten]);
       await load();
     } finally {
       setRewriting(false);
+    }
+  };
+
+  const lockVariant = async (idx: number) => {
+    if (!active || !rewriteVariants[idx]) return;
+    setLockingIdx(idx);
+    try {
+      const r = await fetch(API(`/trending/posts/${active.note_id}/rewrite/lock`), {
+        method: "POST", headers,
+        body: JSON.stringify({ variant: rewriteVariants[idx] }),
+      });
+      if (!r.ok) {
+        let msg = "锁定失败";
+        try { const j = await r.json(); msg = j.detail || msg; } catch {}
+        alert(msg);
+        return;
+      }
+      setRewritePreview(rewriteVariants[idx]);
+      await load();
+    } finally {
+      setLockingIdx(null);
     }
   };
 
@@ -525,16 +552,55 @@ export default function TrendingPage() {
                   </details>
                 ) : null;
               })()}
-              <Button color="primary" variant="flat"
-                startContent={<Sparkles size={15} />}
-                isLoading={rewriting}
-                isDisabled={!activePromptId}
-                onPress={runRewrite}>
-                {rewritePreview ? "用此 Prompt 重新改写" : "改写"}
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button color="primary" variant="flat"
+                  startContent={<Sparkles size={15} />}
+                  isLoading={rewriting}
+                  isDisabled={!activePromptId}
+                  onPress={runRewrite}>
+                  {rewritePreview ? "重新改写" : "改写"}
+                </Button>
+                <span className="text-xs text-default-500">变体数量：</span>
+                {[1, 3, 5].map((n) => (
+                  <Button key={n} size="sm"
+                    variant={variantsCount === n ? "solid" : "flat"}
+                    color={variantsCount === n ? "primary" : "default"}
+                    onPress={() => setVariantsCount(n)}>
+                    {n}
+                  </Button>
+                ))}
+              </div>
             </div>
 
-            {rewritePreview && (
+            {rewriteVariants.length > 1 && (
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-default-400">
+                  生成了 {rewriteVariants.length} 个变体（温度梯度），选一个锁定为最终版（写入飞书）：
+                </p>
+                {rewriteVariants.map((v, i) => (
+                  <div key={i} className={`rounded-lg p-3 border ${
+                    rewritePreview === v ? "bg-primary-50 border-primary"
+                                         : "bg-default-50 border-default-200"
+                  }`}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-medium text-default-500">
+                        变体 #{i + 1}{rewritePreview === v && " · 已锁定"}
+                      </span>
+                      {rewritePreview !== v && (
+                        <Button size="sm" variant="flat" color="primary"
+                          isLoading={lockingIdx === i}
+                          onPress={() => lockVariant(i)}>
+                          使用这个版本
+                        </Button>
+                      )}
+                    </div>
+                    <div className="text-sm">{renderMarkdown(v)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {rewriteVariants.length <= 1 && rewritePreview && (
               <div>
                 <p className="text-xs font-medium text-default-400 mb-1">改写结果</p>
                 <div className="bg-primary-50 rounded-lg p-3 text-sm border border-primary-100">
