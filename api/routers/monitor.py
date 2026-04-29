@@ -108,6 +108,20 @@ async def delete_post(note_id: str, current_user: dict = Depends(get_current_use
     return {"ok": True}
 
 
+@router.get("/posts/search", summary="全文搜索帖子（标题 + 摘要）")
+async def search_posts_endpoint(
+    q: str,
+    platform: Optional[str] = None,
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user),
+):
+    rows = await db.search_posts(
+        q=q, user_id=_scope_uid(current_user),
+        platform=platform, limit=min(max(limit, 1), 200),
+    )
+    return {"q": q, "count": len(rows), "results": rows}
+
+
 @router.post("/posts/cleanup-dead", summary="批量清理失效帖子")
 async def cleanup_dead_posts(current_user: dict = Depends(get_current_user)):
     """连续抓取失败 ≥ 阈值次数的帖子，批量设为非激活状态。"""

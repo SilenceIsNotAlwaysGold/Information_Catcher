@@ -6,7 +6,8 @@ import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure, Tooltip,
 } from "@nextui-org/react";
-import { Plus, RefreshCw, Trash2, Newspaper, Sparkles, ChevronDown } from "lucide-react";
+import { Plus, RefreshCw, Trash2, Newspaper, Sparkles, ChevronDown, Search } from "lucide-react";
+import { Input } from "@nextui-org/react";
 import { useAuth } from "@/contexts/AuthContext";
 
 const API = (path: string) => `/api/monitor${path}`;
@@ -49,6 +50,18 @@ export default function MpPage() {
   const { isOpen, onOpen, onClose } = useDisclosure();
   const [summarizingId, setSummarizingId] = useState<string | null>(null);
   const [expandedSummary, setExpandedSummary] = useState<Set<string>>(new Set());
+  const [searchQ, setSearchQ] = useState("");
+
+  // 客户端过滤（数据量小直接前端筛）
+  const filteredPosts = (() => {
+    const q = searchQ.trim().toLowerCase();
+    if (!q) return posts;
+    const tokens = q.split(/\s+/).filter(Boolean);
+    return posts.filter((p) => {
+      const hay = `${p.title || ""} ${p.summary || ""} ${p.note_id}`.toLowerCase();
+      return tokens.every((t) => hay.includes(t));
+    });
+  })();
 
   const handleSummarize = async (note_id: string) => {
     setSummarizingId(note_id);
@@ -148,16 +161,21 @@ export default function MpPage() {
       </div>
 
       <Card>
-        <CardHeader className="text-sm text-default-500 flex-col items-start gap-1">
-          <span>v1 能力（完全匿名可达）：</span>
-          <ul className="text-xs space-y-0.5 ml-3">
-            <li>· 标题 / 作者 / 公众号名 / 发布时间</li>
-            <li>· 正文摘要 + 配图 URL</li>
-            <li>· 原创/转载标识 + 转载来源</li>
-          </ul>
-          <span className="text-xs text-warning mt-1">
-            ⚠️ 阅读数 / 在看数 需要客户端凭证（开发中，issue #22）
-          </span>
+        <CardHeader className="flex-col items-start gap-2">
+          <Input
+            size="sm"
+            placeholder="搜索标题或摘要（支持多关键词，空格分隔）"
+            startContent={<Search size={14} className="text-default-400" />}
+            value={searchQ}
+            onValueChange={setSearchQ}
+            className="max-w-md"
+            isClearable
+          />
+          <div className="text-xs text-default-400 flex items-center gap-2">
+            <span>共 {posts.length} 篇{searchQ ? `（匹配 ${filteredPosts.length}）` : ""}</span>
+            <span>·</span>
+            <span>原创/转载标识 · AI 摘要 · 阅读数（开发中 #22）</span>
+          </div>
         </CardHeader>
         <CardBody className="p-0">
           <Table aria-label="mp-posts" removeWrapper>
@@ -167,8 +185,8 @@ export default function MpPage() {
               <TableColumn>最后抓取</TableColumn>
               <TableColumn>操作</TableColumn>
             </TableHeader>
-            <TableBody emptyContent="还没有添加任何公众号文章">
-              {posts.flatMap((p) => {
+            <TableBody emptyContent={searchQ ? "没有匹配的文章" : "还没有添加任何公众号文章"}>
+              {filteredPosts.flatMap((p) => {
                 const hasSummary = !!(p.summary && p.summary.length > 0);
                 const expanded = expandedSummary.has(p.note_id);
                 const rows = [

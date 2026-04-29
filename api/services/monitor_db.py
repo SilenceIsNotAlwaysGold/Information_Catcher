@@ -225,6 +225,65 @@ async def _ensure_column(db, table: str, name: str, coldef: str):
         await db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {coldef}")
 
 
+async def _ensure_fts_index(db):
+    """创建 FTS5 全文索引 + 触发器同步 monitor_posts.title / summary。
+
+    用 external content 模式（content='monitor_posts'），列名必须都存在于主表。
+    所以仅索引 title + summary（已有的列）。
+    """
+    # 检查现有 FTS 表 schema 是否最新（早期 body 列 / unicode61 tokenizer）
+    try:
+        cur = await db.execute("SELECT sql FROM sqlite_master WHERE name='monitor_posts_fts'")
+        row = await cur.fetchone()
+        if row and row[0]:
+            sqltext = row[0] or ""
+            need_rebuild = ("body" in sqltext) or ("trigram" not in sqltext)
+            if need_rebuild:
+                await db.executescript("""
+                    DROP TRIGGER IF EXISTS monitor_posts_ai;
+                    DROP TRIGGER IF EXISTS monitor_posts_ad;
+                    DROP TRIGGER IF EXISTS monitor_posts_au;
+                    DROP TABLE IF EXISTS monitor_posts_fts;
+                """)
+    except Exception:
+        pass
+
+    # trigram tokenizer：3 字符 ngram，对中文友好（SQLite 3.34+）
+    await db.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS monitor_posts_fts USING fts5(
+            title, summary,
+            content='monitor_posts',
+            content_rowid='id',
+            tokenize='trigram'
+        )
+    """)
+    await db.executescript("""
+        CREATE TRIGGER IF NOT EXISTS monitor_posts_ai AFTER INSERT ON monitor_posts BEGIN
+            INSERT INTO monitor_posts_fts(rowid, title, summary)
+            VALUES (new.id, COALESCE(new.title,''), COALESCE(new.summary,''));
+        END;
+        CREATE TRIGGER IF NOT EXISTS monitor_posts_ad AFTER DELETE ON monitor_posts BEGIN
+            INSERT INTO monitor_posts_fts(monitor_posts_fts, rowid, title, summary)
+            VALUES ('delete', old.id, COALESCE(old.title,''), COALESCE(old.summary,''));
+        END;
+        CREATE TRIGGER IF NOT EXISTS monitor_posts_au AFTER UPDATE ON monitor_posts BEGIN
+            INSERT INTO monitor_posts_fts(monitor_posts_fts, rowid, title, summary)
+            VALUES ('delete', old.id, COALESCE(old.title,''), COALESCE(old.summary,''));
+            INSERT INTO monitor_posts_fts(rowid, title, summary)
+            VALUES (new.id, COALESCE(new.title,''), COALESCE(new.summary,''));
+        END;
+    """)
+    # 首次启用时把已有数据灌入
+    cur = await db.execute("SELECT COUNT(*) FROM monitor_posts_fts")
+    (n,) = await cur.fetchone()
+    if n == 0:
+        await db.execute("""
+            INSERT INTO monitor_posts_fts(rowid, title, summary)
+            SELECT id, COALESCE(title,''), COALESCE(summary,'')
+            FROM monitor_posts
+        """)
+
+
 async def _migrate_monitor_posts_unique(db):
     """把 monitor_posts.note_id 全局 UNIQUE 改成 (note_id, user_id) 复合 UNIQUE。
 
@@ -393,6 +452,8 @@ async def _migrate(db):
                 "INSERT OR REPLACE INTO monitor_settings VALUES ('self_monitor_account_ids', ?)",
                 (old_val,),
             )
+    # FTS5 全文索引必须最后建：依赖 monitor_posts 最终结构（重建表 / user_id 等都已就绪）
+    await _ensure_fts_index(db)
 
 
 async def _seed_default_groups(db):
@@ -831,6 +892,50 @@ async def save_snapshot(
             (note_id, liked_count, collected_count, comment_count, share_count),
         )
         await db.commit()
+
+
+async def search_posts(
+    q: str,
+    user_id: Optional[int] = None,
+    platform: Optional[str] = None,
+    limit: int = 50,
+) -> List[Dict]:
+    """全文搜索（title + summary）。
+
+    实现说明：FTS5 trigram tokenizer 在中文上行为不稳定（依赖 SQLite 编译选项），
+    数据量也不大（<10k 条），直接用 LIKE %q% 多关键词 AND 实现。后续如果数据量
+    增长到必须用 FTS，再换 jieba 分词后重做。
+    """
+    if not q or not q.strip():
+        return []
+    parts = [p.strip() for p in q.split() if p.strip()]
+    if not parts:
+        return []
+
+    sql = """
+        SELECT p.*, p.title AS title_snip, p.summary AS summary_snip
+        FROM monitor_posts p
+        WHERE p.is_active = 1
+    """
+    params: list = []
+    # 多关键词：每个 token 必须命中 title OR summary（AND 串接）
+    for tok in parts:
+        sql += " AND (p.title LIKE ? OR p.summary LIKE ?)"
+        like = f"%{tok}%"
+        params.extend([like, like])
+    if user_id is not None:
+        sql += " AND p.user_id = ?"
+        params.append(user_id)
+    if platform:
+        sql += " AND p.platform = ?"
+        params.append(platform)
+    sql += " ORDER BY p.created_at DESC LIMIT ?"
+    params.append(limit)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
 
 async def get_post_by_note_id(note_id: str, user_id: Optional[int] = None) -> Optional[Dict]:
