@@ -66,6 +66,10 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
         update_fields["source_url"] = metrics.get("source_url") or ""
     if metrics.get("author") and not post.get("author"):
         update_fields["author"] = metrics.get("author") or ""
+    # 话题：每次抓都更新（话题可能后续被作者编辑）
+    if isinstance(metrics.get("tags"), list):
+        import json as _json
+        update_fields["tags"] = _json.dumps(metrics["tags"], ensure_ascii=False)
     if update_fields:
         set_clause = ", ".join(f"{k}=?" for k in update_fields)
         values = list(update_fields.values()) + [note_id]

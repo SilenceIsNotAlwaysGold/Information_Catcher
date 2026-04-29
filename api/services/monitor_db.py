@@ -387,6 +387,8 @@ async def _migrate(db):
     await _ensure_column(db, "monitor_posts", "summary_at", "TEXT")
     # 作者：公众号 nickname / 抖音/XHS 博主昵称，用于按号分组
     await _ensure_column(db, "monitor_posts", "author", "TEXT DEFAULT ''")
+    # 话题/标签 JSON 数组：抖音 cha_list / desc 里的 #xxx；XHS 也可以
+    await _ensure_column(db, "monitor_posts", "tags", "TEXT DEFAULT ''")
     # 公众号原创/转载/合规标识
     # copyright_stat: '11' = 原创, '100' = 转载, 其他/空 = 普通
     await _ensure_column(db, "monitor_posts", "copyright_stat", "TEXT DEFAULT ''")

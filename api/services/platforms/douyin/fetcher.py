@@ -223,9 +223,28 @@ class DouyinPlatform(Platform):
         cover_url = cl[0] if cl else ""
 
         title = detail.get("desc") or ""
+
+        # 话题：优先 cha_list，没有就 desc 里 #xxx 提取
+        tags: list = []
+        for c in (detail.get("cha_list") or []):
+            if isinstance(c, dict):
+                name = c.get("cha_name") or ""
+                if name:
+                    tags.append(name)
+        if not tags and title:
+            tags = re.findall(r"#([^\s#@\[\]]{1,20})", title)
+
+        # 配乐：抖音视频独有的「同款原声」入口
+        music = detail.get("music") or {}
+        music_title = music.get("title") if isinstance(music, dict) else ""
+        music_id = music.get("id") or music.get("mid") if isinstance(music, dict) else None
+
         return ({
             "title": title[:200],
             "desc": title[:5000],
+            "tags": tags[:20],
+            "music_title": music_title or "",
+            "music_id": str(music_id) if music_id else "",
             "liked_count": _parse_count(stats.get("digg_count")),
             "collected_count": _parse_count(stats.get("collect_count")),
             "comment_count": _parse_count(stats.get("comment_count")),

@@ -22,7 +22,15 @@ type Post = {
   last_fetch_status?: string;
   fail_count?: number;
   platform: string;
+  tags?: string;  // JSON array
+  author?: string;
 };
+
+function parseTags(s?: string): string[] {
+  if (!s) return [];
+  try { const arr = JSON.parse(s); return Array.isArray(arr) ? arr : []; }
+  catch { return []; }
+}
 
 export default function DouyinPage() {
   const { token } = useAuth();
@@ -129,11 +137,22 @@ export default function DouyinPage() {
               {posts.map((p) => (
                 <TableRow key={p.note_id}>
                   <TableCell>
-                    <div className="flex flex-col">
+                    <div className="flex flex-col gap-1">
                       <a href={p.note_url} target="_blank" rel="noreferrer"
                         className="text-primary text-sm truncate max-w-md hover:underline">
                         {p.title || p.note_id}
                       </a>
+                      <div className="flex items-center gap-1 flex-wrap">
+                        {p.author && (
+                          <span className="text-xs text-success">📢 {p.author}</span>
+                        )}
+                        {parseTags(p.tags).slice(0, 6).map((t, i) => (
+                          <Chip key={i} size="sm" variant="flat" color="primary"
+                            className="h-5 text-[10px] px-1">
+                            #{t}
+                          </Chip>
+                        ))}
+                      </div>
                       <span className="text-xs text-default-400">{p.note_id}</span>
                     </div>
                   </TableCell>
