@@ -74,6 +74,8 @@ class AddAccountRequest(BaseModel):
     fp_api_url: Optional[str] = ""
     # 仅 admin 可设：勾选后该账号进入平台共享池，被所有用户的任务复用
     is_shared: Optional[bool] = False
+    # 平台标识：xhs / douyin / mp（默认 xhs）
+    platform: Optional[str] = "xhs"
 
 
 class QRLoginStartRequest(BaseModel):
@@ -84,6 +86,7 @@ class QRLoginStartRequest(BaseModel):
     viewport: Optional[str] = ""
     timezone: Optional[str] = "Asia/Shanghai"
     locale: Optional[str] = "zh-CN"
+    platform: Optional[str] = "xhs"  # xhs / douyin（v1 仅 xhs 实现）
 
 
 class UpdateAccountRequest(BaseModel):

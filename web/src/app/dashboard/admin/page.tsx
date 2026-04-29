@@ -36,6 +36,12 @@ type SharedAccount = {
   last_used_at?: string | null;
   usage_count?: number;
   created_at: string;
+  platform: string;  // xhs / douyin / mp
+};
+
+const PLATFORM_LABEL: Record<string, string> = { xhs: "小红书", douyin: "抖音", mp: "公众号" };
+const PLATFORM_COLOR: Record<string, "default" | "danger" | "warning" | "success"> = {
+  xhs: "danger", douyin: "default", mp: "success",
 };
 
 type Settings = Record<string, string>;
@@ -63,7 +69,7 @@ export default function AdminPage() {
 
   // 手动录入 cookie 新增共享账号
   const cookieModal = useDisclosure();
-  const [cookieForm, setCookieForm] = useState({ name: "", cookie: "", proxy_url: "" });
+  const [cookieForm, setCookieForm] = useState({ name: "", cookie: "", proxy_url: "", platform: "xhs" });
   const [cookieSaving, setCookieSaving] = useState(false);
   const [cookieError, setCookieError] = useState("");
 
@@ -119,8 +125,14 @@ export default function AdminPage() {
       setCookieError("名称和 Cookie 都必须填");
       return;
     }
-    if (!/web_session/i.test(cookieForm.cookie)) {
-      setCookieError("Cookie 里必须包含 web_session=...，否则无法访问搜索接口");
+    // 平台特定的关键 cookie 字段校验
+    const ckLow = cookieForm.cookie.toLowerCase();
+    if (cookieForm.platform === "xhs" && !ckLow.includes("web_session")) {
+      setCookieError("XHS Cookie 里必须包含 web_session=...");
+      return;
+    }
+    if (cookieForm.platform === "douyin" && !ckLow.includes("sessionid")) {
+      setCookieError("抖音 Cookie 里必须包含 sessionid_ss=... 或 sessionid=...");
       return;
     }
     setCookieSaving(true);
@@ -132,6 +144,7 @@ export default function AdminPage() {
           cookie: cookieForm.cookie.trim(),
           proxy_url: cookieForm.proxy_url.trim(),
           is_shared: true,
+          platform: cookieForm.platform,
         }),
       });
       if (!r.ok) {
@@ -143,7 +156,7 @@ export default function AdminPage() {
         throw new Error(msg);
       }
       cookieModal.onClose();
-      setCookieForm({ name: "", cookie: "", proxy_url: "" });
+      setCookieForm({ name: "", cookie: "", proxy_url: "", platform: "xhs" });
       await fetchAll();
     } catch (e: any) {
       setCookieError(e.message || "创建失败");
@@ -418,7 +431,7 @@ export default function AdminPage() {
                 <Button
                   size="sm" variant="flat" startContent={<KeyRound size={14} />}
                   onPress={() => {
-                    setCookieForm({ name: "", cookie: "", proxy_url: "" });
+                    setCookieForm({ name: "", cookie: "", proxy_url: "", platform: "xhs" });
                     setCookieError("");
                     cookieModal.onOpen();
                   }}
@@ -431,6 +444,7 @@ export default function AdminPage() {
               <Table aria-label="accounts" removeWrapper>
                 <TableHeader>
                   <TableColumn>账号</TableColumn>
+                  <TableColumn>平台</TableColumn>
                   <TableColumn>归属</TableColumn>
                   <TableColumn>Cookie</TableColumn>
                   <TableColumn>代理</TableColumn>
@@ -447,6 +461,12 @@ export default function AdminPage() {
                           <span className="text-sm font-medium">{a.name}</span>
                           <span className="text-xs text-default-400">#{a.id}</span>
                         </div>
+                      </TableCell>
+                      <TableCell>
+                        <Chip size="sm" variant="flat"
+                          color={PLATFORM_COLOR[a.platform || "xhs"] || "default"}>
+                          {PLATFORM_LABEL[a.platform || "xhs"] || a.platform}
+                        </Chip>
                       </TableCell>
                       <TableCell>
                         <span className="text-xs text-default-500">
@@ -545,6 +565,22 @@ export default function AdminPage() {
             <p className="text-xs text-default-500">
               直接粘贴登录后的 Cookie 字符串和（可选的）代理 URL。账号会自动加入共享池供搜索使用。
             </p>
+            <div>
+              <p className="text-xs text-default-500 mb-1">平台</p>
+              <div className="flex gap-1">
+                {["xhs", "douyin", "mp"].map((pl) => (
+                  <Chip key={pl}
+                    size="sm"
+                    variant={cookieForm.platform === pl ? "solid" : "flat"}
+                    color={cookieForm.platform === pl ? "primary" : "default"}
+                    className="cursor-pointer"
+                    onClick={() => setCookieForm((f) => ({ ...f, platform: pl }))}
+                  >
+                    {PLATFORM_LABEL[pl]}
+                  </Chip>
+                ))}
+              </div>
+            </div>
             <Input
               label="账号名称"
               placeholder="例：搜索-A1"

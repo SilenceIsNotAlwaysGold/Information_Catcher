@@ -211,6 +211,8 @@ _ACCOUNT_EXTRA_COLUMNS: List[tuple] = [
     ("is_shared",         "INTEGER DEFAULT 0"),
     ("last_used_at",      "TEXT"),
     ("usage_count",       "INTEGER DEFAULT 0"),
+    # 平台标识：xhs / douyin / mp。老数据补 xhs（migrate 里处理）
+    ("platform",          "TEXT NOT NULL DEFAULT 'xhs'"),
 ]
 
 
@@ -577,7 +579,8 @@ async def get_all_settings() -> Dict[str, str]:
 _ACCOUNT_COLUMNS_SELECT = (
     "id, name, cookie, proxy_url, user_agent, viewport, timezone, locale, "
     "fp_browser_type, fp_profile_id, fp_api_url, created_at, is_active, "
-    "cookie_status, cookie_checked_at, is_shared, last_used_at, usage_count, user_id"
+    "cookie_status, cookie_checked_at, is_shared, last_used_at, usage_count, user_id, "
+    "COALESCE(platform,'xhs') AS platform"
 )
 
 
@@ -594,16 +597,17 @@ async def add_account(
     fp_api_url: str = "",
     user_id: Optional[int] = None,
     is_shared: bool = False,
+    platform: str = "xhs",
 ) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO monitor_accounts
                (name, cookie, proxy_url, user_agent, viewport, timezone, locale,
-                fp_browser_type, fp_profile_id, fp_api_url, user_id, is_shared)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                fp_browser_type, fp_profile_id, fp_api_url, user_id, is_shared, platform)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (name, cookie, proxy_url, user_agent, viewport, timezone or "Asia/Shanghai",
              locale or "zh-CN", fp_browser_type or "builtin", fp_profile_id, fp_api_url,
-             user_id, 1 if is_shared else 0),
+             user_id, 1 if is_shared else 0, platform or "xhs"),
         )
         await db.commit()
         return cur.lastrowid
@@ -630,13 +634,15 @@ async def get_accounts(
     user_id: Optional[int] = None,
     only_shared: bool = False,
     only_owned: bool = False,
+    platform: Optional[str] = None,
 ) -> List[Dict]:
     """Active accounts.
 
     - admin（user_id=None）默认看全部；
     - 普通用户默认看「自己的 + 平台共享池」；
     - only_owned=True 时只看用户自己；
-    - only_shared=True 时只看共享池（用于热门搜索调度）。
+    - only_shared=True 时只看共享池（用于热门搜索调度）；
+    - platform 给定时过滤（xhs / douyin / mp）。
     """
     sql = f"SELECT {_ACCOUNT_COLUMNS_SELECT} FROM monitor_accounts WHERE is_active=1"
     params: list = []
@@ -649,6 +655,9 @@ async def get_accounts(
         else:
             sql += " AND (user_id = ? OR is_shared = 1)"
             params.append(user_id)
+    if platform:
+        sql += " AND COALESCE(platform,'xhs') = ?"
+        params.append(platform)
     sql += " ORDER BY id"
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row

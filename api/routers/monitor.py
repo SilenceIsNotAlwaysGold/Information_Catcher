@@ -393,12 +393,14 @@ async def remove_alert(alert_id: int, current_user: dict = Depends(get_current_u
 @router.get("/accounts", summary="账号列表")
 async def list_accounts(
     all: bool = False,
+    platform: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    """普通用户：自己 + 共享池。admin + ?all=true：全平台所有账号（用于 /dashboard/admin）。"""
+    """普通用户：自己 + 共享池。admin + ?all=true：全平台所有账号。
+    可选 ?platform=xhs|douyin|mp 过滤。"""
     is_admin = (current_user.get("role") or "user") == "admin"
     user_id = None if (is_admin and all) else current_user["id"]
-    return {"accounts": await db.get_accounts(user_id=user_id)}
+    return {"accounts": await db.get_accounts(user_id=user_id, platform=platform)}
 
 
 @router.post("/accounts", summary="添加账号")
@@ -424,6 +426,7 @@ async def add_account(req: AddAccountRequest, current_user: dict = Depends(get_c
         fp_api_url=req.fp_api_url or "",
         user_id=current_user["id"],
         is_shared=is_shared,
+        platform=(req.platform or "xhs"),
     )
     # 如果代理是 socks5+鉴权，启动本地转发
     if proxy_forwarder.needs_forwarder(req.proxy_url or ""):
@@ -496,6 +499,13 @@ async def qr_login_start(
     req: QRLoginStartRequest,
     _: dict = Depends(get_current_user),
 ):
+    platform = (req.platform or "xhs").lower()
+    if platform != "xhs":
+        # v1：抖音/公众号扫码登录待实现（依赖 douyin/wechat-mp 各自的 cookie 流）
+        raise HTTPException(
+            status_code=501,
+            detail=f"{platform} 扫码登录开发中，请用「手动录入 Cookie」入口",
+        )
     try:
         data = await qr_login.start_session(req.model_dump())
     except Exception as e:
