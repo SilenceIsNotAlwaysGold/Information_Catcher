@@ -191,6 +191,21 @@ CREATE INDEX IF NOT EXISTS idx_trending_found ON trending_posts(found_at);
 CREATE INDEX IF NOT EXISTS idx_own_comments_found ON own_comments(found_at);
 CREATE INDEX IF NOT EXISTS idx_own_msg_found ON own_messages(found_at);
 CREATE INDEX IF NOT EXISTS idx_note_comments ON note_comments_cache(note_id);
+
+CREATE TABLE IF NOT EXISTS fetch_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL,             -- xhs / douyin / mp
+    task_type TEXT NOT NULL,            -- monitor / trending / enrich / comment
+    account_id INTEGER,                 -- NULL = anonymous fetch
+    status TEXT NOT NULL,               -- ok / error / login_required / deleted
+    latency_ms INTEGER DEFAULT 0,
+    note_id TEXT,
+    note TEXT,                          -- 备注（错误信息/keyword 等）
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_fetch_log_time ON fetch_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_fetch_log_account ON fetch_log(account_id);
+CREATE INDEX IF NOT EXISTS idx_fetch_log_platform ON fetch_log(platform);
 """
 
 
@@ -462,8 +477,21 @@ async def _migrate(db):
                 "INSERT OR REPLACE INTO monitor_settings VALUES ('self_monitor_account_ids', ?)",
                 (old_val,),
             )
-    # FTS5 全文索引必须最后建：依赖 monitor_posts 最终结构（重建表 / user_id 等都已就绪）
-    await _ensure_fts_index(db)
+    # FTS5 全文索引：实测 trigram tokenizer 在中文+大量数据时会导致
+    # external content 触发器进入 malformed 状态。禁用以避免生产事故；
+    # 搜索功能已改用 LIKE 实现（search_posts），不依赖 FTS 表。
+    # 如果以后接 jieba 分词后再启用。
+    # await _ensure_fts_index(db)
+    # 兜底清理可能残留的 fts trigger / 表
+    try:
+        await db.executescript("""
+            DROP TRIGGER IF EXISTS monitor_posts_ai;
+            DROP TRIGGER IF EXISTS monitor_posts_ad;
+            DROP TRIGGER IF EXISTS monitor_posts_au;
+            DROP TABLE IF EXISTS monitor_posts_fts;
+        """)
+    except Exception:
+        pass
 
 
 async def _seed_default_groups(db):
@@ -968,6 +996,78 @@ async def search_posts(
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+async def log_fetch(
+    platform: str,
+    task_type: str,
+    status: str,
+    latency_ms: int = 0,
+    account_id: Optional[int] = None,
+    note_id: Optional[str] = None,
+    note: Optional[str] = None,
+) -> None:
+    """记录一次 fetch 调用（fire-and-forget）。失败时静默吞掉，不影响主流程。"""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO fetch_log (platform, task_type, status, latency_ms, account_id, note_id, note) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (platform, task_type, status, int(latency_ms), account_id, note_id, note),
+            )
+            await db.commit()
+    except Exception:
+        pass
+
+
+async def health_summary(days: int = 7) -> dict:
+    """7 天内的抓取健康度聚合：按 platform / account / task_type 分组。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # 按 platform × status
+        async with db.execute(f"""
+            SELECT platform, status, COUNT(*) AS n, AVG(latency_ms) AS avg_ms
+            FROM fetch_log
+            WHERE created_at >= datetime('now','localtime', ?)
+            GROUP BY platform, status
+        """, (f"-{int(days)} days",)) as cur:
+            by_platform = [dict(r) for r in await cur.fetchall()]
+        # 按 account_id × status
+        async with db.execute(f"""
+            SELECT a.id AS account_id, a.name AS account_name, a.platform AS acc_platform,
+                   l.status, COUNT(*) AS n, AVG(l.latency_ms) AS avg_ms,
+                   MAX(l.created_at) AS last_at
+            FROM fetch_log l
+            LEFT JOIN monitor_accounts a ON a.id = l.account_id
+            WHERE l.created_at >= datetime('now','localtime', ?)
+              AND l.account_id IS NOT NULL
+            GROUP BY l.account_id, l.status
+        """, (f"-{int(days)} days",)) as cur:
+            by_account = [dict(r) for r in await cur.fetchall()]
+        # 总数
+        async with db.execute(f"""
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok_n,
+                   SUM(CASE WHEN status!='ok' THEN 1 ELSE 0 END) AS fail_n
+            FROM fetch_log
+            WHERE created_at >= datetime('now','localtime', ?)
+        """, (f"-{int(days)} days",)) as cur:
+            totals = dict(await cur.fetchone())
+        # 最近一次失败
+        async with db.execute("""
+            SELECT platform, task_type, status, note, created_at, account_id
+            FROM fetch_log
+            WHERE status != 'ok'
+            ORDER BY created_at DESC LIMIT 20
+        """) as cur:
+            recent_fail = [dict(r) for r in await cur.fetchall()]
+    return {
+        "days": days,
+        "totals": totals,
+        "by_platform": by_platform,
+        "by_account": by_account,
+        "recent_fail": recent_fail,
+    }
 
 
 async def get_post_by_note_id(note_id: str, user_id: Optional[int] = None) -> Optional[Dict]:

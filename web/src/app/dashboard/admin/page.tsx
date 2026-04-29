@@ -526,6 +526,10 @@ export default function AdminPage() {
           </Card>
         </Tab>
 
+        <Tab key="health" title="健康度">
+          <HealthDashboard token={token} />
+        </Tab>
+
         <Tab key="ai" title="AI 配置">
           <Card>
             <CardHeader className="text-sm text-default-500">
@@ -687,6 +691,166 @@ export default function AdminPage() {
     </div>
   );
 }
+
+function HealthDashboard({ token }: { token: string | null }) {
+  const headers = { Authorization: `Bearer ${token}` };
+  const [days, setDays] = useState(7);
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!token) return;
+    setLoading(true);
+    fetch(API(`/monitor/health?days=${days}`), { headers })
+      .then((r) => r.json())
+      .then((d) => { setData(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [token, days]);
+
+  if (loading) return <Card><CardBody><Spinner /></CardBody></Card>;
+  if (!data) return null;
+
+  const totals = data.totals || {};
+  const ok = totals.ok_n || 0;
+  const fail = totals.fail_n || 0;
+  const total = totals.total || 0;
+  const okRate = total > 0 ? ((ok / total) * 100).toFixed(1) : "0";
+
+  // 按 account 聚合：成功/失败 → 成功率
+  const acctMap: Record<string, any> = {};
+  for (const r of (data.by_account || [])) {
+    const k = r.account_id;
+    if (!acctMap[k]) acctMap[k] = {
+      id: r.account_id, name: r.account_name, platform: r.acc_platform,
+      ok: 0, fail: 0, last_at: "",
+    };
+    if (r.status === "ok") acctMap[k].ok = r.n; else acctMap[k].fail += r.n;
+    if (r.last_at && r.last_at > acctMap[k].last_at) acctMap[k].last_at = r.last_at;
+  }
+  const accountStats = Object.values(acctMap).sort((a: any, b: any) =>
+    (b.ok + b.fail) - (a.ok + a.fail)
+  );
+
+  return (
+    <Card>
+      <CardHeader className="flex justify-between items-center">
+        <span className="text-sm text-default-500">最近 {data.days} 天的抓取健康度</span>
+        <div className="flex gap-1">
+          {[1, 7, 30].map((d) => (
+            <Chip key={d} size="sm"
+              variant={days === d ? "solid" : "flat"}
+              color={days === d ? "primary" : "default"}
+              className="cursor-pointer"
+              onClick={() => setDays(d)}>
+              {d} 天
+            </Chip>
+          ))}
+        </div>
+      </CardHeader>
+      <CardBody className="space-y-4">
+        <div className="grid grid-cols-3 gap-3">
+          <StatCard icon={<Cpu size={18} />} label="总调用" value={total} />
+          <StatCard icon={<Cpu size={18} />} label="成功率" value={`${okRate}%`}
+            hint={`${ok} 成功 / ${fail} 失败`} />
+          <StatCard icon={<Cpu size={18} />} label="活跃账号" value={accountStats.length} />
+        </div>
+
+        <div>
+          <p className="text-sm font-medium mb-2">按平台</p>
+          <table className="text-xs w-full">
+            <thead>
+              <tr className="border-b border-divider text-default-400">
+                <th className="text-left py-1">平台</th>
+                <th className="text-left">状态</th>
+                <th className="text-right">调用数</th>
+                <th className="text-right">平均延迟</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(data.by_platform || []).map((r: any, i: number) => (
+                <tr key={i} className="border-b border-divider/50">
+                  <td className="py-1">{r.platform}</td>
+                  <td>
+                    <Chip size="sm" variant="flat"
+                      color={r.status === "ok" ? "success" : "warning"}
+                      className="h-5 text-[10px]">
+                      {r.status}
+                    </Chip>
+                  </td>
+                  <td className="text-right">{r.n}</td>
+                  <td className="text-right">{Math.round(r.avg_ms || 0)}ms</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {accountStats.length > 0 && (
+          <div>
+            <p className="text-sm font-medium mb-2">按账号</p>
+            <table className="text-xs w-full">
+              <thead>
+                <tr className="border-b border-divider text-default-400">
+                  <th className="text-left py-1">账号</th>
+                  <th className="text-left">平台</th>
+                  <th className="text-right">成功</th>
+                  <th className="text-right">失败</th>
+                  <th className="text-right">成功率</th>
+                  <th className="text-left">最近</th>
+                </tr>
+              </thead>
+              <tbody>
+                {accountStats.map((a: any) => {
+                  const tot = a.ok + a.fail;
+                  const rate = tot > 0 ? ((a.ok / tot) * 100).toFixed(0) : "—";
+                  return (
+                    <tr key={a.id} className="border-b border-divider/50">
+                      <td className="py-1">#{a.id} {a.name}</td>
+                      <td>{a.platform}</td>
+                      <td className="text-right text-success">{a.ok}</td>
+                      <td className="text-right text-danger">{a.fail}</td>
+                      <td className="text-right">{rate}%</td>
+                      <td className="text-default-400">{a.last_at?.slice(5, 16) || "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {(data.recent_fail || []).length > 0 && (
+          <div>
+            <p className="text-sm font-medium mb-2">最近 20 条失败</p>
+            <table className="text-xs w-full">
+              <thead>
+                <tr className="border-b border-divider text-default-400">
+                  <th className="text-left py-1">时间</th>
+                  <th className="text-left">平台</th>
+                  <th className="text-left">任务</th>
+                  <th className="text-left">状态</th>
+                  <th className="text-left">备注</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(data.recent_fail || []).map((r: any, i: number) => (
+                  <tr key={i} className="border-b border-divider/50">
+                    <td className="py-1">{r.created_at?.slice(5, 16)}</td>
+                    <td>{r.platform}</td>
+                    <td>{r.task_type}</td>
+                    <td className="text-warning">{r.status}</td>
+                    <td className="text-default-500 truncate max-w-md">{r.note || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
 
 function StatCard({ icon, label, value, hint }: {
   icon: React.ReactNode; label: string; value: string | number; hint?: string;

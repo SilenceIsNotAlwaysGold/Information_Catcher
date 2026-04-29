@@ -369,6 +369,16 @@ async def proxy_forwarder_status(current_user: dict = Depends(get_current_user))
     return proxy_forwarder.status_dump()
 
 
+@router.get("/health", summary="抓取健康度大盘（admin only）")
+async def health_dashboard(
+    days: int = 7,
+    current_user: dict = Depends(get_current_user),
+):
+    if (current_user.get("role") or "user") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return await db.health_summary(days=min(max(days, 1), 30))
+
+
 # ── Alerts ───────────────────────────────────────────────────────────────────
 
 @router.get("/alerts", summary="告警记录")

@@ -50,8 +50,18 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
         "xsec_source": post.get("xsec_source", "app_share"),
         "account_cookie": post.get("account_cookie"),
     }
+    import time as _t
+    _t0 = _t.perf_counter()
     metrics, fetch_status = await plat.fetch_detail(detail_post, account=account)
+    _latency_ms = int((_t.perf_counter() - _t0) * 1000)
     await db.update_post_fetch_status(note_id, fetch_status)
+    # 健康度埋点
+    await db.log_fetch(
+        platform=plat.name, task_type="monitor",
+        status=fetch_status, latency_ms=_latency_ms,
+        account_id=(account.get("id") if account else None),
+        note_id=note_id,
+    )
     if not metrics:
         logger.warning(f"[monitor] failed to fetch {note_id} ({fetch_status})")
         return
@@ -503,8 +513,18 @@ async def run_trending_monitor():
 
     for idx, keyword in enumerate(keywords):
         account = accounts[idx % len(accounts)]
+        import time as _t
+        _t0 = _t.perf_counter()
         try:
             posts = await xhs_plat.search_trending(keyword, account, min_likes)
+            _ms = int((_t.perf_counter() - _t0) * 1000)
+            await db.log_fetch(
+                platform="xhs", task_type="trending",
+                status="ok" if posts else "error",
+                latency_ms=_ms,
+                account_id=account.get("id") if account else None,
+                note=f"keyword={keyword} found={len(posts) if posts else 0}",
+            )
             if account.get("is_shared"):
                 await db.mark_account_used(account["id"])
 
