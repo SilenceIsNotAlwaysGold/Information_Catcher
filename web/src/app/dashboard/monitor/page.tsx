@@ -253,7 +253,7 @@ export default function MonitorPage() {
                             <div className="flex gap-1">
                               <Tooltip content="历史数据">
                                 <Button isIconOnly size="sm" variant="light"
-                                  as={Link} href={`/dashboard/monitor/${p.note_id}`}>
+                                  as={Link} href={`/dashboard/monitor/history?note_id=${p.note_id}`}>
                                   <BarChart2 size={15} />
                                 </Button>
                               </Tooltip>
