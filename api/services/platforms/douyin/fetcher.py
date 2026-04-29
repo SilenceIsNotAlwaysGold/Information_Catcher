@@ -25,11 +25,24 @@ from ..base import Platform
 logger = logging.getLogger(__name__)
 
 
-_UA_IPHONE = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
-)
+from .._ua_pool import random_mobile_ua, MOBILE_UAS
 
+# 默认 UA（保持向后兼容，verify_proxy_chain 等内部脚本会引用）
+_UA_IPHONE = MOBILE_UAS[0]
+
+
+def _request_headers() -> dict:
+    """每次请求随机一个 UA，降低被风控按 UA 频次的概率。"""
+    return {
+        "User-Agent": random_mobile_ua(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": "https://www.iesdouyin.com/",
+    }
+
+
+# 向后兼容：旧代码引用 _HEADERS（如 verify_proxy_chain.py）。
+# 新代码用 _request_headers() 拿随机 UA。
 _HEADERS = {
     "User-Agent": _UA_IPHONE,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -84,7 +97,7 @@ async def _resolve_short_link(short_url: str) -> Optional[str]:
     """v.douyin.com/xxx → 跟随 30x 拿到带 aweme_id 的真实 URL。"""
     try:
         async with httpx.AsyncClient(timeout=12, follow_redirects=True, max_redirects=5) as c:
-            r = await c.get(short_url, headers=_HEADERS)
+            r = await c.get(short_url, headers=_request_headers())
             final = str(r.url)
     except Exception as e:
         logger.warning(f"[douyin] short-link resolve fail: {e}")
@@ -168,7 +181,7 @@ class DouyinPlatform(Platform):
         # account 这里暂不使用（匿名通道已可达）；保留参数兼容 Platform 接口
         try:
             async with httpx.AsyncClient(timeout=15, follow_redirects=False) as c:
-                r = await c.get(url, headers=_HEADERS)
+                r = await c.get(url, headers=_request_headers())
         except Exception as e:
             logger.warning(f"[douyin] {aid}: request error {e}")
             return None, "error"

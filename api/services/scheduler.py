@@ -225,20 +225,28 @@ async def run_monitor():
     #   - 其他情况一律匿名抓（xsec_source 在 add_post 时强制写为 app_share，
     #     公开可达，不消耗任何账号）
     # 调研：search 来的 token 配 app_share + 无 cookie，详情、图片、视频都能拿到。
+    # 风控规避：限制并发到 2，避免同一时间发出过多请求
+    sem = asyncio.Semaphore(2)
     skipped = 0
-    for post in posts:
-        # 已经连续失败 N 次的帖子直接跳过，避免持续打无效请求
+
+    async def _process(post):
+        nonlocal skipped
         if (post.get("fail_count") or 0) >= db.DEAD_POST_FAIL_THRESHOLD:
             skipped += 1
-            continue
-        try:
-            aid = post.get("account_id")
-            account = account_cache.get(aid) if aid else None
-            post["_account"] = account
-            wecom_url, feishu_url = _user_webhooks(post.get("user_id"))
-            await _check_post(post, settings, wecom_url, feishu_url)
-        except Exception as e:
-            logger.error(f"[monitor] error on {post['note_id']}: {e}")
+            return
+        async with sem:
+            try:
+                aid = post.get("account_id")
+                account = account_cache.get(aid) if aid else None
+                post["_account"] = account
+                wecom_url, feishu_url = _user_webhooks(post.get("user_id"))
+                await _check_post(post, settings, wecom_url, feishu_url)
+                # 抓取间留 0.5-1.5s 抖动（fetcher 内部的 1-2.5s 是请求级，这里是任务级）
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+            except Exception as e:
+                logger.error(f"[monitor] error on {post['note_id']}: {e}")
+
+    await asyncio.gather(*[_process(p) for p in posts])
     if skipped:
         logger.info(f"[monitor] skipped {skipped} posts marked as dead (fail_count >= {db.DEAD_POST_FAIL_THRESHOLD})")
 

@@ -11,12 +11,22 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
-_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/126.0.0.0 Safari/537.36"
-)
+from .platforms._ua_pool import random_desktop_ua, DESKTOP_UAS
 
+# 默认 UA：保留单一值给老调用，新代码用 _request_headers() 拿随机 UA
+_UA = DESKTOP_UAS[0]
+
+
+def _request_headers() -> dict:
+    return {
+        "User-Agent": random_desktop_ua(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": "https://www.xiaohongshu.com/",
+    }
+
+
+# 向后兼容：旧 _BASE_HEADERS 引用（被 verify_proxy_chain.py 等内部脚本依赖）
 _BASE_HEADERS = {
     "User-Agent": _UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -130,7 +140,7 @@ async def resolve_short_link(short_url: str) -> Optional[Dict]:
         async with httpx.AsyncClient(
             follow_redirects=True, max_redirects=10, timeout=15
         ) as client:
-            resp = await client.get(short_url, headers=_BASE_HEADERS)
+            resp = await client.get(short_url, headers=_request_headers())
             final_url = str(resp.url)
     except Exception:
         return None
@@ -186,7 +196,7 @@ async def fetch_note_metrics(
         f"https://www.xiaohongshu.com/explore/{note_id}"
         f"?xsec_token={xsec_token}&xsec_source={xsec_source}"
     )
-    headers = dict(_BASE_HEADERS)
+    headers = _request_headers()
     proxy: Optional[str] = None
 
     if account:

@@ -24,16 +24,15 @@ from ..base import Platform
 logger = logging.getLogger(__name__)
 
 
-_UA_IPHONE = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
-)
+from .._ua_pool import random_mobile_ua
 
-_HEADERS = {
-    "User-Agent": _UA_IPHONE,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-}
+
+def _request_headers() -> dict:
+    return {
+        "User-Agent": random_mobile_ua(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
 
 
 def _build_post_id(biz: str, mid: str, idx: str) -> str:
@@ -123,7 +122,7 @@ class MpPlatform(Platform):
         if not ids:
             try:
                 async with httpx.AsyncClient(timeout=12, follow_redirects=True, max_redirects=3) as c:
-                    r = await c.get(link, headers=_HEADERS)
+                    r = await c.get(link, headers=_request_headers())
                     final = str(r.url)
                 ids = _extract_ids_from_url(final)
                 if ids:
@@ -155,7 +154,7 @@ class MpPlatform(Platform):
 
         try:
             async with httpx.AsyncClient(timeout=15, follow_redirects=True, max_redirects=5) as c:
-                r = await c.get(url, headers=_HEADERS)
+                r = await c.get(url, headers=_request_headers())
         except Exception as e:
             logger.warning(f"[mp] request fail: {e}")
             return None, "error"
