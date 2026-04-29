@@ -202,6 +202,8 @@ class DouyinPlatform(Platform):
         play = video.get("play_addr") or {}
         url_list = play.get("url_list") if isinstance(play, dict) else None
         video_url = url_list[0] if url_list else ""
+        # 无水印版本：playwm → play 替换（实测 2026-04 仍然有效）
+        video_url_clean = video_url.replace("/aweme/v1/playwm/", "/aweme/v1/play/") if video_url else ""
         # 封面
         cover = video.get("cover") or video.get("origin_cover") or {}
         cl = cover.get("url_list") if isinstance(cover, dict) else None
@@ -218,6 +220,7 @@ class DouyinPlatform(Platform):
             "cover_url": cover_url,
             "images": [],
             "video_url": video_url,
+            "video_url_clean": video_url_clean,
             "note_type": "video",
             "author": author.get("nickname") or "",
         }, "ok")

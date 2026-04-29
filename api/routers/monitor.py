@@ -108,6 +108,37 @@ async def delete_post(note_id: str, current_user: dict = Depends(get_current_use
     return {"ok": True}
 
 
+@router.get("/posts/{note_id}/video", summary="获取帖子视频直链（抖音支持去水印）")
+async def post_video_url(
+    note_id: str,
+    clean: bool = True,
+    current_user: dict = Depends(get_current_user),
+):
+    """实时 fetch 拿当前视频流 URL。
+    - 抖音：clean=true 返回无水印版（playwm → play 替换）
+    - 其他平台：返回 video_url 原值
+    返回 302 重定向到真实 mp4，前端 <a href> 打开即可下载。
+    """
+    from fastapi.responses import RedirectResponse
+    post = await db.get_post_by_note_id(note_id, user_id=_scope_uid(current_user))
+    if not post:
+        raise HTTPException(status_code=404, detail="帖子不存在")
+    plat = platform_registry.get_platform(post.get("platform") or "xhs")
+    if not plat:
+        raise HTTPException(status_code=400, detail="未知平台")
+    metrics, status = await plat.fetch_detail({
+        "post_id": note_id, "note_id": note_id, "url": post.get("note_url"),
+        "xsec_token": post.get("xsec_token", ""),
+        "xsec_source": post.get("xsec_source", "app_share"),
+    }, account=None)
+    if not metrics:
+        raise HTTPException(status_code=502, detail=f"无法抓取：{status}")
+    url = (metrics.get("video_url_clean") if clean else "") or metrics.get("video_url") or ""
+    if not url:
+        raise HTTPException(status_code=404, detail="该帖子无视频流（可能是图集/文章）")
+    return RedirectResponse(url=url, status_code=302)
+
+
 @router.get("/posts/search", summary="全文搜索帖子（标题 + 摘要）")
 async def search_posts_endpoint(
     q: str,

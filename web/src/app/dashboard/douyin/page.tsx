@@ -6,7 +6,7 @@ import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure, Tooltip,
 } from "@nextui-org/react";
-import { Plus, RefreshCw, Trash2, Music2 } from "lucide-react";
+import { Plus, RefreshCw, Trash2, Music2, Download } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 
 const API = (path: string) => `/api/monitor${path}`;
@@ -147,12 +147,35 @@ export default function DouyinPage() {
                     </span>
                   </TableCell>
                   <TableCell>
-                    <Tooltip content="删除" color="danger">
-                      <Button isIconOnly size="sm" variant="light" color="danger"
-                        onPress={() => handleDelete(p.note_id)}>
-                        <Trash2 size={15} />
-                      </Button>
-                    </Tooltip>
+                    <div className="flex gap-1">
+                      <Tooltip content="下载无水印 mp4">
+                        <Button isIconOnly size="sm" variant="light"
+                          onPress={async () => {
+                            const r = await fetch(API(`/posts/${p.note_id}/video?clean=true`), { headers });
+                            if (!r.ok) {
+                              let msg = "下载失败";
+                              try { const j = await r.json(); msg = j.detail || msg; } catch {}
+                              alert(msg);
+                              return;
+                            }
+                            const blob = await r.blob();
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url;
+                            a.download = `douyin_${p.note_id}.mp4`;
+                            a.click();
+                            URL.revokeObjectURL(url);
+                          }}>
+                          <Download size={15} />
+                        </Button>
+                      </Tooltip>
+                      <Tooltip content="删除" color="danger">
+                        <Button isIconOnly size="sm" variant="light" color="danger"
+                          onPress={() => handleDelete(p.note_id)}>
+                          <Trash2 size={15} />
+                        </Button>
+                      </Tooltip>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
