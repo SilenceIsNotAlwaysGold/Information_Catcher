@@ -25,7 +25,17 @@ type Post = {
   platform: string;
   summary?: string | null;
   summary_at?: string | null;
+  // 公众号专属：copyright_stat 11=原创 / 100=转载（其他视为普通）
+  copyright_stat?: string | null;
+  source_url?: string | null;
 };
+
+function CopyrightChip({ stat }: { stat?: string | null }) {
+  const s = (stat || "").trim();
+  if (s === "11") return <Chip size="sm" color="success" variant="flat">原创</Chip>;
+  if (s === "100" || s === "101") return <Chip size="sm" color="warning" variant="flat">转载</Chip>;
+  return null;
+}
 
 export default function MpPage() {
   const { token } = useAuth();
@@ -166,6 +176,7 @@ export default function MpPage() {
                     <TableCell>
                       <div className="flex flex-col">
                         <div className="flex items-center gap-2">
+                          <CopyrightChip stat={p.copyright_stat} />
                           <a href={p.note_url} target="_blank" rel="noreferrer"
                             className="text-primary text-sm truncate max-w-md hover:underline">
                             {p.title || p.note_id}
@@ -180,9 +191,17 @@ export default function MpPage() {
                             </Tooltip>
                           )}
                         </div>
-                        <span className="text-xs text-default-400 truncate max-w-md">
-                          {p.note_id}
-                        </span>
+                        {p.source_url && (
+                          <a href={p.source_url} target="_blank" rel="noreferrer"
+                            className="text-xs text-default-400 truncate max-w-md hover:underline">
+                            转自：{p.source_url.slice(0, 60)}
+                          </a>
+                        )}
+                        {!p.source_url && (
+                          <span className="text-xs text-default-400 truncate max-w-md">
+                            {p.note_id}
+                          </span>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell>{statusChip(p)}</TableCell>

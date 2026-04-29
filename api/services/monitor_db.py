@@ -326,6 +326,10 @@ async def _migrate(db):
     # AI 摘要（公众号长文 / 抖音视频文案/小红书干货笔记 都能用）
     await _ensure_column(db, "monitor_posts", "summary", "TEXT DEFAULT ''")
     await _ensure_column(db, "monitor_posts", "summary_at", "TEXT")
+    # 公众号原创/转载/合规标识
+    # copyright_stat: '11' = 原创, '100' = 转载, 其他/空 = 普通
+    await _ensure_column(db, "monitor_posts", "copyright_stat", "TEXT DEFAULT ''")
+    await _ensure_column(db, "monitor_posts", "source_url", "TEXT DEFAULT ''")
     # New: custom monitor groups. group_id references monitor_groups.id.
     await _ensure_column(db, "monitor_posts", "group_id", "INTEGER")
     await _seed_default_groups(db)

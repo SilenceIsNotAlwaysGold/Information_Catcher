@@ -56,11 +56,20 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
         logger.warning(f"[monitor] failed to fetch {note_id} ({fetch_status})")
         return
 
+    # 标题 + 平台特定的元数据（公众号 copyright_stat / source_url）
+    update_fields: dict = {}
     if not post.get("title") and metrics.get("title"):
+        update_fields["title"] = metrics["title"]
+    if "copyright_stat" in metrics:
+        update_fields["copyright_stat"] = metrics.get("copyright_stat") or ""
+    if "source_url" in metrics:
+        update_fields["source_url"] = metrics.get("source_url") or ""
+    if update_fields:
+        set_clause = ", ".join(f"{k}=?" for k in update_fields)
+        values = list(update_fields.values()) + [note_id]
         async with aiosqlite.connect(db.DB_PATH) as conn:
             await conn.execute(
-                "UPDATE monitor_posts SET title=? WHERE note_id=?",
-                (metrics["title"], note_id),
+                f"UPDATE monitor_posts SET {set_clause} WHERE note_id=?", values,
             )
             await conn.commit()
 
