@@ -67,6 +67,45 @@ export default function AdminPage() {
   const qrPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const qrActiveRef = useRef(false);
 
+  // 新建用户
+  const newUserModal = useDisclosure();
+  const [newUserForm, setNewUserForm] = useState({
+    email: "", password: "", username: "",
+    role: "user", plan: "team", max_monitor_posts: 200,
+  });
+  const [newUserSaving, setNewUserSaving] = useState(false);
+  const [newUserError, setNewUserError] = useState("");
+
+  const submitNewUser = async () => {
+    setNewUserError("");
+    if (!newUserForm.email.includes("@")) { setNewUserError("邮箱格式不正确"); return; }
+    if (newUserForm.password.length < 6) { setNewUserError("密码至少 6 位"); return; }
+    setNewUserSaving(true);
+    try {
+      const r = await fetch(API("/auth/admin/users"), {
+        method: "POST", headers,
+        body: JSON.stringify({
+          email: newUserForm.email,
+          password: newUserForm.password,
+          username: newUserForm.username || undefined,
+          role: newUserForm.role,
+          plan: newUserForm.plan,
+          max_monitor_posts: Number(newUserForm.max_monitor_posts) || 200,
+        }),
+      });
+      if (!r.ok) {
+        let msg = `HTTP ${r.status}`;
+        try { const j = await r.json(); msg = j.detail || msg; } catch {}
+        setNewUserError(msg);
+        return;
+      }
+      newUserModal.onClose();
+      await fetchAll();
+    } finally {
+      setNewUserSaving(false);
+    }
+  };
+
   // 手动录入 cookie 新增共享账号
   const cookieModal = useDisclosure();
   const [cookieForm, setCookieForm] = useState({ name: "", cookie: "", proxy_url: "", platform: "xhs" });
@@ -340,6 +379,17 @@ export default function AdminPage() {
       <Tabs aria-label="admin sections">
         <Tab key="users" title="用户管理">
           <Card>
+            <CardHeader className="flex justify-between items-center">
+              <span className="text-sm text-default-500">共 {users.length} 个用户</span>
+              <Button size="sm" color="primary" startContent={<Plus size={14} />}
+                onPress={() => {
+                  setNewUserForm({ email: "", password: "", username: "", role: "user", plan: "team", max_monitor_posts: 200 });
+                  setNewUserError("");
+                  newUserModal.onOpen();
+                }}>
+                新建用户
+              </Button>
+            </CardHeader>
             <CardBody className="p-0">
               <Table aria-label="users" removeWrapper>
                 <TableHeader>
@@ -593,6 +643,75 @@ export default function AdminPage() {
           </Card>
         </Tab>
       </Tabs>
+
+      {/* 新建用户 Modal */}
+      <Modal isOpen={newUserModal.isOpen} onClose={newUserModal.onClose} size="md">
+        <ModalContent>
+          <ModalHeader>新建用户</ModalHeader>
+          <ModalBody className="space-y-3">
+            <Input
+              label="邮箱" type="email" isRequired
+              placeholder="user@example.com"
+              value={newUserForm.email}
+              onValueChange={(v) => setNewUserForm((f) => ({ ...f, email: v }))}
+            />
+            <Input
+              label="密码" type="password" isRequired
+              placeholder="≥ 6 位"
+              value={newUserForm.password}
+              onValueChange={(v) => setNewUserForm((f) => ({ ...f, password: v }))}
+            />
+            <Input
+              label="用户名（留空用邮箱）"
+              placeholder="例：yqmm"
+              value={newUserForm.username}
+              onValueChange={(v) => setNewUserForm((f) => ({ ...f, username: v }))}
+            />
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <p className="text-xs text-default-500 mb-1">角色</p>
+                <div className="flex gap-1">
+                  {["user", "admin"].map((r) => (
+                    <Chip key={r} size="sm"
+                      variant={newUserForm.role === r ? "solid" : "flat"}
+                      color={newUserForm.role === r ? (r === "admin" ? "warning" : "primary") : "default"}
+                      className="cursor-pointer"
+                      onClick={() => setNewUserForm((f) => ({ ...f, role: r }))}>
+                      {r === "admin" ? "管理员" : "普通用户"}
+                    </Chip>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <p className="text-xs text-default-500 mb-1">套餐</p>
+                <div className="flex gap-1 flex-wrap">
+                  {["trial", "team", "enterprise"].map((p) => (
+                    <Chip key={p} size="sm"
+                      variant={newUserForm.plan === p ? "solid" : "flat"}
+                      color={newUserForm.plan === p ? "primary" : "default"}
+                      className="cursor-pointer"
+                      onClick={() => setNewUserForm((f) => ({ ...f, plan: p }))}>
+                      {p}
+                    </Chip>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <Input
+              label="帖子配额" type="number"
+              value={String(newUserForm.max_monitor_posts)}
+              onValueChange={(v) => setNewUserForm((f) => ({ ...f, max_monitor_posts: Number(v) || 0 }))}
+            />
+            {newUserError && <p className="text-sm text-danger">{newUserError}</p>}
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="light" onPress={newUserModal.onClose}>取消</Button>
+            <Button color="primary" onPress={submitNewUser} isLoading={newUserSaving}>
+              创建
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
 
       {/* 手动录入 Cookie Modal */}
       <Modal isOpen={cookieModal.isOpen} onClose={cookieModal.onClose} size="lg">

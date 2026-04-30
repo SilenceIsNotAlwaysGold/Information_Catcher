@@ -13,7 +13,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from ..schemas.auth import (
     UserLogin, Token, UserInfo,
-    RegisterRequest, AdminUpdateUserRequest,
+    RegisterRequest, AdminUpdateUserRequest, AdminCreateUserRequest,
 )
 from ..services.auth_service import (
     authenticate_user,
@@ -145,6 +145,35 @@ async def get_admin_user(current_user: dict = Depends(get_current_user)) -> dict
 @router.get("/admin/users", summary="管理员：用户列表")
 async def admin_list_users(_: dict = Depends(get_admin_user)):
     return {"users": list_users()}
+
+
+@router.post("/admin/users", summary="管理员：创建用户")
+async def admin_create_user(
+    req: AdminCreateUserRequest,
+    _: dict = Depends(get_admin_user),
+):
+    """admin 直接创建用户：跳过邮箱验证，可直接设 plan/role/quota。"""
+    email = req.email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="邮箱格式不正确")
+    if not req.password or len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="密码至少 6 位")
+    user = register_user(email, req.password, req.username)
+    if not user:
+        raise HTTPException(status_code=400, detail="该邮箱或用户名已被注册")
+    # 立刻打 admin 设置（plan/role/max_monitor_posts）
+    update_kwargs: dict = {}
+    if req.role and req.role != "user":
+        update_kwargs["role"] = req.role
+    if req.plan:
+        update_kwargs["plan"] = req.plan
+    if req.max_monitor_posts is not None:
+        update_kwargs["max_monitor_posts"] = req.max_monitor_posts
+    # admin 创建的不走试用流程
+    update_kwargs["trial_ends_at"] = None
+    if update_kwargs:
+        update_user_admin(user["id"], **update_kwargs)
+    return {"ok": True, "id": user["id"]}
 
 
 @router.patch("/admin/users/{user_id}", summary="管理员：更新用户")

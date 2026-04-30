@@ -52,3 +52,13 @@ class AdminUpdateUserRequest(BaseModel):
     role: Optional[str] = None
     trial_ends_at: Optional[str] = None
     max_monitor_posts: Optional[int] = None
+
+
+class AdminCreateUserRequest(BaseModel):
+    """管理员创建用户（无需邮箱验证 / 跳过试用引导）"""
+    email: str
+    password: str
+    username: Optional[str] = None        # 不填用 email 作 username
+    role: Optional[str] = "user"          # user / admin
+    plan: Optional[str] = "team"          # 默认 team 不限
+    max_monitor_posts: Optional[int] = 200
