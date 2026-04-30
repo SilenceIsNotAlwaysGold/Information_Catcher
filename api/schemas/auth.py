@@ -30,6 +30,9 @@ class UserInfo(BaseModel):
     plan: str = "trial"
     trial_ends_at: Optional[str] = None
     role: str = "user"
+    # 公众号客户端凭证：返回是否已设（不返回原值，避免泄露）
+    mp_auth_uin: Optional[str] = None
+    mp_auth_at: Optional[str] = None
 
 
 class UserCreate(BaseModel):

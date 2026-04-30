@@ -6,7 +6,7 @@ import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure, Tooltip,
 } from "@nextui-org/react";
-import { Plus, RefreshCw, Trash2, Newspaper, Sparkles, ChevronDown, Search, Wand2, Copy } from "lucide-react";
+import { Plus, RefreshCw, Trash2, Newspaper, Sparkles, ChevronDown, Search, Wand2, Copy, Key } from "lucide-react";
 import { Input } from "@nextui-org/react";
 import { useAuth } from "@/contexts/AuthContext";
 
@@ -53,6 +53,39 @@ export default function MpPage() {
   const [expandedSummary, setExpandedSummary] = useState<Set<string>>(new Set());
   const [searchQ, setSearchQ] = useState("");
   const [activeAuthor, setActiveAuthor] = useState<string | null>(null);
+
+  // 客户端凭证（手动模式）
+  const authModal = useDisclosure();
+  const [authForm, setAuthForm] = useState({ uin: "", key: "", pass_ticket: "", appmsg_token: "" });
+  const [authSaving, setAuthSaving] = useState(false);
+  const [authStatus, setAuthStatus] = useState<{ has_auth: boolean; mp_auth_at: string | null }>({ has_auth: false, mp_auth_at: null });
+
+  const loadAuthStatus = async () => {
+    const r = await fetch(`/api/auth/me`, { headers });
+    if (r.ok) {
+      const u = await r.json();
+      setAuthStatus({
+        has_auth: !!(u.mp_auth_uin && u.mp_auth_key),
+        mp_auth_at: u.mp_auth_at || null,
+      });
+    }
+  };
+  useEffect(() => { if (token) loadAuthStatus(); }, [token]);
+
+  const submitAuth = async () => {
+    setAuthSaving(true);
+    try {
+      await fetch(`/api/auth/me/mp-auth`, {
+        method: "PUT", headers,
+        body: JSON.stringify(authForm),
+      });
+      authModal.onClose();
+      setAuthForm({ uin: "", key: "", pass_ticket: "", appmsg_token: "" });
+      await loadAuthStatus();
+    } finally {
+      setAuthSaving(false);
+    }
+  };
 
   // 跨平台改写
   const crossModal = useDisclosure();
@@ -197,6 +230,12 @@ export default function MpPage() {
           <Chip size="sm" color="primary" variant="flat">v1 - 详情抓取</Chip>
         </div>
         <div className="flex gap-2">
+          <Button size="sm" variant="flat"
+            startContent={<Key size={15} />}
+            color={authStatus.has_auth ? "success" : "warning"}
+            onPress={authModal.onOpen}>
+            {authStatus.has_auth ? "凭证已录入" : "录入阅读数凭证"}
+          </Button>
           <Button size="sm" variant="flat"
             startContent={<RefreshCw size={15} className={checking ? "animate-spin" : ""} />}
             onPress={handleCheck} isLoading={checking}>
@@ -376,6 +415,60 @@ export default function MpPage() {
           <ModalFooter>
             <Button variant="light" onPress={onClose}>取消</Button>
             <Button color="primary" onPress={handleAdd} isLoading={adding}>添加</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* 阅读数凭证录入 Modal */}
+      <Modal isOpen={authModal.isOpen} onClose={authModal.onClose} size="2xl" scrollBehavior="inside">
+        <ModalContent>
+          <ModalHeader className="flex items-center gap-2">
+            <Key size={18} className="text-warning" />
+            录入公众号客户端凭证
+            <Chip size="sm" variant="flat">v1 手动模式</Chip>
+          </ModalHeader>
+          <ModalBody className="space-y-3">
+            <div className="text-sm text-default-600 space-y-2 bg-default-50 rounded-lg p-3">
+              <p className="font-medium">为什么要录入凭证？</p>
+              <p className="text-xs text-default-500">
+                公众号阅读数 / 在看数只能通过模拟客户端抓取，需要 <code>uin / key / pass_ticket / appmsg_token</code> 4 个字段，
+                key 大约 30 分钟过期，过期后需要重新录入。
+              </p>
+              <p className="font-medium pt-1">如何获取？</p>
+              <ol className="text-xs text-default-500 ml-4 space-y-0.5 list-decimal">
+                <li>用 Charles / Fiddler / mitmproxy 抓微信包（手机和电脑同一 wifi 配代理）</li>
+                <li>在微信里打开任意公众号文章</li>
+                <li>找到 <code>/mp/getappmsgext</code> 请求，从 URL 参数复制 uin / key / pass_ticket / appmsg_token</li>
+                <li>粘贴到下面输入框保存</li>
+              </ol>
+              <p className="text-xs text-warning">
+                ⚠️ key 过期后调用会失败、显示阅读数 0；管理员可考虑接 NewRank SaaS（issue #23）避免维护
+              </p>
+            </div>
+            <Input label="uin" placeholder="MzXxxxxxx 或纯数字"
+              value={authForm.uin}
+              onValueChange={(v) => setAuthForm((f) => ({ ...f, uin: v }))} />
+            <Input label="key" placeholder="abc..." type="password"
+              value={authForm.key}
+              onValueChange={(v) => setAuthForm((f) => ({ ...f, key: v }))} />
+            <Input label="pass_ticket（可选）" placeholder="abc..."
+              value={authForm.pass_ticket}
+              onValueChange={(v) => setAuthForm((f) => ({ ...f, pass_ticket: v }))} />
+            <Input label="appmsg_token（可选）" placeholder="abc..."
+              value={authForm.appmsg_token}
+              onValueChange={(v) => setAuthForm((f) => ({ ...f, appmsg_token: v }))} />
+            <p className="text-xs text-default-400">
+              {authStatus.has_auth
+                ? `当前凭证更新于 ${authStatus.mp_auth_at?.slice(0, 16)}（提交新值会覆盖）`
+                : "尚未录入凭证。无凭证时阅读数显示为 0，但文章正文/标题/摘要等仍然可抓。"}
+            </p>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="light" onPress={authModal.onClose}>取消</Button>
+            <Button color="primary" onPress={submitAuth} isLoading={authSaving}
+              isDisabled={!authForm.uin || !authForm.key}>
+              保存凭证
+            </Button>
           </ModalFooter>
         </ModalContent>
       </Modal>

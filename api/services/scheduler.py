@@ -46,10 +46,22 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
     detail_post = {
         "note_id": note_id,
         "post_id": note_id,
+        "url": post.get("note_url"),
         "xsec_token": post.get("xsec_token", ""),
         "xsec_source": post.get("xsec_source", "app_share"),
         "account_cookie": post.get("account_cookie"),
     }
+    # 公众号 fetch 用 user.mp_auth_* 作为 account（不是 monitor_accounts 表）
+    if (post.get("platform") or "xhs") == "mp":
+        from . import auth_service
+        u = auth_service.get_user_by_id(post.get("user_id")) if post.get("user_id") else None
+        if u and u.get("mp_auth_uin"):
+            account = {
+                "mp_auth_uin":         u.get("mp_auth_uin"),
+                "mp_auth_key":         u.get("mp_auth_key"),
+                "mp_auth_pass_ticket": u.get("mp_auth_pass_ticket"),
+                "mp_auth_appmsg_token": u.get("mp_auth_appmsg_token"),
+            }
     import time as _t
     _t0 = _t.perf_counter()
     metrics, fetch_status = await plat.fetch_detail(detail_post, account=account)

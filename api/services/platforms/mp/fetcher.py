@@ -107,6 +107,56 @@ def _extract_body(html: str) -> tuple[str, list[str]]:
     return _strip_html(raw), imgs[:20]
 
 
+async def fetch_article_stats(
+    biz: str, mid: str, idx: str,
+    uin: str, key: str, pass_ticket: str = "", appmsg_token: str = "",
+) -> Optional[Dict[str, int]]:
+    """走 /mp/getappmsgext 拿阅读数 / 在看数 / 点赞数。
+
+    需要客户端凭证（uin / key），key 约 30 分钟过期。
+    返回 {"read_num", "like_num", "old_like_num"} 或 None（凭证无效/失败）。
+
+    凭证有限制 v1：先按描述实现接口，未真实测试。生产首次跑会暴露问题，
+    届时根据 wechat-articles-crawler / WeChatRobot 的开源实现微调。
+    """
+    if not uin or not key:
+        return None
+    url = "https://mp.weixin.qq.com/mp/getappmsgext"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 Mobile/15E148 MicroMessenger/8.0.40"
+        ),
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    params = {
+        "uin": uin, "key": key,
+        "pass_ticket": pass_ticket or "",
+        "wxtoken": "777",
+        "appmsg_token": appmsg_token or "",
+        "x5": "0", "f": "json",
+    }
+    body = {"is_only_read": "1", "is_temp_url": "0", "appmsg_type": "9"}
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(url, headers=headers, params=params, data=body)
+            data = r.json()
+    except Exception as e:
+        logger.warning(f"[mp] getappmsgext fail: {e}")
+        return None
+    info = data.get("appmsgstat") or {}
+    if not info:
+        # 凭证过期返回 base_resp.ret != 0
+        ret = (data.get("base_resp") or {}).get("ret")
+        logger.warning(f"[mp] getappmsgext ret={ret} (凭证可能过期)")
+        return None
+    return {
+        "read_num": int(info.get("read_num") or 0),
+        "like_num": int(info.get("like_num") or 0),
+        "old_like_num": int(info.get("old_like_num") or 0),
+    }
+
+
 class MpPlatform(Platform):
     name = "mp"
     label = "公众号"
@@ -188,13 +238,30 @@ class MpPlatform(Platform):
         # desc 留 200 字预览，正文最多 5000 给 AI 摘要
         body_for_ai = body_preview[:5000]
 
+        # 阅读数 / 在看数：用 account 里的客户端凭证（v1 手动模式）
+        read_num = 0
+        like_num = 0
+        if account and account.get("mp_auth_uin"):
+            ids = _extract_ids_from_url(url)
+            if ids:
+                stats = await fetch_article_stats(
+                    biz=ids["biz"], mid=ids["mid"], idx=ids["idx"],
+                    uin=account.get("mp_auth_uin", ""),
+                    key=account.get("mp_auth_key", ""),
+                    pass_ticket=account.get("mp_auth_pass_ticket", ""),
+                    appmsg_token=account.get("mp_auth_appmsg_token", ""),
+                )
+                if stats:
+                    read_num = stats["read_num"]
+                    like_num = stats["like_num"]
+
         return ({
             "title": title[:200],
             # 正文太长时把摘要+正文都塞 desc 字段（schema 已是 5000 上限）
             "desc": (desc + "\n\n" + body_for_ai).strip()[:5000],
-            # 公众号没有点赞收藏（v1）；阅读数走单独 issue #22
-            "liked_count": 0,
-            "collected_count": 0,
+            # 公众号语义复用：liked = 在看（like_num） / collected = 阅读数（read_num）
+            "liked_count": like_num,
+            "collected_count": read_num,
             "comment_count": 0,
             "share_count": 0,
             "cover_url": cdn,
@@ -202,7 +269,6 @@ class MpPlatform(Platform):
             "video_url": "",
             "note_type": "article",
             "author": nickname,
-            # 公众号专属字段（前端可选展示）
             "publish_ts": int(ct) if (ct and ct.isdigit()) else 0,
             "copyright_stat": copyright_stat,
             "source_url": source_url,

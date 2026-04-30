@@ -8,6 +8,8 @@
 - POST /auth/logout - 用户登出
 """
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -187,6 +189,30 @@ async def admin_update_user(
     if "is_active" in payload and isinstance(payload["is_active"], bool):
         payload["is_active"] = 1 if payload["is_active"] else 0
     update_user_admin(user_id, **payload)
+    return {"ok": True}
+
+
+from pydantic import BaseModel as _BM
+
+
+class UpdateMpAuthRequest(_BM):
+    uin: Optional[str] = None
+    key: Optional[str] = None
+    pass_ticket: Optional[str] = None
+    appmsg_token: Optional[str] = None
+
+
+@router.put("/me/mp-auth", summary="更新公众号客户端凭证")
+async def update_my_mp_auth(
+    req: UpdateMpAuthRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    from ..services.auth_service import update_user_mp_auth
+    update_user_mp_auth(
+        current_user["id"],
+        uin=req.uin, key=req.key,
+        pass_ticket=req.pass_ticket, appmsg_token=req.appmsg_token,
+    )
     return {"ok": True}
 
 

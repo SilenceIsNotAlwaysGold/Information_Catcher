@@ -91,6 +91,13 @@ def init_user_db():
     _ensure_column(cursor, "users", "wecom_webhook_url",  "TEXT DEFAULT ''")
     # 配额：监控帖子上限（trial=50, team=500, enterprise=10000；admin/老用户走默认 200）
     _ensure_column(cursor, "users", "max_monitor_posts", "INTEGER DEFAULT 200")
+    # 公众号客户端凭证（手动从微信抓包获取，~30 分钟过期需用户刷新）
+    # 用户在「公众号设置」页面提供，仅自己可见可改
+    _ensure_column(cursor, "users", "mp_auth_uin",          "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "mp_auth_key",          "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "mp_auth_pass_ticket",  "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "mp_auth_appmsg_token", "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "mp_auth_at",           "TEXT")
 
     # email 唯一索引（NULL 允许多个）
     cursor.execute(
@@ -263,7 +270,12 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "SELECT id, username, email, is_active, plan, trial_ends_at, role, "
         "       COALESCE(feishu_webhook_url,'') AS feishu_webhook_url, "
         "       COALESCE(wecom_webhook_url,'')  AS wecom_webhook_url, "
-        "       COALESCE(max_monitor_posts, 200) AS max_monitor_posts "
+        "       COALESCE(max_monitor_posts, 200) AS max_monitor_posts, "
+        "       COALESCE(mp_auth_uin,'')          AS mp_auth_uin, "
+        "       COALESCE(mp_auth_key,'')          AS mp_auth_key, "
+        "       COALESCE(mp_auth_pass_ticket,'')  AS mp_auth_pass_ticket, "
+        "       COALESCE(mp_auth_appmsg_token,'') AS mp_auth_appmsg_token, "
+        "       mp_auth_at "
         "FROM users WHERE id = ?",
         (user_id,)
     )
@@ -282,7 +294,40 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "feishu_webhook_url": row["feishu_webhook_url"] or "",
         "wecom_webhook_url":  row["wecom_webhook_url"]  or "",
         "max_monitor_posts": int(row["max_monitor_posts"] or 200),
+        "mp_auth_uin":          row["mp_auth_uin"] or "",
+        "mp_auth_key":          row["mp_auth_key"] or "",
+        "mp_auth_pass_ticket":  row["mp_auth_pass_ticket"] or "",
+        "mp_auth_appmsg_token": row["mp_auth_appmsg_token"] or "",
+        "mp_auth_at": row["mp_auth_at"],
     }
+
+
+def update_user_mp_auth(
+    user_id: int,
+    uin: Optional[str] = None,
+    key: Optional[str] = None,
+    pass_ticket: Optional[str] = None,
+    appmsg_token: Optional[str] = None,
+) -> None:
+    """用户更新自己的公众号客户端凭证。"""
+    fields, values = [], []
+    if uin is not None:
+        fields.append("mp_auth_uin = ?"); values.append(uin)
+    if key is not None:
+        fields.append("mp_auth_key = ?"); values.append(key)
+    if pass_ticket is not None:
+        fields.append("mp_auth_pass_ticket = ?"); values.append(pass_ticket)
+    if appmsg_token is not None:
+        fields.append("mp_auth_appmsg_token = ?"); values.append(appmsg_token)
+    if not fields:
+        return
+    fields.append("mp_auth_at = datetime('now', 'localtime')")
+    values.append(user_id)
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    cur.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
+    conn.commit()
+    conn.close()
 
 
 def update_user_webhooks(
