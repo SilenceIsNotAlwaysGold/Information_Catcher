@@ -164,7 +164,14 @@ async def _open_builtin(pw, account: Dict) -> Tuple:
 
     cookie = account.get("cookie", "")
     if cookie:
-        await context.add_cookies(_cookie_str_to_list(cookie))
+        # cookie 按 platform 设到对应域：xhs 默认；抖音 .douyin.com；公众号 mp 域
+        platform = (account.get("platform") or "xhs").lower()
+        cookie_domain = {
+            "xhs": ".xiaohongshu.com",
+            "douyin": ".douyin.com",
+            "mp": ".weixin.qq.com",
+        }.get(platform, ".xiaohongshu.com")
+        await context.add_cookies(_cookie_str_to_list(cookie, domain=cookie_domain))
     return browser, context
 
 

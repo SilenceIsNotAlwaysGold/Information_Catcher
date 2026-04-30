@@ -580,18 +580,21 @@ async def run_trending_monitor():
     enrich = settings.get("trending_enrich_desc", "1") == "1"
     enrich_concurrency = int(settings.get("trending_enrich_concurrency", "3") or "3")
 
-    # 当前 trending 仅 XHS。后续接抖音时按 keyword 配置加 platform 字段拆分。
-    xhs_plat = platform_registry.get_platform("xhs")
-
+    # 按账号 platform 路由（xhs 用 XHS 搜索，douyin 用抖音搜索）
     for idx, keyword in enumerate(keywords):
         account = accounts[idx % len(accounts)]
+        acc_platform = (account.get("platform") or "xhs").lower()
+        plat = platform_registry.get_platform(acc_platform)
+        if not plat:
+            logger.warning(f"[trending] unknown platform '{acc_platform}' for account {account.get('id')}, skipping")
+            continue
         import time as _t
         _t0 = _t.perf_counter()
         try:
-            posts = await xhs_plat.search_trending(keyword, account, min_likes)
+            posts = await plat.search_trending(keyword, account, min_likes)
             _ms = int((_t.perf_counter() - _t0) * 1000)
             await db.log_fetch(
-                platform="xhs", task_type="trending",
+                platform=acc_platform, task_type="trending",
                 status="ok" if posts else "error",
                 latency_ms=_ms,
                 account_id=account.get("id") if account else None,

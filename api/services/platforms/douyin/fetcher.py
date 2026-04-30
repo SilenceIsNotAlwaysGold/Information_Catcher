@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -260,5 +261,90 @@ class DouyinPlatform(Platform):
     async def search_trending(
         self, keyword: str, account: Dict[str, Any], min_likes: int = 0,
     ) -> List[Dict[str, Any]]:
-        # 抖音搜索需 X-Bogus 签名，作为单独 milestone 实现
-        raise NotImplementedError("抖音搜索功能开发中（需要 X-Bogus 签名拦截）")
+        """关键词搜索抖音热门视频。
+
+        实现：用账号 cookie 在 Playwright 里加载 douyin.com/search 页，
+        让浏览器自己签 X-Bogus / a_bogus，拦截 /aweme/v1/web/search/item 响应。
+
+        要求：account.platform='douyin' 且 cookie 含 sessionid_ss/sessionid。
+        """
+        if not account or not account.get("cookie"):
+            logger.warning("[douyin] search 需要带 cookie 的账号")
+            return []
+        if (account.get("platform") or "xhs") != "douyin":
+            logger.warning(f"[douyin] search 账号 platform={account.get('platform')} 非抖音")
+            return []
+
+        from urllib.parse import quote
+        from ...account_browser import open_account_context
+
+        collected: List[Dict[str, Any]] = []
+
+        async with open_account_context(account) as (_browser, context):
+            page = await context.new_page()
+
+            async def on_response(response):
+                # 拦截搜索接口（多个 endpoint 名都可能命中）
+                url = response.url or ""
+                if "search/item" not in url and "search/general/multi" not in url:
+                    return
+                if response.status != 200:
+                    return
+                try:
+                    body = await response.json()
+                except Exception:
+                    return
+                items = body.get("data", []) or []
+                for item in items:
+                    aweme = item.get("aweme_info") or item.get("aweme") or item
+                    if not isinstance(aweme, dict):
+                        continue
+                    aid = aweme.get("aweme_id") or aweme.get("awemeId")
+                    if not aid:
+                        continue
+                    stats = aweme.get("statistics") or {}
+                    digg = _parse_count(stats.get("digg_count"))
+                    if digg < min_likes:
+                        continue
+                    author = aweme.get("author") or {}
+                    video = aweme.get("video") or {}
+                    cover = video.get("cover") or {}
+                    cover_list = cover.get("url_list") if isinstance(cover, dict) else None
+                    play = video.get("play_addr") or {}
+                    play_list = play.get("url_list") if isinstance(play, dict) else None
+                    title = (aweme.get("desc") or "")[:200]
+                    collected.append({
+                        "note_id": aid,
+                        "title": title,
+                        "desc_text": aweme.get("desc") or "",
+                        "xsec_token": "",
+                        "note_url": f"https://www.iesdouyin.com/share/video/{aid}/",
+                        "liked_count": digg,
+                        "collected_count": _parse_count(stats.get("collect_count")),
+                        "comment_count": _parse_count(stats.get("comment_count")),
+                        "author": author.get("nickname") or "",
+                        "cover_url": (cover_list[0] if cover_list else ""),
+                        "images": [],
+                        "video_url": (play_list[0] if play_list else ""),
+                        "note_type": "video",
+                    })
+
+            page.on("response", on_response)
+
+            try:
+                # 先访问首页让 cookie 加载
+                await page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(2)
+                # 搜索页 URL
+                search_url = f"https://www.douyin.com/search/{quote(keyword)}?type=video"
+                async with page.expect_response(
+                    lambda r: ("search/item" in r.url or "search/general/multi" in r.url) and r.status == 200,
+                    timeout=20000,
+                ):
+                    await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(3)
+            except Exception as e:
+                logger.warning(f"[douyin] search '{keyword}' 加载失败: {e}")
+
+        logger.info(f"[douyin] keyword='{keyword}' found {len(collected)} videos >= {min_likes} likes")
+        return collected
