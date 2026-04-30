@@ -53,6 +53,12 @@ class LockVariantRequest(BaseModel):
     variant: str
 
 
+class AddCreatorRequest(BaseModel):
+    creator_url: str
+    creator_name: Optional[str] = ""
+    platform: Optional[str] = None  # 不填自动从 URL 识别
+
+
 class SyncBitableRequest(BaseModel):
     note_ids: List[str]
 

@@ -195,6 +195,22 @@ CREATE INDEX IF NOT EXISTS idx_own_comments_found ON own_comments(found_at);
 CREATE INDEX IF NOT EXISTS idx_own_msg_found ON own_messages(found_at);
 CREATE INDEX IF NOT EXISTS idx_note_comments ON note_comments_cache(note_id);
 
+CREATE TABLE IF NOT EXISTS monitor_creators (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    platform TEXT NOT NULL,             -- xhs / douyin / mp
+    creator_url TEXT NOT NULL,
+    creator_name TEXT DEFAULT '',
+    creator_id TEXT DEFAULT '',         -- 平台 sec_uid / user_id / biz
+    last_check_at TEXT,
+    last_post_id TEXT DEFAULT '',       -- 上次见到的最新帖子，用于增量检测
+    is_active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    UNIQUE(user_id, platform, creator_url)
+);
+CREATE INDEX IF NOT EXISTS idx_creator_user ON monitor_creators(user_id);
+CREATE INDEX IF NOT EXISTS idx_creator_active ON monitor_creators(is_active, platform);
+
 CREATE TABLE IF NOT EXISTS fetch_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     platform TEXT NOT NULL,             -- xhs / douyin / mp
@@ -999,6 +1015,68 @@ async def search_posts(
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+async def add_creator(
+    user_id: int, platform: str, creator_url: str,
+    creator_name: str = "", creator_id: str = "",
+) -> int:
+    """添加订阅博主。重复 (user, platform, url) 直接 IGNORE 不报错。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT OR IGNORE INTO monitor_creators "
+            "(user_id, platform, creator_url, creator_name, creator_id, is_active) "
+            "VALUES (?,?,?,?,?,1)",
+            (user_id, platform, creator_url.strip(), creator_name, creator_id),
+        )
+        await db.commit()
+        if cur.lastrowid:
+            return cur.lastrowid
+        # 重复 → 取已存在的 id
+        cur = await db.execute(
+            "SELECT id FROM monitor_creators WHERE user_id=? AND platform=? AND creator_url=?",
+            (user_id, platform, creator_url.strip()),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else 0
+
+
+async def list_creators(user_id: Optional[int] = None) -> List[Dict]:
+    sql = "SELECT * FROM monitor_creators WHERE is_active=1"
+    params: list = []
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params.append(user_id)
+    sql += " ORDER BY id DESC"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def delete_creator(creator_id: int, user_id: Optional[int] = None) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        if user_id is not None:
+            await db.execute(
+                "UPDATE monitor_creators SET is_active=0 WHERE id=? AND user_id=?",
+                (creator_id, user_id),
+            )
+        else:
+            await db.execute("UPDATE monitor_creators SET is_active=0 WHERE id=?", (creator_id,))
+        await db.commit()
+
+
+async def update_creator_check(creator_id: int, last_post_id: str = "", creator_name: str = "") -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        sets = ["last_check_at=datetime('now','localtime')"]
+        vals: list = []
+        if last_post_id:
+            sets.append("last_post_id=?"); vals.append(last_post_id)
+        if creator_name:
+            sets.append("creator_name=?"); vals.append(creator_name)
+        vals.append(creator_id)
+        await db.execute(f"UPDATE monitor_creators SET {','.join(sets)} WHERE id=?", vals)
+        await db.commit()
 
 
 async def log_fetch(

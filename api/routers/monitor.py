@@ -16,6 +16,7 @@ from ..schemas.monitor import (
     SyncBitableRequest,
     CreateGroupRequest,
     UpdateGroupRequest,
+    AddCreatorRequest,
 )
 from ..services import monitor_db as db
 from ..services import monitor_fetcher as fetcher
@@ -367,6 +368,94 @@ async def proxy_forwarder_status(current_user: dict = Depends(get_current_user))
     if (current_user.get("role") or "user") != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return proxy_forwarder.status_dump()
+
+
+# ── Creators / 博主订阅追新 ─────────────────────────────────────────────────
+
+@router.get("/creators", summary="订阅博主列表")
+async def list_creators(current_user: dict = Depends(get_current_user)):
+    return {"creators": await db.list_creators(user_id=_scope_uid(current_user))}
+
+
+@router.post("/creators", summary="添加订阅博主")
+async def add_creator(
+    req: AddCreatorRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    plat = platform_registry.detect_platform(req.creator_url)
+    if not plat and req.platform:
+        plat = platform_registry.get_platform(req.platform)
+    if not plat:
+        raise HTTPException(
+            status_code=400,
+            detail="无法识别平台，请提供平台明确的博主主页 URL（小红书 / 抖音 / 公众号）",
+        )
+    cid = await db.add_creator(
+        user_id=current_user["id"],
+        platform=plat.name,
+        creator_url=req.creator_url.strip(),
+        creator_name=req.creator_name or "",
+    )
+    return {"ok": True, "id": cid, "platform": plat.name}
+
+
+@router.delete("/creators/{creator_id}", summary="取消订阅")
+async def delete_creator(
+    creator_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    await db.delete_creator(creator_id, user_id=_scope_uid(current_user))
+    return {"ok": True}
+
+
+@router.post("/creators/{creator_id}/check", summary="立刻抓取博主新发帖（手动触发）")
+async def check_creator(
+    creator_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    creators = await db.list_creators(user_id=_scope_uid(current_user))
+    creator = next((c for c in creators if c["id"] == creator_id), None)
+    if not creator:
+        raise HTTPException(status_code=404, detail="博主不存在")
+    plat = platform_registry.get_platform(creator["platform"])
+    if not plat:
+        raise HTTPException(status_code=400, detail="未知平台")
+    try:
+        posts = await plat.fetch_creator_posts(creator["creator_url"], account=None)
+    except NotImplementedError as e:
+        raise HTTPException(
+            status_code=501,
+            detail=f"{creator['platform']} 博主追新尚未实现（依赖 #13 抖音账号系统 / #15 抖音追新 / 后续 XHS）。当前订阅记录已保存，等实现后自动启用。",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"抓取失败：{e}")
+    # 把新帖子加到该用户的「我的关注」分组
+    new_count = 0
+    last_post_id = creator.get("last_post_id") or ""
+    newest = last_post_id
+    for p in posts:
+        pid = p.get("post_id")
+        if not pid:
+            continue
+        if pid == last_post_id:
+            break  # 增量到这里就停
+        # 加到 monitor_posts
+        await db.add_post(
+            note_id=pid, title=p.get("title") or "",
+            short_url=p.get("url") or "", note_url=p.get("url") or "",
+            xsec_token=p.get("xsec_token", ""), xsec_source="app_share",
+            account_id=None, post_type="own",
+            user_id=current_user["id"],
+            platform=plat.name,
+        )
+        new_count += 1
+        if not newest:
+            newest = pid
+    await db.update_creator_check(
+        creator_id, last_post_id=newest,
+        creator_name=(posts[0].get("creator_name", "") if posts else ""),
+    )
+    return {"ok": True, "fetched": len(posts), "added": new_count}
 
 
 @router.get("/health", summary="抓取健康度大盘（admin only）")

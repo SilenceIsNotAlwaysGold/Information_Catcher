@@ -57,3 +57,13 @@ class Platform(ABC):
     ) -> List[Dict[str, Any]]:
         """关键词搜索热门内容。默认未实现，平台可选覆盖。"""
         raise NotImplementedError(f"{self.name} 不支持搜索")
+
+    async def fetch_creator_posts(
+        self, creator_url: str, account: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """拿一个博主主页最近发布的帖子列表（用于「博主订阅追新」）。
+
+        每个返回项至少含：post_id, url, title, published_at（可选）。
+        默认未实现，平台可选覆盖。
+        """
+        raise NotImplementedError(f"{self.name} 不支持博主追新")
