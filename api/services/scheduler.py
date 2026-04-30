@@ -428,6 +428,75 @@ async def run_own_comments_check():
         logger.info(f"[own_comments] 新增 {new_total} 条评论")
 
 
+async def run_creator_check():
+    """博主订阅追新：定时遍历 monitor_creators，把新发的帖子拉进监控列表。"""
+    creators = await db.list_creators()
+    if not creators:
+        return
+    logger.info(f"[creator_check] checking {len(creators)} creators")
+
+    # 每个用户的抖音账号缓存（追新需要登录账号）
+    douyin_accounts_by_uid: dict = {}
+
+    for creator in creators:
+        plat = platform_registry.get_platform(creator.get("platform") or "xhs")
+        if not plat:
+            continue
+        uid = creator.get("user_id")
+
+        account = None
+        if creator.get("platform") == "douyin":
+            if uid not in douyin_accounts_by_uid:
+                accs = await db.get_accounts(
+                    include_secrets=True, user_id=uid, platform="douyin",
+                )
+                douyin_accounts_by_uid[uid] = next(
+                    (a for a in accs if a.get("cookie")), None,
+                )
+            account = douyin_accounts_by_uid.get(uid)
+            if not account:
+                continue  # 没账号直接跳过
+
+        try:
+            posts = await plat.fetch_creator_posts(creator["creator_url"], account=account)
+        except NotImplementedError:
+            continue
+        except Exception as e:
+            logger.error(f"[creator_check] {creator['creator_url']} error: {e}")
+            continue
+
+        last_post_id = creator.get("last_post_id") or ""
+        newest = last_post_id
+        added = 0
+        for p in posts:
+            pid = p.get("post_id")
+            if not pid:
+                continue
+            if pid == last_post_id:
+                break
+            try:
+                await db.add_post(
+                    note_id=pid, title=p.get("title") or "",
+                    short_url=p.get("url") or "", note_url=p.get("url") or "",
+                    xsec_token=p.get("xsec_token", ""), xsec_source="app_share",
+                    account_id=None, post_type="own",
+                    user_id=uid,
+                    platform=plat.name,
+                )
+                added += 1
+                if not newest:
+                    newest = pid
+            except Exception as e:
+                logger.debug(f"[creator_check] add_post {pid} skipped: {e}")
+
+        await db.update_creator_check(
+            creator["id"], last_post_id=newest,
+            creator_name=(posts[0].get("creator_name", "") if posts else ""),
+        )
+        if added:
+            logger.info(f"[creator_check] {creator.get('creator_name') or creator['creator_url']} +{added} 新帖")
+
+
 async def run_cookie_health_check():
     """Daily job: probe each active account's cookie. Notify on transition to expired."""
     settings = await db.get_all_settings()
@@ -701,6 +770,9 @@ async def start_scheduler():
     # 我的帖子的评论独立轮询（跟监控间隔一致；带 cookie 才有效，没绑账号会自动跳过）
     scheduler.add_job(run_own_comments_check, "interval", minutes=interval,
                       id="own_comments_check", replace_existing=True)
+    # 博主订阅追新（每 6 小时一次）
+    scheduler.add_job(run_creator_check, "interval", hours=6,
+                      id="creator_check", replace_existing=True)
     # Cookie health probe — paused during the "新号静置实验" so the new account
     # is not touched by our system at all. Re-enable when we know whether the
     # warning was caused by our access pattern or by external multi-device login.

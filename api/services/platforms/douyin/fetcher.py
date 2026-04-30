@@ -348,3 +348,81 @@ class DouyinPlatform(Platform):
 
         logger.info(f"[douyin] keyword='{keyword}' found {len(collected)} videos >= {min_likes} likes")
         return collected
+
+    async def fetch_creator_posts(
+        self, creator_url: str, account: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """抓博主主页发布列表。
+
+        URL 形如 https://www.douyin.com/user/{sec_uid}
+        实现：用账号 cookie 在 Playwright 里加载主页，拦截 /aweme/v1/web/aweme/post API
+        让浏览器自己签 X-Bogus。
+        """
+        if not account or not account.get("cookie"):
+            logger.warning("[douyin] creator追新 需要带 cookie 的账号")
+            return []
+        if (account.get("platform") or "xhs") != "douyin":
+            logger.warning(f"[douyin] creator account platform={account.get('platform')} 非抖音")
+            return []
+
+        from ...account_browser import open_account_context
+
+        # 解析 sec_uid（拿来取昵称用，不强校验）
+        sec_uid_match = re.search(r"/user/([^/?#]+)", creator_url or "")
+        sec_uid = sec_uid_match.group(1) if sec_uid_match else ""
+
+        collected: List[Dict[str, Any]] = []
+        creator_name = ""
+
+        async with open_account_context(account) as (_browser, context):
+            page = await context.new_page()
+
+            async def on_response(response):
+                url = response.url or ""
+                if "aweme/post" not in url or response.status != 200:
+                    return
+                try:
+                    body = await response.json()
+                except Exception:
+                    return
+                aweme_list = body.get("aweme_list") or []
+                nonlocal creator_name
+                for aw in aweme_list:
+                    if not isinstance(aw, dict):
+                        continue
+                    aid = aw.get("aweme_id") or aw.get("awemeId")
+                    if not aid:
+                        continue
+                    author = aw.get("author") or {}
+                    if not creator_name:
+                        creator_name = author.get("nickname") or ""
+                    desc = aw.get("desc") or ""
+                    create_time = aw.get("create_time") or 0
+                    collected.append({
+                        "post_id": str(aid),
+                        "url": f"https://www.douyin.com/video/{aid}",
+                        "title": desc[:200],
+                        "creator_name": creator_name,
+                        "published_at": int(create_time) if create_time else 0,
+                        "xsec_token": "",
+                    })
+
+            page.on("response", on_response)
+
+            try:
+                await page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(2)
+                target = creator_url
+                if not target.startswith("http"):
+                    target = f"https://www.douyin.com/user/{sec_uid}" if sec_uid else f"https://www.douyin.com/{target}"
+                async with page.expect_response(
+                    lambda r: "aweme/post" in r.url and r.status == 200,
+                    timeout=20000,
+                ):
+                    await page.goto(target, wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(3)
+            except Exception as e:
+                logger.warning(f"[douyin] creator '{creator_url}' 加载失败: {e}")
+
+        logger.info(f"[douyin] creator='{creator_url}' fetched {len(collected)} posts")
+        return collected
