@@ -59,6 +59,13 @@ class AddCreatorRequest(BaseModel):
     platform: Optional[str] = None  # 不填自动从 URL 识别
 
 
+class AddLiveRequest(BaseModel):
+    room_url: str
+    streamer_name: Optional[str] = ""
+    online_alert_threshold: Optional[int] = 0
+    platform: Optional[str] = "douyin"
+
+
 class SyncBitableRequest(BaseModel):
     note_ids: List[str]
 

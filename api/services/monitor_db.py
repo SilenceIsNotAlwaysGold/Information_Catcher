@@ -211,6 +211,24 @@ CREATE TABLE IF NOT EXISTS monitor_creators (
 CREATE INDEX IF NOT EXISTS idx_creator_user ON monitor_creators(user_id);
 CREATE INDEX IF NOT EXISTS idx_creator_active ON monitor_creators(is_active, platform);
 
+CREATE TABLE IF NOT EXISTS monitor_lives (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    platform TEXT NOT NULL DEFAULT 'douyin',
+    room_url TEXT NOT NULL,             -- https://live.douyin.com/{room_id}
+    room_id TEXT DEFAULT '',
+    streamer_name TEXT DEFAULT '',
+    last_online INTEGER DEFAULT 0,      -- 上次抓到的在线人数
+    last_gifts TEXT DEFAULT '',         -- 礼物榜 JSON 快照
+    last_check_at TEXT,
+    online_alert_threshold INTEGER DEFAULT 0,  -- 在线人数涨幅触发阈值
+    is_active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    UNIQUE(user_id, platform, room_url)
+);
+CREATE INDEX IF NOT EXISTS idx_lives_user ON monitor_lives(user_id);
+CREATE INDEX IF NOT EXISTS idx_lives_active ON monitor_lives(is_active, platform);
+
 CREATE TABLE IF NOT EXISTS fetch_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     platform TEXT NOT NULL,             -- xhs / douyin / mp
@@ -1076,6 +1094,71 @@ async def update_creator_check(creator_id: int, last_post_id: str = "", creator_
             sets.append("creator_name=?"); vals.append(creator_name)
         vals.append(creator_id)
         await db.execute(f"UPDATE monitor_creators SET {','.join(sets)} WHERE id=?", vals)
+        await db.commit()
+
+
+async def add_live(
+    user_id: int, platform: str, room_url: str,
+    streamer_name: str = "", online_alert_threshold: int = 0,
+) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT OR IGNORE INTO monitor_lives "
+            "(user_id, platform, room_url, streamer_name, online_alert_threshold, is_active) "
+            "VALUES (?,?,?,?,?,1)",
+            (user_id, platform, room_url.strip(), streamer_name, online_alert_threshold),
+        )
+        await db.commit()
+        if cur.lastrowid:
+            return cur.lastrowid
+        cur = await db.execute(
+            "SELECT id FROM monitor_lives WHERE user_id=? AND platform=? AND room_url=?",
+            (user_id, platform, room_url.strip()),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else 0
+
+
+async def list_lives(user_id: Optional[int] = None) -> List[Dict]:
+    sql = "SELECT * FROM monitor_lives WHERE is_active=1"
+    params: list = []
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params.append(user_id)
+    sql += " ORDER BY id DESC"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def delete_live(live_id: int, user_id: Optional[int] = None) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        if user_id is not None:
+            await db.execute(
+                "UPDATE monitor_lives SET is_active=0 WHERE id=? AND user_id=?",
+                (live_id, user_id),
+            )
+        else:
+            await db.execute("UPDATE monitor_lives SET is_active=0 WHERE id=?", (live_id,))
+        await db.commit()
+
+
+async def update_live_check(
+    live_id: int, online: int = 0, gifts_json: str = "",
+    streamer_name: str = "", room_id: str = "",
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        sets = ["last_check_at=datetime('now','localtime')", "last_online=?"]
+        vals: list = [online]
+        if gifts_json:
+            sets.append("last_gifts=?"); vals.append(gifts_json)
+        if streamer_name:
+            sets.append("streamer_name=?"); vals.append(streamer_name)
+        if room_id:
+            sets.append("room_id=?"); vals.append(room_id)
+        vals.append(live_id)
+        await db.execute(f"UPDATE monitor_lives SET {','.join(sets)} WHERE id=?", vals)
         await db.commit()
 
 

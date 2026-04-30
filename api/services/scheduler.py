@@ -497,6 +497,69 @@ async def run_creator_check():
             logger.info(f"[creator_check] {creator.get('creator_name') or creator['creator_url']} +{added} 新帖")
 
 
+async def run_live_check():
+    """直播间监控 v1：每个 live 拉一次 enter API；在线人数涨幅超阈值告警。"""
+    lives = await db.list_lives()
+    if not lives:
+        return
+    logger.info(f"[live_check] checking {len(lives)} live rooms")
+
+    from .platforms.douyin import live_fetcher
+    from . import auth_service
+    import json as _json
+
+    douyin_accs_by_uid: dict = {}
+
+    for live in lives:
+        uid = live.get("user_id")
+        if uid not in douyin_accs_by_uid:
+            accs = await db.get_accounts(
+                include_secrets=True, user_id=uid, platform="douyin",
+            )
+            douyin_accs_by_uid[uid] = next(
+                (a for a in accs if a.get("cookie")), None,
+            )
+        account = douyin_accs_by_uid.get(uid)
+        if not account:
+            continue
+
+        try:
+            state = await live_fetcher.fetch_live_state(live["room_url"], account)
+        except Exception as e:
+            logger.error(f"[live_check] {live['room_url']} error: {e}")
+            continue
+        if not state:
+            continue
+
+        prev_online = int(live.get("last_online") or 0)
+        new_online = int(state.get("online") or 0)
+        delta = new_online - prev_online
+        thr = int(live.get("online_alert_threshold") or 0)
+
+        await db.update_live_check(
+            live["id"], online=new_online,
+            gifts_json=_json.dumps(state.get("gifts") or [], ensure_ascii=False),
+            streamer_name=state.get("streamer_name") or "",
+            room_id=state.get("room_id") or "",
+        )
+
+        # 涨幅触发告警（推用户自己的 webhook）
+        if thr > 0 and delta >= thr:
+            u = auth_service.get_user_by_id(uid) or {}
+            wecom = u.get("wecom_webhook_url", "")
+            feishu = u.get("feishu_webhook_url", "")
+            if wecom or feishu:
+                title = f"{state.get('streamer_name') or '直播间'} 在线人数 {prev_online}→{new_online}（+{delta}）"
+                try:
+                    await notifier.notify_metric(
+                        wecom, feishu, title, "", "",
+                        "[直播] 涨幅告警",
+                        f"房间：{live['room_url']}\n当前在线：{new_online}\n涨幅：+{delta}",
+                    )
+                except Exception as e:
+                    logger.warning(f"[live_check] notify error: {e}")
+
+
 async def run_cookie_health_check():
     """Daily job: probe each active account's cookie. Notify on transition to expired."""
     settings = await db.get_all_settings()
@@ -773,6 +836,9 @@ async def start_scheduler():
     # 博主订阅追新（每 6 小时一次）
     scheduler.add_job(run_creator_check, "interval", hours=6,
                       id="creator_check", replace_existing=True)
+    # 直播间状态轮询（每 5 分钟）
+    scheduler.add_job(run_live_check, "interval", minutes=5,
+                      id="live_check", replace_existing=True)
     # Cookie health probe — paused during the "新号静置实验" so the new account
     # is not touched by our system at all. Re-enable when we know whether the
     # warning was caused by our access pattern or by external multi-device login.

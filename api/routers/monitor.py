@@ -17,6 +17,7 @@ from ..schemas.monitor import (
     CreateGroupRequest,
     UpdateGroupRequest,
     AddCreatorRequest,
+    AddLiveRequest,
 )
 from ..services import monitor_db as db
 from ..services import monitor_fetcher as fetcher
@@ -479,6 +480,69 @@ async def check_creator(
         creator_name=(posts[0].get("creator_name", "") if posts else ""),
     )
     return {"ok": True, "fetched": len(posts), "added": new_count}
+
+
+# ── Lives / 直播间监控 v1 ───────────────────────────────────────────────────
+
+@router.get("/lives", summary="直播订阅列表")
+async def list_lives(current_user: dict = Depends(get_current_user)):
+    return {"lives": await db.list_lives(user_id=_scope_uid(current_user))}
+
+
+@router.post("/lives", summary="添加直播订阅")
+async def add_live(
+    req: AddLiveRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    if "live.douyin.com" not in (req.room_url or ""):
+        raise HTTPException(status_code=400, detail="目前只支持抖音直播 URL（live.douyin.com/{room_id}）")
+    lid = await db.add_live(
+        user_id=current_user["id"],
+        platform=req.platform or "douyin",
+        room_url=req.room_url.strip(),
+        streamer_name=req.streamer_name or "",
+        online_alert_threshold=req.online_alert_threshold or 0,
+    )
+    return {"ok": True, "id": lid}
+
+
+@router.delete("/lives/{live_id}", summary="取消直播订阅")
+async def delete_live(
+    live_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    await db.delete_live(live_id, user_id=_scope_uid(current_user))
+    return {"ok": True}
+
+
+@router.post("/lives/{live_id}/check", summary="立刻拉取直播间状态")
+async def check_live(
+    live_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    lives = await db.list_lives(user_id=_scope_uid(current_user))
+    live = next((l for l in lives if l["id"] == live_id), None)
+    if not live:
+        raise HTTPException(status_code=404, detail="直播订阅不存在")
+    accs = await db.get_accounts(
+        include_secrets=True, user_id=current_user["id"], platform="douyin",
+    )
+    account = next((a for a in accs if a.get("cookie")), None)
+    if not account:
+        raise HTTPException(status_code=400, detail="需要先添加一个抖音账号（含 cookie）")
+    from ..services.platforms.douyin import live_fetcher
+    state = await live_fetcher.fetch_live_state(live["room_url"], account)
+    if not state:
+        raise HTTPException(status_code=502, detail="未抓到直播间状态（可能未开播）")
+    import json as _json
+    await db.update_live_check(
+        live_id,
+        online=int(state.get("online") or 0),
+        gifts_json=_json.dumps(state.get("gifts") or [], ensure_ascii=False),
+        streamer_name=state.get("streamer_name") or "",
+        room_id=state.get("room_id") or "",
+    )
+    return {"ok": True, "state": state}
 
 
 @router.get("/health", summary="抓取健康度大盘（admin only）")
