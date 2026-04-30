@@ -381,7 +381,7 @@ async def run_own_comments_check():
         return
 
     posts = await db.get_active_posts()
-    own_posts = [p for p in posts if p.get("account_id") and (p.get("platform") or "xhs") == "xhs"]
+    own_posts = [p for p in posts if p.get("account_id") and (p.get("platform") or "xhs") in ("xhs", "douyin")]
     if not own_posts:
         return
     logger.info(f"[own_comments] checking {len(own_posts)} 我的帖子")
