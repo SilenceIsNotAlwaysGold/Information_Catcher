@@ -86,6 +86,9 @@ INSERT OR IGNORE INTO monitor_settings VALUES ('trending_enrich_concurrency', '3
 -- Deprecated 2026-04: 观测帖子改为永远走匿名（app_share 通道），无需 cookie 兜底。
 -- 留 key 不删避免 SELECT 报错；新部署不会再读它。
 INSERT OR IGNORE INTO monitor_settings VALUES ('observe_use_cookie_fallback', '0');
+-- 第三方数据源（公众号 SaaS 集成）：填好后 mp 抓取自动走第三方 API 拿阅读数等
+INSERT OR IGNORE INTO monitor_settings VALUES ('newrank_api_key', '');
+INSERT OR IGNORE INTO monitor_settings VALUES ('newrank_api_base', 'https://api.newrank.cn');
 
 CREATE TABLE IF NOT EXISTS trending_posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

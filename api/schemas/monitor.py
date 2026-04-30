@@ -129,3 +129,5 @@ class UpdateSettingsRequest(BaseModel):
     trending_min_likes: Optional[int] = None
     trending_account_ids: Optional[str] = None
     comments_fetch_enabled: Optional[bool] = None
+    newrank_api_key: Optional[str] = None
+    newrank_api_base: Optional[str] = None

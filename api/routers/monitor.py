@@ -546,6 +546,8 @@ _ADMIN_ONLY_SETTING_KEYS = {
     "feishu_app_id", "feishu_app_secret",
     "check_interval_minutes", "daily_report_time", "daily_report_enabled",
     "trending_account_ids",
+    # 第三方数据源
+    "newrank_api_key", "newrank_api_base",
 }
 
 
@@ -591,6 +593,7 @@ async def update_settings(
         "feishu_app_id", "feishu_app_secret",
         "feishu_bitable_app_token", "feishu_bitable_table_id",
         "trending_keywords", "trending_account_ids",
+        "newrank_api_key", "newrank_api_base",
     ]
     for key in simple_fields:
         if key in _ADMIN_ONLY_SETTING_KEYS and not is_admin:

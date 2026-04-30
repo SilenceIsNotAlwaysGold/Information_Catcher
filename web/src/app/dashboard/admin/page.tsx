@@ -276,6 +276,8 @@ export default function AdminPage() {
           ai_api_key: settings.ai_api_key,
           ai_model: settings.ai_model,
           ai_rewrite_prompt: settings.ai_rewrite_prompt,
+          newrank_api_key: settings.newrank_api_key,
+          newrank_api_base: settings.newrank_api_base,
         }),
       });
     } finally {
@@ -528,6 +530,37 @@ export default function AdminPage() {
 
         <Tab key="health" title="健康度">
           <HealthDashboard token={token} />
+        </Tab>
+
+        <Tab key="external" title="外部数据源">
+          <Card>
+            <CardHeader className="text-sm text-default-500 flex-col items-start gap-1">
+              <span>第三方 SaaS 集成。配好后公众号阅读数等会优先走外部 API（避免维护客户端凭证）</span>
+              <span className="text-xs text-warning">⚠️ NewRank 需要付费签约后获取 API Key（千元/月级）</span>
+            </CardHeader>
+            <CardBody className="space-y-3">
+              <Input
+                label="NewRank API Key"
+                type="password"
+                placeholder="newrank_xxxxxxxxxxxx"
+                value={settings.newrank_api_key || ""}
+                onValueChange={(v) => setSetting("newrank_api_key", v)}
+                description="新榜开放平台 API Key（开通后自动用于公众号文章阅读数 / 博主追新）"
+              />
+              <Input
+                label="NewRank API Base"
+                placeholder="https://api.newrank.cn"
+                value={settings.newrank_api_base || ""}
+                onValueChange={(v) => setSetting("newrank_api_base", v)}
+              />
+              <Button color="primary" onPress={saveSettings} isLoading={saving} className="self-start">
+                保存
+              </Button>
+              <p className="text-xs text-default-400">
+                状态：{settings.newrank_api_key ? "✅ 已配置（公众号抓取会优先走 SaaS）" : "⚪ 未配置（公众号走匿名 URL 抓取）"}
+              </p>
+            </CardBody>
+          </Card>
         </Tab>
 
         <Tab key="ai" title="AI 配置">
