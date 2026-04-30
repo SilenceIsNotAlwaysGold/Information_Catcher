@@ -368,6 +368,66 @@ async def run_monitor():
         logger.info(f"[monitor] skipped {skipped} posts marked as dead (fail_count >= {db.DEAD_POST_FAIL_THRESHOLD})")
 
 
+async def run_own_comments_check():
+    """独立轮询绑定了 account_id 的「我的帖子」组的评论。
+
+    跟 _check_post 内的 alert-driven 拉评论不同，这个任务定期主动拉，
+    第一时间发现新评论（时效性比靠涨幅触发好得多）。
+    """
+    settings = await db.get_all_settings()
+    if settings.get("own_comments_enabled", "1") != "1":
+        return
+    if settings.get("comments_fetch_enabled", "0") != "1":
+        return
+
+    posts = await db.get_active_posts()
+    own_posts = [p for p in posts if p.get("account_id") and (p.get("platform") or "xhs") == "xhs"]
+    if not own_posts:
+        return
+    logger.info(f"[own_comments] checking {len(own_posts)} 我的帖子")
+
+    from . import auth_service
+    new_total = 0
+    for post in own_posts:
+        try:
+            account = await db.get_account(post["account_id"])
+            if not account or account.get("cookie_status") == "expired":
+                continue
+            raw_comments = await comment_fetcher.fetch_note_comments(
+                post["note_id"], post.get("xsec_token", ""), account, max_count=20,
+            )
+            new_comments = await db.add_note_comments(post["note_id"], raw_comments)
+            if not new_comments:
+                continue
+            new_total += len(new_comments)
+            # 推送给该用户
+            uid = post.get("user_id")
+            u = auth_service.get_user_by_id(uid) if uid else {}
+            wecom = (u or {}).get("wecom_webhook_url", "")
+            feishu = (u or {}).get("feishu_webhook_url", "")
+            if wecom or feishu:
+                title = post.get("title") or post["note_id"]
+                await notifier.notify_new_comments(
+                    wecom, feishu, title, post["note_id"],
+                    post.get("xsec_token", ""), new_comments,
+                )
+            await db.log_fetch(
+                platform=post.get("platform") or "xhs",
+                task_type="comment", status="ok",
+                account_id=post["account_id"], note_id=post["note_id"],
+                note=f"new={len(new_comments)}",
+            )
+        except Exception as e:
+            logger.error(f"[own_comments] error on {post['note_id']}: {e}")
+            await db.log_fetch(
+                platform="xhs", task_type="comment", status="error",
+                account_id=post.get("account_id"), note_id=post["note_id"],
+                note=str(e)[:200],
+            )
+    if new_total:
+        logger.info(f"[own_comments] 新增 {new_total} 条评论")
+
+
 async def run_cookie_health_check():
     """Daily job: probe each active account's cookie. Notify on transition to expired."""
     settings = await db.get_all_settings()
@@ -635,6 +695,9 @@ async def start_scheduler():
                       timezone="Asia/Shanghai"), id="daily_report", replace_existing=True)
     scheduler.add_job(run_trending_monitor, "interval", minutes=interval,
                       id="trending_monitor", replace_existing=True)
+    # 我的帖子的评论独立轮询（跟监控间隔一致；带 cookie 才有效，没绑账号会自动跳过）
+    scheduler.add_job(run_own_comments_check, "interval", minutes=interval,
+                      id="own_comments_check", replace_existing=True)
     # Cookie health probe — paused during the "新号静置实验" so the new account
     # is not touched by our system at all. Re-enable when we know whether the
     # warning was caused by our access pattern or by external multi-device login.
@@ -646,8 +709,13 @@ async def start_scheduler():
 
 
 def reschedule(interval_minutes: int, report_time: str):
+    """check_interval_minutes 改了之后所有 interval 任务都跟着调。"""
     hour, minute = _parse_time(report_time)
     scheduler.reschedule_job("monitor_posts", trigger="interval", minutes=interval_minutes)
     scheduler.reschedule_job("trending_monitor", trigger="interval", minutes=interval_minutes)
+    try:
+        scheduler.reschedule_job("own_comments_check", trigger="interval", minutes=interval_minutes)
+    except Exception:
+        pass
     scheduler.reschedule_job("daily_report",
                              trigger=CronTrigger(hour=hour, minute=minute, timezone="Asia/Shanghai"))

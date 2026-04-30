@@ -352,6 +352,17 @@ async def manual_trending(
     return {"ok": True, "message": "trending 任务已触发"}
 
 
+@router.post("/own-comments/check", summary="立即触发评论拉取（admin only，调试用）")
+async def manual_own_comments(
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+):
+    if (current_user.get("role") or "user") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    background_tasks.add_task(sched.run_own_comments_check)
+    return {"ok": True, "message": "评论拉取任务已触发"}
+
+
 @router.post("/daily-report/check", summary="立即触发日报推送（admin only，调试用）")
 async def manual_daily_report(
     background_tasks: BackgroundTasks,
