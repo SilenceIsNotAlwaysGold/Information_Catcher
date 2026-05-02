@@ -1,11 +1,12 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import {
-  Card, CardBody, CardHeader,
-  Button, Textarea, Select, SelectItem,
-  Chip, Divider,
-} from "@nextui-org/react";
+import { Card, CardBody, CardHeader } from "@nextui-org/card";
+import { Button } from "@nextui-org/button";
+import { Textarea } from "@nextui-org/input";
+import { Select, SelectItem } from "@nextui-org/select";
+import { Chip } from "@nextui-org/chip";
+import { Divider } from "@nextui-org/divider";
 import { Upload, Trash2, Download, CheckCircle, XCircle } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 

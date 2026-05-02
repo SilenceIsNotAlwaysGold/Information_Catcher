@@ -1,12 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Card, CardBody, CardHeader } from "@nextui-org/card";
+import { Button } from "@nextui-org/button";
+import { Input, Textarea } from "@nextui-org/input";
+import { Chip } from "@nextui-org/chip";
 import {
-  Card, CardBody, CardHeader,
-  Button, Input, Textarea, Chip,
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
+} from "@nextui-org/table";
+import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
-} from "@nextui-org/react";
+} from "@nextui-org/modal";
 import { Plus, Pencil, Trash2, Star } from "lucide-react";
 
 type Prompt = {

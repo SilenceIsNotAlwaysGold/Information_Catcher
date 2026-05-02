@@ -1,5 +1,5 @@
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AddPostsRequest(BaseModel):
@@ -47,6 +47,14 @@ class UpdatePromptRequest(BaseModel):
 class RewriteTrendingRequest(BaseModel):
     prompt_id: Optional[int] = None  # use saved prompt by ID (preferred)
     prompt_text: Optional[str] = None  # or supply ad-hoc prompt text
+
+
+class RewriteCrossPlatformRequest(BaseModel):
+    """跨平台改写：优先级 prompt_text > prompt_id > target 内置模板。"""
+    prompt_id: Optional[int] = None
+    prompt_text: Optional[str] = None
+    target: Optional[str] = None  # xhs / douyin / mp，回退用
+    variants: Optional[int] = 3
 
 
 class LockVariantRequest(BaseModel):
@@ -117,6 +125,10 @@ class UpdateAccountRequest(BaseModel):
 
 
 class UpdateSettingsRequest(BaseModel):
+    # 允许 extra：用于平台前缀覆盖键，例如 "xhs.likes_threshold"、"douyin.collects_alert_enabled"
+    # 这些 key 由 router 端做白名单校验后写入 monitor_settings（key-value 表）
+    model_config = ConfigDict(extra="allow")
+
     webhook_url: Optional[str] = None
     feishu_webhook_url: Optional[str] = None
     check_interval_minutes: Optional[int] = Field(default=None, ge=1)

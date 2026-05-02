@@ -1,13 +1,19 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { Card, CardBody, CardHeader } from "@nextui-org/card";
+import { Button } from "@nextui-org/button";
+import { Input, Textarea } from "@nextui-org/input";
+import { Chip } from "@nextui-org/chip";
 import {
-  Card, CardBody, CardHeader, Button, Textarea, Chip,
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
-  Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure, Tooltip,
-} from "@nextui-org/react";
+} from "@nextui-org/table";
+import {
+  Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
+} from "@nextui-org/modal";
+import { Tooltip } from "@nextui-org/tooltip";
+import { Select, SelectItem } from "@nextui-org/select";
 import { Plus, RefreshCw, Trash2, Sparkles, ChevronDown, Search, Wand2, Copy, Key } from "lucide-react";
-import { Input } from "@nextui-org/react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
 
@@ -88,23 +94,77 @@ export default function MpPostsPage() {
     }
   };
 
-  // 跨平台改写
+  // AI 改写（原"跨平台改写"，现支持自选 prompt / 平台模板）
   const crossModal = useDisclosure();
   const [crossNoteId, setCrossNoteId] = useState<string | null>(null);
   const [crossLoading, setCrossLoading] = useState(false);
   const [crossVariants, setCrossVariants] = useState<string[]>([]);
   const [crossError, setCrossError] = useState("");
 
-  const openCrossRewrite = async (note_id: string) => {
+  // 改写配置
+  type CrossMode = "xhs" | "douyin" | "mp" | "saved" | "custom";
+  const [crossMode, setCrossMode] = useState<CrossMode>("xhs");
+  const [crossPromptId, setCrossPromptId] = useState<string>("");  // saved 模式选中的 prompt id
+  const [crossPromptText, setCrossPromptText] = useState<string>("");  // custom 模式
+  const [crossVariantCount, setCrossVariantCount] = useState<number>(3);
+
+  // 用户保存的 prompt 列表
+  type SavedPrompt = { id: number; name: string; content: string; is_default?: number };
+  const [savedPrompts, setSavedPrompts] = useState<SavedPrompt[]>([]);
+  const [promptsLoading, setPromptsLoading] = useState(false);
+
+  const loadPrompts = useCallback(async () => {
+    setPromptsLoading(true);
+    try {
+      const r = await fetch(API("/prompts"), { headers });
+      if (r.ok) {
+        const d = await r.json();
+        setSavedPrompts(d.prompts || []);
+      }
+    } finally {
+      setPromptsLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  const openCrossRewrite = (note_id: string) => {
     setCrossNoteId(note_id);
     setCrossVariants([]);
     setCrossError("");
-    setCrossLoading(true);
+    setCrossLoading(false);
+    setCrossMode("xhs");
+    setCrossPromptText("");
     crossModal.onOpen();
+    loadPrompts();
+  };
+
+  const runCrossRewrite = async () => {
+    if (!crossNoteId) return;
+    setCrossError("");
+    setCrossVariants([]);
+
+    // 组装 body
+    const body: Record<string, unknown> = { variants: crossVariantCount };
+    if (crossMode === "custom") {
+      const txt = crossPromptText.trim();
+      if (!txt) { setCrossError("请填写自定义 prompt"); return; }
+      if (!txt.includes("{content}")) {
+        setCrossError("自定义 prompt 必须包含 {content} 占位符（用来替换原文）");
+        return;
+      }
+      body.prompt_text = txt;
+    } else if (crossMode === "saved") {
+      if (!crossPromptId) { setCrossError("请选择一个已保存的 prompt"); return; }
+      body.prompt_id = Number(crossPromptId);
+    } else {
+      body.target = crossMode;  // xhs / douyin / mp 内置模板
+    }
+
+    setCrossLoading(true);
     try {
       const r = await fetch(
-        API(`/posts/${note_id}/rewrite-cross-platform?target=xhs&variants=3`),
-        { method: "POST", headers },
+        API(`/posts/${crossNoteId}/rewrite-cross-platform`),
+        { method: "POST", headers, body: JSON.stringify(body) },
       );
       if (!r.ok) {
         let msg = "改写失败";
@@ -353,7 +413,7 @@ export default function MpPostsPage() {
                             <Sparkles size={15} className={hasSummary ? "text-primary" : ""} />
                           </Button>
                         </Tooltip>
-                        <Tooltip content="改写为小红书风（生成 3 个变体）">
+                        <Tooltip content="AI 改写（可选目标平台 / 自定义 prompt）">
                           <Button isIconOnly size="sm" variant="light"
                             onPress={() => openCrossRewrite(p.note_id)}>
                             <Wand2 size={15} />
@@ -475,23 +535,108 @@ export default function MpPostsPage() {
         </ModalContent>
       </Modal>
 
-      {/* 跨平台改写 modal */}
+      {/* AI 改写 modal */}
       <Modal isOpen={crossModal.isOpen} onClose={crossModal.onClose} size="2xl" scrollBehavior="inside">
         <ModalContent>
           <ModalHeader className="flex items-center gap-2">
             <Wand2 size={18} className="text-primary" />
-            改写为小红书风
-            <Chip size="sm" variant="flat">3 个变体</Chip>
+            AI 改写
+            <Chip size="sm" variant="flat">{crossVariantCount} 个变体</Chip>
           </ModalHeader>
           <ModalBody className="space-y-3">
+            {/* 目标平台 / 模式选择 */}
+            <div>
+              <p className="text-xs text-default-500 mb-2">目标平台 / 改写风格</p>
+              <div className="flex flex-wrap gap-2">
+                {([
+                  { key: "xhs",    label: "小红书" },
+                  { key: "douyin", label: "抖音" },
+                  { key: "mp",     label: "公众号" },
+                  { key: "saved",  label: "我的 Prompt" },
+                  { key: "custom", label: "自定义" },
+                ] as { key: CrossMode; label: string }[]).map((opt) => (
+                  <Chip key={opt.key}
+                    size="sm"
+                    variant={crossMode === opt.key ? "solid" : "flat"}
+                    color={crossMode === opt.key ? "primary" : "default"}
+                    className="cursor-pointer"
+                    onClick={() => setCrossMode(opt.key)}
+                  >
+                    {opt.label}
+                  </Chip>
+                ))}
+              </div>
+            </div>
+
+            {/* saved 模式：选择已保存 prompt */}
+            {crossMode === "saved" && (
+              <div>
+                <Select
+                  size="sm"
+                  label="选择保存的 Prompt"
+                  placeholder={promptsLoading ? "加载中…" : "—"}
+                  selectedKeys={crossPromptId ? [crossPromptId] : []}
+                  onSelectionChange={(keys) => {
+                    const v = Array.from(keys)[0];
+                    setCrossPromptId(v ? String(v) : "");
+                  }}
+                >
+                  {savedPrompts.map((p) => (
+                    <SelectItem key={String(p.id)} textValue={p.name}>
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </Select>
+                {savedPrompts.length === 0 && !promptsLoading && (
+                  <p className="text-xs text-default-400 mt-1">
+                    还没有保存的 prompt，可以去「Prompt 管理」创建，或选「自定义」直接写。
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* custom 模式：直接输 prompt */}
+            {crossMode === "custom" && (
+              <div>
+                <Textarea
+                  size="sm"
+                  label="自定义 Prompt"
+                  placeholder={"请把以下原文改写为...\n\n要求：...\n\n原文：\n{content}"}
+                  description="必须包含 {content} 占位符——它会被原文正文替换。"
+                  minRows={6}
+                  value={crossPromptText}
+                  onValueChange={setCrossPromptText}
+                />
+              </div>
+            )}
+
+            {/* 变体数量 */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-default-500">变体数量：</span>
+              {[1, 3, 5].map((n) => (
+                <Chip key={n} size="sm"
+                  variant={crossVariantCount === n ? "solid" : "flat"}
+                  color={crossVariantCount === n ? "primary" : "default"}
+                  className="cursor-pointer"
+                  onClick={() => setCrossVariantCount(n)}>
+                  {n}
+                </Chip>
+              ))}
+            </div>
+
+            {/* 错误提示 */}
+            {crossError && (
+              <p className="text-sm text-danger">{crossError}</p>
+            )}
+
+            {/* 改写中 */}
             {crossLoading && (
               <div className="text-center py-8 text-default-500">
                 AI 改写中…（公众号长文，请稍候 10-30s）
               </div>
             )}
-            {crossError && (
-              <p className="text-sm text-danger">{crossError}</p>
-            )}
+
+            {/* 结果 */}
             {!crossLoading && crossVariants.length > 0 && (
               <>
                 <p className="text-xs text-default-500">
@@ -518,6 +663,13 @@ export default function MpPostsPage() {
           </ModalBody>
           <ModalFooter>
             <Button variant="light" onPress={crossModal.onClose}>关闭</Button>
+            <Button color="primary"
+              startContent={<Wand2 size={14} />}
+              onPress={runCrossRewrite}
+              isLoading={crossLoading}
+              isDisabled={crossLoading}>
+              开始改写
+            </Button>
           </ModalFooter>
         </ModalContent>
       </Modal>

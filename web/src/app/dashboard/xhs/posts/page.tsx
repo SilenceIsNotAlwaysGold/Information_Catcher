@@ -2,13 +2,19 @@
 
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
+import { Card, CardBody, CardHeader } from "@nextui-org/card";
+import { Button } from "@nextui-org/button";
+import { Input, Textarea } from "@nextui-org/input";
+import { Select, SelectItem } from "@nextui-org/select";
 import {
-  Card, CardBody, CardHeader,
-  Button, Textarea, Select, SelectItem, Input,
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
-  Chip, Modal, ModalContent, ModalHeader, ModalBody, ModalFooter,
-  useDisclosure, Tabs, Tab, Tooltip,
-} from "@nextui-org/react";
+} from "@nextui-org/table";
+import { Chip } from "@nextui-org/chip";
+import {
+  Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
+} from "@nextui-org/modal";
+import { Tabs, Tab } from "@nextui-org/tabs";
+import { Tooltip } from "@nextui-org/tooltip";
 import { Plus, RefreshCw, Trash2, BarChart2, Settings, Search } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";

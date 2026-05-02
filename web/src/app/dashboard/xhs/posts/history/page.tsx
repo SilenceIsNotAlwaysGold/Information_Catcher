@@ -3,7 +3,10 @@
 import { useEffect, useState, useMemo, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { Card, CardBody, CardHeader, Button, Chip, Spinner } from "@nextui-org/react";
+import { Card, CardBody, CardHeader } from "@nextui-org/card";
+import { Button } from "@nextui-org/button";
+import { Chip } from "@nextui-org/chip";
+import { Spinner } from "@nextui-org/spinner";
 import { ArrowLeft, Heart, Bookmark, MessageCircle, Share2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 

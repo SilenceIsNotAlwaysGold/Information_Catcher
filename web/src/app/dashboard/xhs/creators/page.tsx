@@ -2,11 +2,13 @@
 
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
+import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import {
-  Card, CardBody, CardHeader,
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
-  Chip, Button, Tooltip,
-} from "@nextui-org/react";
+} from "@nextui-org/table";
+import { Chip } from "@nextui-org/chip";
+import { Button } from "@nextui-org/button";
+import { Tooltip } from "@nextui-org/tooltip";
 import { BarChart2, ExternalLink } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav, CreatorsCard } from "@/components/platform";

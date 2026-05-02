@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { Card, CardBody, CardHeader } from "@nextui-org/card";
+import { Chip } from "@nextui-org/chip";
 import {
-  Card, CardBody, CardHeader, Chip,
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
-} from "@nextui-org/react";
+} from "@nextui-org/table";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav, CreatorsCard, PostRow } from "@/components/platform";
 

@@ -1,10 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Card, CardBody, CardHeader } from "@nextui-org/card";
+import { Button } from "@nextui-org/button";
+import { Chip } from "@nextui-org/chip";
+import { Input } from "@nextui-org/input";
 import {
-  Card, CardBody, CardHeader, Button, Chip, Input,
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
-} from "@nextui-org/react";
+} from "@nextui-org/modal";
 import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { CreatorRow, PlatformKey, PLATFORM_LABEL } from "./types";
@@ -136,7 +139,7 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
           ) : (
             <div className="flex flex-row gap-2 flex-wrap">
               {creators.map((c) => (
-                <Chip key={c.id} size="sm" variant="flat" color="success"
+                <Chip key={c.id} size="sm" variant="dot" color="success"
                   onClose={() => unfollow(c.id)}
                   endContent={
                     <Button size="sm" variant="light" isIconOnly

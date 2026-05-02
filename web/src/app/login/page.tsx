@@ -3,7 +3,8 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Input, Button } from "@nextui-org/react";
+import { Input } from "@nextui-org/input";
+import { Button } from "@nextui-org/button";
 import { Eye, EyeOff } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 

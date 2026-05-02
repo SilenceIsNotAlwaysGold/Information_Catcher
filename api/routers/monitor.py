@@ -12,6 +12,7 @@ from ..schemas.monitor import (
     CreatePromptRequest,
     UpdatePromptRequest,
     RewriteTrendingRequest,
+    RewriteCrossPlatformRequest,
     LockVariantRequest,
     SyncBitableRequest,
     CreateGroupRequest,
@@ -183,6 +184,7 @@ _DEFAULT_SUMMARY_PROMPT = (
 )
 
 # 跨平台改写：源平台 → 目标平台。key = target，value = prompt 模板
+# 内置 fallback：当请求没传 prompt_text / prompt_id 时使用；同时作为 seed 写入 rewrite_prompts。
 _CROSS_PLATFORM_PROMPTS = {
     "xhs": (
         "你是一位精通小红书爆款文案的创作者。请把下面这段公众号文章/抖音文案改写为"
@@ -203,28 +205,120 @@ _CROSS_PLATFORM_PROMPTS = {
         "4. 保留原文核心观点，**去掉书面语**\n\n"
         "原文：\n{content}"
     ),
+    "mp": (
+        "你是一位精通微信公众号长文写作的编辑。请把下面这段内容改写为"
+        "**一篇公众号文章**，要求：\n"
+        "1. 标题 20 字内，端庄但有信息量，避免标题党\n"
+        "2. 正文 600-1000 字，分 3-5 个小节，每节加二级小标题（用 ## 开头）\n"
+        "3. 段落清晰，逻辑层层递进，可适度引用数据 / 案例\n"
+        "4. 结尾一段总结升华或行动建议\n"
+        "5. 风格沉稳、信息密度高，去掉口水话，不堆砌 emoji\n\n"
+        "原文：\n{content}"
+    ),
 }
+
+# 内置跨平台 prompt 的稳定显示名（seed 进 DB 时用，便于前端识别 / 幂等去重）
+_CROSS_PLATFORM_PROMPT_NAMES = {
+    "xhs": "[内置] 跨平台改写 · 小红书风",
+    "douyin": "[内置] 跨平台改写 · 抖音口播",
+    "mp": "[内置] 跨平台改写 · 公众号长文",
+}
+
+_cross_platform_seed_done = False
+
+
+async def _ensure_cross_platform_prompts_seeded() -> None:
+    """把 _CROSS_PLATFORM_PROMPTS 三条按 name 幂等 seed 进 rewrite_prompts。
+
+    - user_id=NULL（全局可见，所有租户都能选）
+    - 不动 is_default（避免抢占现有用户/系统默认）
+    - 进程内只跑一次（_cross_platform_seed_done 缓存）
+    """
+    global _cross_platform_seed_done
+    if _cross_platform_seed_done:
+        return
+    try:
+        existing = await db.list_prompts(user_id=None)
+        have_names = {(p.get("name") or "") for p in existing}
+        for target, content in _CROSS_PLATFORM_PROMPTS.items():
+            name = _CROSS_PLATFORM_PROMPT_NAMES[target]
+            if name in have_names:
+                continue
+            try:
+                await db.create_prompt(name, content, user_id=None)
+            except Exception:
+                pass
+    finally:
+        _cross_platform_seed_done = True
 
 
 @router.post(
     "/posts/{note_id}/rewrite-cross-platform",
-    summary="跨平台改写（公众号→小红书 / 抖音）",
+    summary="跨平台改写（按用户自定义 prompt 或内置 target 模板）",
 )
 async def cross_platform_rewrite(
     note_id: str,
-    target: str = "xhs",
-    variants: int = 3,
+    req: Optional[RewriteCrossPlatformRequest] = None,
+    target: Optional[str] = None,
+    variants: Optional[int] = None,
+    prompt_id: Optional[int] = None,
+    prompt_text: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
     """把当前帖子的正文改写为另一个平台的风格。
 
-    流程：实时 fetch_detail 拿正文 → 用对应 target 的 prompt → rewrite_variants 并行生成。
+    优先级（从高到低）：
+      1. 请求 body / query 里的 `prompt_text`（ad-hoc 文本，必含 {content}）
+      2. 请求 body / query 里的 `prompt_id`（用户在 rewrite_prompts 里保存的 prompt）
+      3. `target` 对应的内置 _CROSS_PLATFORM_PROMPTS 模板（向后兼容旧调用）
+
+    body 优先于 query；body 缺省时回落 query；query 也没有就用默认。
+    流程：实时 fetch_detail 拿正文 → 选 prompt → rewrite_variants 并行生成。
     不持久化结果，返回数组让前端展示供运营选择。
     """
-    if target not in _CROSS_PLATFORM_PROMPTS:
+    # 第一次调用时把内置 prompt 模板 seed 进 rewrite_prompts（幂等）
+    await _ensure_cross_platform_prompts_seeded()
+
+    # 把 body / query 合并成最终参数（body 优先）
+    body_prompt_id = req.prompt_id if req else None
+    body_prompt_text = req.prompt_text if req else None
+    body_target = req.target if req else None
+    body_variants = req.variants if req else None
+
+    final_prompt_text = (body_prompt_text or prompt_text or "").strip() or None
+    final_prompt_id = body_prompt_id if body_prompt_id is not None else prompt_id
+    final_target = (body_target or target or "xhs").strip().lower() or "xhs"
+    final_variants = body_variants if body_variants is not None else variants
+    if final_variants is None:
+        final_variants = 3
+
+    # 选 prompt 模板
+    prompt_template: str
+    chosen_label: str  # 用于响应里告诉前端选了哪个
+    if final_prompt_text:
+        prompt_template = final_prompt_text
+        chosen_label = "ad-hoc"
+    elif final_prompt_id is not None:
+        p = await db.get_prompt(int(final_prompt_id))
+        if not p:
+            raise HTTPException(status_code=404, detail="prompt 不存在")
+        prompt_template = p["content"]
+        chosen_label = f"prompt:{p.get('name') or final_prompt_id}"
+    else:
+        if final_target not in _CROSS_PLATFORM_PROMPTS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"target 必须是 {list(_CROSS_PLATFORM_PROMPTS.keys())} 之一，"
+                       f"或改用 prompt_id / prompt_text",
+            )
+        prompt_template = _CROSS_PLATFORM_PROMPTS[final_target]
+        chosen_label = f"builtin:{final_target}"
+
+    # 简单校验 prompt 模板里有 {content} 占位（rewrite_content 内部会 .format）
+    if "{content}" not in prompt_template:
         raise HTTPException(
             status_code=400,
-            detail=f"target 必须是 {list(_CROSS_PLATFORM_PROMPTS.keys())} 之一",
+            detail="prompt 模板必须包含 {content} 占位符",
         )
 
     post = await db.get_post_by_note_id(note_id, user_id=_scope_uid(current_user))
@@ -251,13 +345,13 @@ async def cross_platform_rewrite(
     if not settings.get("ai_api_key"):
         raise HTTPException(status_code=400, detail="平台未配置 AI Key")
 
-    n = max(1, min(int(variants or 3), 5))
+    n = max(1, min(int(final_variants or 3), 5))
     try:
         result = await ai_rewriter.rewrite_variants(
             base_url=settings.get("ai_base_url", ""),
             api_key=settings["ai_api_key"],
             model=settings.get("ai_model", "gpt-4o-mini"),
-            prompt_template=_CROSS_PLATFORM_PROMPTS[target],
+            prompt_template=prompt_template,
             content=body,
             n=n,
         )
@@ -269,7 +363,8 @@ async def cross_platform_rewrite(
     return {
         "ok": True,
         "source_platform": post.get("platform"),
-        "target_platform": target,
+        "target_platform": final_target,
+        "prompt_used": chosen_label,
         "variants": result,
     }
 
@@ -345,12 +440,13 @@ async def manual_check(
 @router.post("/trending/check", summary="立即触发热门搜索（admin only，调试用）")
 async def manual_trending(
     background_tasks: BackgroundTasks,
+    platform: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
     if (current_user.get("role") or "user") != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")
-    background_tasks.add_task(sched.run_trending_monitor)
-    return {"ok": True, "message": "trending 任务已触发"}
+    background_tasks.add_task(sched.run_trending_monitor, platform=platform)
+    return {"ok": True, "message": "trending 任务已触发", "platform": platform or "all"}
 
 
 @router.post("/own-comments/check", summary="立即触发评论拉取（admin only，调试用）")
@@ -936,6 +1032,36 @@ async def update_settings(
         settings = await db.get_all_settings()
         sched.reschedule(req.check_interval_minutes, settings.get("daily_report_time", "09:00"))
 
+    # 平台覆盖键（命名空间，不改 schema）：xhs / douyin / mp 各自独立的阈值
+    # 仅以下白名单 key 可被覆盖：likes/collects/comments 的 threshold + alert_enabled
+    _ALLOWED_PLATFORM_PREFIXES = ("xhs", "douyin", "mp")
+    _PLATFORM_BOOL_SUFFIXES = {"likes_alert_enabled", "collects_alert_enabled", "comments_alert_enabled"}
+    _PLATFORM_INT_SUFFIXES = {"likes_threshold", "collects_threshold", "comments_threshold"}
+    extra = getattr(req, "__pydantic_extra__", None) or {}
+    for raw_key, raw_val in extra.items():
+        if "." not in raw_key:
+            continue
+        prefix, suffix = raw_key.split(".", 1)
+        if prefix not in _ALLOWED_PLATFORM_PREFIXES:
+            continue
+        if suffix in _PLATFORM_BOOL_SUFFIXES:
+            # None 或空串 → 删除覆盖（沿用全局）
+            if raw_val is None or raw_val == "":
+                await db.delete_setting(raw_key)
+            else:
+                await db.set_setting(raw_key, bool_val(bool(raw_val)))
+        elif suffix in _PLATFORM_INT_SUFFIXES:
+            if raw_val is None or raw_val == "":
+                await db.delete_setting(raw_key)
+            else:
+                try:
+                    iv = int(raw_val)
+                except (TypeError, ValueError):
+                    continue
+                if iv < 1:
+                    continue
+                await db.set_setting(raw_key, str(iv))
+
     return {"ok": True}
 
 
@@ -995,17 +1121,22 @@ async def update_post_group(
 # ── Trending ──────────────────────────────────────────────────────────────────
 
 @router.get("/trending", summary="热门内容列表")
-async def list_trending(limit: int = 50, _: dict = Depends(get_current_user)):
-    return {"posts": await db.get_trending_posts(limit)}
+async def list_trending(
+    limit: int = 50,
+    platform: Optional[str] = None,
+    _: dict = Depends(get_current_user),
+):
+    return {"posts": await db.get_trending_posts(limit, platform=platform)}
 
 
 @router.post("/trending/check", summary="立即触发热门抓取")
 async def manual_trending_check(
     background_tasks: BackgroundTasks,
+    platform: Optional[str] = None,
     _: dict = Depends(get_current_user),
 ):
-    background_tasks.add_task(sched.run_trending_monitor)
-    return {"ok": True, "message": "热门抓取任务已触发"}
+    background_tasks.add_task(sched.run_trending_monitor, platform=platform)
+    return {"ok": True, "message": "热门抓取任务已触发", "platform": platform or "all"}
 
 
 # ── Rewrite Prompts (manage saved prompt templates) ──────────────────────────

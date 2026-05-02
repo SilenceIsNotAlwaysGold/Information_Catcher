@@ -633,6 +633,13 @@ async def set_setting(key: str, value: str):
         await db.commit()
 
 
+async def delete_setting(key: str):
+    """删除指定 key（用于"沿用全局"清除平台覆盖键）。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM monitor_settings WHERE key=?", (key,))
+        await db.commit()
+
+
 async def get_all_settings() -> Dict[str, str]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT key, value FROM monitor_settings") as cur:
@@ -1390,6 +1397,7 @@ async def add_or_update_trending_post(
     xsec_token: str, liked_count: int, collected_count: int,
     comment_count: int, keyword: str, author: str,
     cover_url: str = "", images: str = "", video_url: str = "", note_type: str = "normal",
+    platform: str = "xhs",
 ) -> bool:
     """Insert new trending post. Returns True if it was newly inserted."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1406,30 +1414,39 @@ async def add_or_update_trending_post(
                        cover_url= CASE WHEN cover_url IS NULL OR cover_url = '' THEN ? ELSE cover_url END,
                        images   = CASE WHEN images    IS NULL OR images    = '' THEN ? ELSE images    END,
                        video_url= CASE WHEN video_url IS NULL OR video_url = '' THEN ? ELSE video_url END,
-                       note_type= CASE WHEN note_type IS NULL OR note_type = '' THEN ? ELSE note_type END
+                       note_type= CASE WHEN note_type IS NULL OR note_type = '' THEN ? ELSE note_type END,
+                       platform = CASE WHEN platform  IS NULL OR platform  = '' THEN ? ELSE platform  END
                    WHERE note_id=?""",
                 (liked_count, collected_count, comment_count,
                  title, author, desc_text,
-                 cover_url, images, video_url, note_type, note_id),
+                 cover_url, images, video_url, note_type, platform, note_id),
             )
             await db.commit()
             return False
         await db.execute(
             """INSERT INTO trending_posts
                (note_id,title,desc_text,note_url,xsec_token,liked_count,collected_count,comment_count,
-                keyword,author,cover_url,images,video_url,note_type)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                keyword,author,cover_url,images,video_url,note_type,platform)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (note_id, title, desc_text, note_url, xsec_token,
              liked_count, collected_count, comment_count, keyword, author,
-             cover_url, images, video_url, note_type),
+             cover_url, images, video_url, note_type, platform),
         )
         await db.commit()
         return True
 
 
-async def get_trending_posts(limit: int = 50) -> List[Dict]:
+async def get_trending_posts(
+    limit: int = 50, platform: Optional[str] = None,
+) -> List[Dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        if platform:
+            async with db.execute(
+                "SELECT * FROM trending_posts WHERE platform=? ORDER BY found_at DESC LIMIT ?",
+                (platform, limit),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
         async with db.execute(
             "SELECT * FROM trending_posts ORDER BY found_at DESC LIMIT ?", (limit,)
         ) as cur:

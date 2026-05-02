@@ -1,13 +1,21 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { Card, CardBody, CardHeader } from "@nextui-org/card";
+import { Button } from "@nextui-org/button";
+import { Input, Textarea } from "@nextui-org/input";
+import { Switch } from "@nextui-org/switch";
+import { Divider } from "@nextui-org/divider";
+import { Checkbox, CheckboxGroup } from "@nextui-org/checkbox";
 import {
-  Card, CardBody, CardHeader,
-  Button, Input, Switch, Divider, Checkbox, CheckboxGroup,
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
-  Textarea, Chip, Tooltip,
+} from "@nextui-org/table";
+import { Chip } from "@nextui-org/chip";
+import { Tooltip } from "@nextui-org/tooltip";
+import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
-} from "@nextui-org/react";
+} from "@nextui-org/modal";
+import { Tabs, Tab } from "@nextui-org/tabs";
 import { Trash2, Save, Pencil, QrCode, RefreshCw, ShieldCheck } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PromptTemplatesCard } from "@/components/PromptTemplatesCard";
@@ -90,12 +98,50 @@ const DEFAULTS: Settings = {
 const emptyAccountForm = { name: "", proxy_url: "" };
 const emptyEditForm = { name: "", cookie: "", proxy_url: "" };
 
+type PlatformKey = "xhs" | "douyin" | "mp";
+type MetricKey = "likes" | "collects" | "comments";
+
+const PLATFORM_LABELS: Record<PlatformKey, string> = {
+  xhs: "小红书",
+  douyin: "抖音",
+  mp: "公众号",
+};
+
+// 公众号没有"收藏"概念，第二项展示成"在看"，但仍存到 collects_threshold 字段
+const METRIC_DEFS: Record<PlatformKey, Array<{ key: MetricKey; label: string; desc: string; unit: string }>> = {
+  xhs: [
+    { key: "likes",    label: "点赞量告警", desc: "单次检测点赞增量超过阈值时推送", unit: "次" },
+    { key: "collects", label: "收藏量告警", desc: "单次检测收藏增量超过阈值时推送", unit: "次" },
+    { key: "comments", label: "评论告警",   desc: "单次检测新增评论超过阈值时推送", unit: "条" },
+  ],
+  douyin: [
+    { key: "likes",    label: "点赞量告警", desc: "单次检测点赞增量超过阈值时推送", unit: "次" },
+    { key: "collects", label: "收藏量告警", desc: "单次检测收藏增量超过阈值时推送", unit: "次" },
+    { key: "comments", label: "评论告警",   desc: "单次检测新增评论超过阈值时推送", unit: "条" },
+  ],
+  mp: [
+    { key: "likes",    label: "点赞量告警", desc: "单次检测点赞增量超过阈值时推送", unit: "次" },
+    { key: "collects", label: "在看告警",   desc: "单次检测在看增量超过阈值时推送（公众号特有）", unit: "次" },
+    { key: "comments", label: "留言告警",   desc: "单次检测新增留言超过阈值时推送", unit: "条" },
+  ],
+};
+
+const metricToFields = (m: MetricKey) => ({
+  enableKey: `${m}_alert_enabled` as keyof Settings,
+  threshKey: (m === "likes" ? "likes_threshold"
+    : m === "collects" ? "collects_threshold"
+    : "comments_threshold") as keyof Settings,
+});
+
 export default function MonitorSettingsPage() {
   const { token, user } = useAuth();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
   const isAdmin = user?.role === "admin";
 
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
+  // 平台覆盖：保存从后端读到的所有 {platform}.{key} 键值对（字符串："1"/"0" or 数字字符串）
+  // 未出现在此 map 的 key === "沿用全局"
+  const [platformOverrides, setPlatformOverrides] = useState<Record<string, string>>({});
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountForm, setAccountForm] = useState(emptyAccountForm);
   const [saved, setSaved] = useState(false);
@@ -212,12 +258,82 @@ export default function MonitorSettingsPage() {
   const toggleBool = (key: keyof Settings) =>
     set(key, settings[key] === "1" ? "0" : "1");
 
+  // ── 平台覆盖：一组操作 helpers ───────────────────────────────────────────
+  // 是否有任何平台级覆盖（任意一个 enable 或 threshold 已设值）
+  const hasPlatformOverride = (platform: PlatformKey) =>
+    METRIC_DEFS[platform].some(({ key }) => {
+      const { enableKey, threshKey } = metricToFields(key);
+      const ovEnable = platformOverrides[`${platform}.${enableKey}`];
+      const ovThresh = platformOverrides[`${platform}.${threshKey}`];
+      return (ovEnable != null && ovEnable !== "")
+        || (ovThresh != null && ovThresh !== "");
+    });
+
+  // 读单项：优先 platform 覆盖，否则 fallback 到全局 settings
+  const platformBool = (platform: PlatformKey, key: keyof Settings): boolean => {
+    const ov = platformOverrides[`${platform}.${key}`];
+    if (ov != null && ov !== "") return ov === "1";
+    return settings[key] === "1";
+  };
+  const platformStr = (platform: PlatformKey, key: keyof Settings): string => {
+    const ov = platformOverrides[`${platform}.${key}`];
+    if (ov != null && ov !== "") return ov;
+    return settings[key] || "";
+  };
+
+  // 写单项（只更新本地 state，保存时下发）
+  const setPlatformOverride = (platform: PlatformKey, key: keyof Settings, val: string) => {
+    setPlatformOverrides((m) => ({ ...m, [`${platform}.${key}`]: val }));
+  };
+  const togglePlatformBool = (platform: PlatformKey, key: keyof Settings) => {
+    const cur = platformBool(platform, key);
+    setPlatformOverride(platform, key, cur ? "0" : "1");
+  };
+
+  // "沿用全局"切换：clear 所有该平台的覆盖键（保存时会发空串让后端 DELETE）
+  const setPlatformInherit = (platform: PlatformKey, inherit: boolean) => {
+    if (inherit) {
+      // 显式置空，保存时后端会 DELETE
+      setPlatformOverrides((m) => {
+        const next = { ...m };
+        for (const { key } of METRIC_DEFS[platform]) {
+          const { enableKey, threshKey } = metricToFields(key);
+          next[`${platform}.${enableKey}`] = "";
+          next[`${platform}.${threshKey}`] = "";
+        }
+        return next;
+      });
+    } else {
+      // 关闭"沿用全局" → 用全局当前值预填该平台
+      setPlatformOverrides((m) => {
+        const next = { ...m };
+        for (const { key } of METRIC_DEFS[platform]) {
+          const { enableKey, threshKey } = metricToFields(key);
+          next[`${platform}.${enableKey}`] = settings[enableKey] || "1";
+          next[`${platform}.${threshKey}`] = settings[threshKey] || "50";
+        }
+        return next;
+      });
+    }
+  };
+
   const load = async () => {
     const [s, a] = await Promise.all([
       fetch(API("/settings"), { headers }).then((r) => r.json()),
       fetch(API("/accounts"), { headers }).then((r) => r.json()),
     ]);
-    setSettings((prev) => ({ ...prev, ...s }));
+    // 拆分：dotted key（"xhs.likes_threshold"）→ platformOverrides；其余 → settings
+    const baseSettings: Record<string, string> = {};
+    const overrides: Record<string, string> = {};
+    for (const [k, v] of Object.entries(s as Record<string, string>)) {
+      if (/^(xhs|douyin|mp)\./.test(k)) {
+        overrides[k] = v;
+      } else {
+        baseSettings[k] = v;
+      }
+    }
+    setSettings((prev) => ({ ...prev, ...baseSettings }));
+    setPlatformOverrides(overrides);
     setAccounts(a.accounts ?? []);
   };
 
@@ -260,6 +376,22 @@ export default function MonitorSettingsPage() {
         feishu_app_secret: settings.feishu_app_secret,
         trending_account_ids: settings.trending_account_ids,
       });
+    }
+    // 平台覆盖：dotted keys 直接放进 payload，由后端做白名单 + DELETE/UPSERT
+    for (const [k, v] of Object.entries(platformOverrides)) {
+      // 空串 → 后端 DELETE（沿用全局）
+      // bool 字段保留 "1"/"0"；threshold 字段转 number 让后端的 int 校验通过
+      if (v === "" || v == null) {
+        payload[k] = "";
+        continue;
+      }
+      if (k.endsWith("_threshold")) {
+        const n = parseInt(v);
+        payload[k] = Number.isFinite(n) ? n : "";
+      } else {
+        // alert_enabled：发 boolean，后端 bool_val 转 "1"/"0"
+        payload[k] = v === "1";
+      }
     }
     await fetch(API("/settings"), {
       method: "PUT", headers, body: JSON.stringify(payload),
@@ -336,10 +468,71 @@ export default function MonitorSettingsPage() {
     return <Chip size="sm" color="default" variant="flat">未检测</Chip>;
   };
 
-  return (
-    <div className="p-6 space-y-6 max-w-2xl">
-      <h1 className="text-2xl font-bold">监控设置</h1>
+  // ── 渲染：单个平台 tab 内容（阈值 + 沿用全局） ──────────────────────────
+  const renderPlatformPanel = (platform: PlatformKey) => {
+    const inherit = !hasPlatformOverride(platform);
+    return (
+      <div className="space-y-6">
+        <Card>
+          <CardHeader className="font-semibold flex justify-between items-center">
+            <span>{PLATFORM_LABELS[platform]} · 告警阈值</span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-default-500">沿用全局</span>
+              <Switch
+                size="sm"
+                isSelected={inherit}
+                onValueChange={(v) => setPlatformInherit(platform, v)}
+              />
+            </div>
+          </CardHeader>
+          <CardBody className="space-y-5">
+            {inherit && (
+              <p className="text-xs text-default-400">
+                当前沿用「全局」tab 中的告警阈值。关闭上方开关后可单独配置 {PLATFORM_LABELS[platform]} 的阈值。
+              </p>
+            )}
+            {!inherit && METRIC_DEFS[platform].map((item, i) => {
+              const { enableKey, threshKey } = metricToFields(item.key);
+              const enabled = platformBool(platform, enableKey);
+              return (
+                <div key={item.key}>
+                  {i > 0 && <Divider className="mb-5" />}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="font-medium text-sm">{item.label}</p>
+                        <p className="text-xs text-default-400">{item.desc}</p>
+                      </div>
+                      <Switch
+                        isSelected={enabled}
+                        onValueChange={() => togglePlatformBool(platform, enableKey)}
+                        color="primary"
+                      />
+                    </div>
+                    {enabled && (
+                      <Input size="sm" type="number" label="触发阈值"
+                        value={platformStr(platform, threshKey)}
+                        onValueChange={(v) => setPlatformOverride(platform, threshKey, v)}
+                        endContent={<span className="text-default-400 text-xs">{item.unit}</span>}
+                      />
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </CardBody>
+        </Card>
 
+        <Button color="primary" startContent={<Save size={16} />} onPress={saveSettings}>
+          {saved ? "已保存 ✓" : "保存设置"}
+        </Button>
+      </div>
+    );
+  };
+
+  // ── 渲染：全局 tab（webhook、AI、daily report、外部数据源等） ────────────
+  const renderGlobalPanel = () => (
+    <div className="space-y-6">
       {/* Push Channels */}
       <Card>
         <CardHeader className="font-semibold">推送渠道</CardHeader>
@@ -373,10 +566,13 @@ export default function MonitorSettingsPage() {
       {/* Monitor Groups */}
       <MonitorGroupsCard token={token} />
 
-      {/* Alert Rules */}
+      {/* Alert Rules：全局阈值，作为各平台 tab 未单独配置时的兜底 */}
       <Card>
-        <CardHeader className="font-semibold">告警规则（自己的帖子）</CardHeader>
+        <CardHeader className="font-semibold">全局告警阈值（兜底）</CardHeader>
         <CardBody className="space-y-5">
+          <p className="text-xs text-default-400">
+            未单独配置的平台会沿用此处阈值。如需为「小红书 / 抖音 / 公众号」分别设置，请切换到对应 tab。
+          </p>
           {[
             { key: "likes" as const, label: "点赞量告警", desc: "单次检测点赞增量超过阈值时推送", unit: "次" },
             { key: "collects" as const, label: "收藏量告警", desc: "单次检测收藏增量超过阈值时推送", unit: "次" },
@@ -658,6 +854,27 @@ export default function MonitorSettingsPage() {
         </CardBody>
       </Card>
       )}
+    </div>
+  );
+
+  return (
+    <div className="p-6 space-y-6 max-w-2xl">
+      <h1 className="text-2xl font-bold">监控设置</h1>
+
+      <Tabs aria-label="settings sections">
+        <Tab key="global" title="全局">
+          {renderGlobalPanel()}
+        </Tab>
+        <Tab key="xhs" title={PLATFORM_LABELS.xhs}>
+          {renderPlatformPanel("xhs")}
+        </Tab>
+        <Tab key="douyin" title={PLATFORM_LABELS.douyin}>
+          {renderPlatformPanel("douyin")}
+        </Tab>
+        <Tab key="mp" title={PLATFORM_LABELS.mp}>
+          {renderPlatformPanel("mp")}
+        </Tab>
+      </Tabs>
 
       {/* Edit Account Modal */}
       <Modal isOpen={editModal.isOpen} onClose={editModal.onClose} size="md">

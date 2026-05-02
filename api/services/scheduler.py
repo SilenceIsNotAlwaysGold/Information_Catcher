@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+from typing import Optional
 import aiosqlite
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -124,22 +125,36 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
     if gid:
         group = await db.get_group(gid)
 
-    def _bool_setting(group_val, setting_key: str, default: str = "1") -> bool:
+    # 阈值优先级：group(NULL→fallback) > {platform}.{key} > {key}（全局）> default
+    platform_key = (post.get("platform") or "xhs")
+
+    def _bool_setting(group_val, setting_key: str, default: str = "1", platform: str | None = None) -> bool:
         if group is not None and group_val is not None:
             return bool(group_val)
+        if platform:
+            scoped = settings.get(f"{platform}.{setting_key}")
+            if scoped not in (None, ""):
+                return scoped == "1"
         return settings.get(setting_key, default) == "1"
 
-    def _int_setting(group_val, setting_key: str, default: str) -> int:
+    def _int_setting(group_val, setting_key: str, default: str, platform: str | None = None) -> int:
         if group is not None and group_val is not None:
             return int(group_val)
+        if platform:
+            scoped = settings.get(f"{platform}.{setting_key}")
+            if scoped not in (None, ""):
+                try:
+                    return int(scoped)
+                except ValueError:
+                    pass
         return int(settings.get(setting_key, default) or default)
 
-    likes_on    = _bool_setting(group and group.get("likes_alert_enabled"),    "likes_alert_enabled")
-    collects_on = _bool_setting(group and group.get("collects_alert_enabled"), "collects_alert_enabled")
-    comments_on = _bool_setting(group and group.get("comments_alert_enabled"), "comments_alert_enabled")
-    likes_thr    = _int_setting(group and group.get("likes_threshold"),    "likes_threshold",    "50")
-    collects_thr = _int_setting(group and group.get("collects_threshold"), "collects_threshold", "50")
-    comments_thr = _int_setting(group and group.get("comments_threshold"), "comments_threshold", "1")
+    likes_on    = _bool_setting(group and group.get("likes_alert_enabled"),    "likes_alert_enabled",    platform=platform_key)
+    collects_on = _bool_setting(group and group.get("collects_alert_enabled"), "collects_alert_enabled", platform=platform_key)
+    comments_on = _bool_setting(group and group.get("comments_alert_enabled"), "comments_alert_enabled", platform=platform_key)
+    likes_thr    = _int_setting(group and group.get("likes_threshold"),    "likes_threshold",    "50", platform=platform_key)
+    collects_thr = _int_setting(group and group.get("collects_threshold"), "collects_threshold", "50", platform=platform_key)
+    comments_thr = _int_setting(group and group.get("comments_threshold"), "comments_threshold", "1",  platform=platform_key)
 
     # Group-specific webhooks (fall back to global)
     g_wecom  = (group.get("wecom_webhook_url")  if group else "") or wecom_url
@@ -693,11 +708,13 @@ async def _resolve_trending_accounts(settings: dict) -> list:
     return accounts
 
 
-async def run_trending_monitor():
+async def run_trending_monitor(platform: Optional[str] = None):
     """Periodic job: only fetch trending posts by keyword and store them.
 
     AI rewrite + Bitable sync are now exposed as manual user actions via the API
     and the trending UI — they do not run as part of this scheduled job.
+
+    platform: 可选过滤，传入则只跑指定平台账号（用于前端按平台手动触发）。
     """
     settings = await db.get_all_settings()
     if settings.get("trending_enabled", "0") != "1":
@@ -713,8 +730,13 @@ async def run_trending_monitor():
     feishu_url = settings.get("feishu_webhook_url", "")
 
     accounts = await _resolve_trending_accounts(settings)
+    if platform:
+        platform = platform.lower()
+        accounts = [a for a in accounts if (a.get("platform") or "xhs").lower() == platform]
     if not accounts:
-        logger.warning("[trending] no active accounts configured, skipping")
+        logger.warning(
+            f"[trending] no active accounts configured (platform={platform or 'all'}), skipping"
+        )
         return
 
     # Auto-fetch the body text after search? Search API only returns titles, so
@@ -765,6 +787,7 @@ async def run_trending_monitor():
                     images=images_json,
                     video_url=p.get("video_url", "") or "",
                     note_type=p.get("note_type", "normal") or "normal",
+                    platform=acc_platform,
                 )
                 if is_new:
                     new_posts.append(p)

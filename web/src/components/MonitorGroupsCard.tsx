@@ -1,13 +1,18 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Card, CardBody, CardHeader } from "@nextui-org/card";
+import { Button } from "@nextui-org/button";
+import { Input, Textarea } from "@nextui-org/input";
+import { Switch } from "@nextui-org/switch";
+import { Chip } from "@nextui-org/chip";
 import {
-  Card, CardBody, CardHeader,
-  Button, Input, Textarea, Switch, Chip,
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
+} from "@nextui-org/table";
+import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
-  Accordion, AccordionItem,
-} from "@nextui-org/react";
+} from "@nextui-org/modal";
+import { Accordion, AccordionItem } from "@nextui-org/accordion";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 
 const API = (path: string) => `/api/monitor${path}`;

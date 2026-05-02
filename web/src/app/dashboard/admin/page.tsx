@@ -3,12 +3,20 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
+import { Card, CardBody, CardHeader } from "@nextui-org/card";
+import { Button } from "@nextui-org/button";
+import { Input, Textarea } from "@nextui-org/input";
+import { Switch } from "@nextui-org/switch";
+import { Chip } from "@nextui-org/chip";
 import {
-  Card, CardBody, CardHeader, Button, Input, Switch, Chip, Textarea,
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
-  Tabs, Tab, Modal, ModalContent, ModalHeader, ModalBody, ModalFooter,
-  useDisclosure, Spinner, Tooltip,
-} from "@nextui-org/react";
+} from "@nextui-org/table";
+import { Tabs, Tab } from "@nextui-org/tabs";
+import {
+  Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
+} from "@nextui-org/modal";
+import { Spinner } from "@nextui-org/spinner";
+import { Tooltip } from "@nextui-org/tooltip";
 import { ShieldCheck, Users, Server, Cpu, RefreshCw, QrCode, Plus, Pencil, KeyRound } from "lucide-react";
 
 const API = (path: string) => `/api${path}`;

@@ -2,7 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { Sparkles, X } from "lucide-react";
-import { Card, CardBody, Button, Chip } from "@nextui-org/react";
+import { Card, CardBody } from "@nextui-org/card";
+import { Button } from "@nextui-org/button";
+import { Chip } from "@nextui-org/chip";
 
 // 改版本号即可让所有用户重新看到一次新公告。
 const NOTICE_ID = "2026-04-yqmm-launch";

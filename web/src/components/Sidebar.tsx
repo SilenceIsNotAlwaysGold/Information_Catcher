@@ -5,9 +5,12 @@ import Link from "next/link";
 import {
   LayoutDashboard, Upload, Settings, LogOut, TrendingUp,
   ShieldCheck, Music2, Newspaper, ChevronDown, ChevronRight,
-  FileText, Users,
+  FileText, Users, Moon, Sun,
 } from "lucide-react";
-import { Button, Tooltip, Chip } from "@nextui-org/react";
+import { Button } from "@nextui-org/button";
+import { Tooltip } from "@nextui-org/tooltip";
+import { Chip } from "@nextui-org/chip";
+import { useTheme } from "next-themes";
 import { useI18n } from "@/contexts/I18nContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { useEffect, useState, type ReactNode } from "react";
@@ -80,6 +83,9 @@ export function Sidebar() {
   const pathname = usePathname();
   const { t } = useI18n();
   const { logout, user } = useAuth();
+  const { theme, setTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
   const navItems = user?.role === "admin" ? [...baseNavItems, adminNavItem] : baseNavItems;
 
   // 折叠状态：{ [module]: true } 表示折叠
@@ -119,7 +125,7 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="fixed left-0 top-0 h-screen w-16 lg:w-56 bg-content1 border-r border-divider flex flex-col z-40">
+    <aside className="fixed left-0 top-0 h-screen w-16 lg:w-64 bg-content1 border-r border-divider flex flex-col z-40">
       <div className="h-16 flex items-center justify-center lg:justify-start px-4 border-b border-divider gap-2">
         <span className="text-2xl">🪐</span>
         <span className="hidden lg:block font-bold text-base text-foreground">Pulse</span>
@@ -147,7 +153,7 @@ export function Sidebar() {
                     <span className="shrink-0 scale-75 origin-left">
                       {platformGroupIcon[platform]}
                     </span>
-                    <span className="text-[10px] font-semibold text-default-400 uppercase tracking-wide">
+                    <span className="text-[10px] font-semibold text-default-400 uppercase tracking-wider">
                       {platformLabel[platform]}
                     </span>
                     {blk.items[0]?.wip && (
@@ -196,16 +202,31 @@ export function Sidebar() {
         </ul>
       </nav>
 
-      <div className="border-t border-divider p-3">
-        <div className="hidden lg:flex items-center gap-2 mb-2 px-1">
+      <div className="border-t border-divider p-3 space-y-2">
+        <div className="hidden lg:flex items-center gap-2 mb-1 px-1">
           <span className="text-sm text-default-500 truncate">{user?.username}</span>
         </div>
-        <Tooltip content={t("common.logout")} placement="right">
-          <Button isIconOnly variant="light" className="w-full lg:w-auto" onClick={logout}>
-            <LogOut size={18} />
-            <span className="hidden lg:inline ml-2 text-sm">{t("common.logout")}</span>
-          </Button>
-        </Tooltip>
+        <div className="flex items-center gap-2">
+          <Tooltip content={t("common.logout")} placement="right">
+            <Button isIconOnly variant="light" className="w-full lg:w-auto" onClick={logout}>
+              <LogOut size={18} />
+              <span className="hidden lg:inline ml-2 text-sm">{t("common.logout")}</span>
+            </Button>
+          </Tooltip>
+          <Tooltip
+            content={mounted && theme === "dark" ? "切到浅色" : "切到暗色"}
+            placement="right"
+          >
+            <Button
+              isIconOnly
+              variant="light"
+              aria-label="切换主题"
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            >
+              {mounted && theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+            </Button>
+          </Tooltip>
+        </div>
       </div>
     </aside>
   );

@@ -4,7 +4,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
-import { Spinner } from "@nextui-org/react";
+import { Spinner } from "@nextui-org/spinner";
 
 export default function Home() {
   const router = useRouter();

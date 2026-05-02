@@ -1,11 +1,17 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { Card, CardBody, CardHeader } from "@nextui-org/card";
+import { Button } from "@nextui-org/button";
+import { Input, Textarea } from "@nextui-org/input";
+import { Chip } from "@nextui-org/chip";
 import {
-  Card, CardBody, CardHeader, Button, Textarea, Input, Chip,
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
-  Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure, Tooltip,
-} from "@nextui-org/react";
+} from "@nextui-org/table";
+import {
+  Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
+} from "@nextui-org/modal";
+import { Tooltip } from "@nextui-org/tooltip";
 import { Plus, RefreshCw, Trash2, Download, Radio } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";

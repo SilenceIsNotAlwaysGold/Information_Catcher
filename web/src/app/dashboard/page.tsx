@@ -2,7 +2,9 @@
 
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { Card, CardBody, Button, Chip } from "@nextui-org/react";
+import { Card, CardBody } from "@nextui-org/card";
+import { Button } from "@nextui-org/button";
+import { Chip } from "@nextui-org/chip";
 import { Activity, Upload, Bell, RefreshCw, TrendingUp, MessageCircle, Heart, Bookmark } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { UpdateNoticeBanner } from "@/components/UpdateNoticeBanner";

@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
-import { Spinner } from "@nextui-org/react";
+import { Spinner } from "@nextui-org/spinner";
 import { Sidebar } from "@/components/Sidebar";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {

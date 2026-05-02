@@ -2,24 +2,21 @@
 
 import { useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import { Card, CardBody, CardHeader } from '@nextui-org/card';
+import { Button } from '@nextui-org/button';
+import { Input, Textarea } from '@nextui-org/input';
+import { Chip } from '@nextui-org/chip';
+import { Image } from '@nextui-org/image';
+import { Spinner } from '@nextui-org/spinner';
+import { Divider } from '@nextui-org/divider';
 import {
-  Card,
-  CardBody,
-  CardHeader,
-  Button,
-  Input,
-  Textarea,
-  Chip,
-  Image,
-  Spinner,
-  Divider,
   Modal,
   ModalContent,
   ModalHeader,
   ModalBody,
   ModalFooter,
   useDisclosure,
-} from '@nextui-org/react';
+} from '@nextui-org/modal';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   ArrowLeft,
