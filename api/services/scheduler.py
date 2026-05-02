@@ -435,8 +435,9 @@ async def run_creator_check():
         return
     logger.info(f"[creator_check] checking {len(creators)} creators")
 
-    # 每个用户的抖音账号缓存（追新需要登录账号）
+    # 每个用户的抖音/XHS 账号缓存（追新需要登录账号）
     douyin_accounts_by_uid: dict = {}
+    xhs_accounts_by_uid: dict = {}
 
     for creator in creators:
         plat = platform_registry.get_platform(creator.get("platform") or "xhs")
@@ -454,6 +455,17 @@ async def run_creator_check():
                     (a for a in accs if a.get("cookie")), None,
                 )
             account = douyin_accounts_by_uid.get(uid)
+            if not account:
+                continue  # 没账号直接跳过
+        elif creator.get("platform") == "xhs":
+            if uid not in xhs_accounts_by_uid:
+                accs = await db.get_accounts(
+                    include_secrets=True, user_id=uid, platform="xhs",
+                )
+                xhs_accounts_by_uid[uid] = next(
+                    (a for a in accs if a.get("cookie")), None,
+                )
+            account = xhs_accounts_by_uid.get(uid)
             if not account:
                 continue  # 没账号直接跳过
 

@@ -432,7 +432,7 @@ async def check_creator(
     plat = platform_registry.get_platform(creator["platform"])
     if not plat:
         raise HTTPException(status_code=400, detail="未知平台")
-    # 抖音追新需带 cookie 账号；XHS 默认匿名通道
+    # 抖音 / XHS 追新都需带 cookie 账号（XHS 主页未登录会跳登录墙）
     use_account = None
     if creator["platform"] == "douyin":
         accs = await db.get_accounts(
@@ -443,6 +443,16 @@ async def check_creator(
             raise HTTPException(
                 status_code=400,
                 detail="需要先添加一个抖音账号（含 cookie）才能追新博主",
+            )
+    elif creator["platform"] == "xhs":
+        accs = await db.get_accounts(
+            include_secrets=True, user_id=current_user["id"], platform="xhs",
+        )
+        use_account = next((a for a in accs if a.get("cookie")), None)
+        if not use_account:
+            raise HTTPException(
+                status_code=400,
+                detail="需要先添加一个小红书账号（扫码登录获取 cookie）才能追新博主",
             )
     try:
         posts = await plat.fetch_creator_posts(creator["creator_url"], account=use_account)
