@@ -545,6 +545,127 @@ async def check_live(
     return {"ok": True, "state": state}
 
 
+# ── Admin 全平台视图 ────────────────────────────────────────────────────────
+
+def _require_admin(current_user: dict):
+    if (current_user.get("role") or "user") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+
+
+@router.get("/admin/overview", summary="平台总览（admin only）")
+async def admin_overview(current_user: dict = Depends(get_current_user)):
+    _require_admin(current_user)
+    from ..services import auth_service
+    users = auth_service.list_users()
+    user_count = len(users)
+    active_users = sum(1 for u in users if u.get("is_active"))
+
+    # 监控统计
+    posts = await db.get_posts()
+    total_posts = len(posts)
+    by_platform: dict = {}
+    by_user: dict = {}
+    for p in posts:
+        plat = p.get("platform") or "xhs"
+        by_platform[plat] = by_platform.get(plat, 0) + 1
+        uid = p.get("user_id") or 0
+        by_user[uid] = by_user.get(uid, 0) + 1
+
+    accounts = await db.get_accounts(include_secrets=False)
+    creators = await db.list_creators()
+    lives = await db.list_lives()
+    return {
+        "user_count": user_count,
+        "active_user_count": active_users,
+        "total_posts": total_posts,
+        "total_accounts": len(accounts),
+        "total_creators": len(creators),
+        "total_lives": len(lives),
+        "posts_by_platform": by_platform,
+        "posts_by_user_count": len([uid for uid, n in by_user.items() if n > 0]),
+        "users_recent": users[:5],
+    }
+
+
+@router.get("/admin/users", summary="所有用户 + 业务数据统计（admin only）")
+async def admin_list_users(current_user: dict = Depends(get_current_user)):
+    _require_admin(current_user)
+    from ..services import auth_service
+    users = auth_service.list_users()
+
+    # 一次性聚合统计：posts / accounts / alerts / creators / lives 按 user_id 分组
+    posts = await db.get_posts()
+    accounts = await db.get_accounts(include_secrets=False)
+    creators = await db.list_creators()
+    lives = await db.list_lives()
+
+    posts_by_uid: dict = {}
+    plat_by_uid: dict = {}
+    last_post_at_by_uid: dict = {}
+    for p in posts:
+        uid = p.get("user_id") or 0
+        posts_by_uid[uid] = posts_by_uid.get(uid, 0) + 1
+        plat = p.get("platform") or "xhs"
+        plat_by_uid.setdefault(uid, {})
+        plat_by_uid[uid][plat] = plat_by_uid[uid].get(plat, 0) + 1
+        ca = p.get("created_at") or ""
+        if ca > (last_post_at_by_uid.get(uid) or ""):
+            last_post_at_by_uid[uid] = ca
+
+    accounts_by_uid: dict = {}
+    for a in accounts:
+        uid = a.get("user_id") or 0
+        accounts_by_uid[uid] = accounts_by_uid.get(uid, 0) + 1
+
+    creators_by_uid: dict = {}
+    for c in creators:
+        uid = c.get("user_id") or 0
+        creators_by_uid[uid] = creators_by_uid.get(uid, 0) + 1
+
+    lives_by_uid: dict = {}
+    for l in lives:
+        uid = l.get("user_id") or 0
+        lives_by_uid[uid] = lives_by_uid.get(uid, 0) + 1
+
+    out = []
+    for u in users:
+        uid = u["id"]
+        out.append({
+            **u,
+            "post_count": posts_by_uid.get(uid, 0),
+            "account_count": accounts_by_uid.get(uid, 0),
+            "creator_count": creators_by_uid.get(uid, 0),
+            "live_count": lives_by_uid.get(uid, 0),
+            "posts_by_platform": plat_by_uid.get(uid, {}),
+            "last_post_at": last_post_at_by_uid.get(uid, ""),
+        })
+    return {"users": out}
+
+
+@router.get("/admin/users/{user_id}/posts", summary="某个用户的监控帖子（admin only）")
+async def admin_user_posts(
+    user_id: int,
+    platform: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin(current_user)
+    posts = await db.get_posts(user_id=user_id, platform=platform)
+    return {"posts": posts}
+
+
+@router.get("/admin/users/{user_id}/accounts", summary="某个用户的账号（admin only）")
+async def admin_user_accounts(
+    user_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin(current_user)
+    # only_owned=True：只返回 user 自己的，不包括平台共享池
+    accs = await db.get_accounts(
+        include_secrets=False, user_id=user_id, only_owned=True,
+    )
+    return {"accounts": accs}
+
+
 @router.get("/health", summary="抓取健康度大盘（admin only）")
 async def health_dashboard(
     days: int = 7,

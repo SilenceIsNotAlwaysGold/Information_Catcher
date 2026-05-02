@@ -377,6 +377,14 @@ export default function AdminPage() {
       </div>
 
       <Tabs aria-label="admin sections">
+        <Tab key="overview" title="数据概览">
+          <AdminOverview token={token} />
+        </Tab>
+
+        <Tab key="tenants" title="租户监控">
+          <TenantsView token={token} />
+        </Tab>
+
         <Tab key="users" title="用户管理">
           <Card>
             <CardHeader className="flex justify-between items-center">
@@ -1018,5 +1026,290 @@ function StatCard({ icon, label, value, hint }: {
         </div>
       </CardBody>
     </Card>
+  );
+}
+
+
+function AdminOverview({ token }: { token: string | null }) {
+  const headers = { Authorization: `Bearer ${token}` };
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!token) return;
+    setLoading(true);
+    fetch(API("/monitor/admin/overview"), { headers })
+      .then((r) => r.json())
+      .then((d) => { setData(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [token]);
+
+  if (loading) return <Card><CardBody><Spinner /></CardBody></Card>;
+  if (!data) return null;
+
+  const plat = data.posts_by_platform || {};
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard icon={<Users size={18} />} label="用户总数" value={data.user_count}
+          hint={`活跃 ${data.active_user_count}`} />
+        <StatCard icon={<Server size={18} />} label="监控帖子" value={data.total_posts}
+          hint={`涉及 ${data.posts_by_user_count} 个用户`} />
+        <StatCard icon={<Cpu size={18} />} label="账号总数" value={data.total_accounts} />
+        <StatCard icon={<Cpu size={18} />} label="订阅博主" value={data.total_creators}
+          hint={`直播订阅 ${data.total_lives}`} />
+      </div>
+
+      <Card>
+        <CardHeader className="text-sm text-default-500">按平台分布（监控帖子）</CardHeader>
+        <CardBody>
+          <div className="grid grid-cols-3 gap-3">
+            {(["xhs", "douyin", "mp"] as const).map((p) => (
+              <div key={p} className="flex items-center gap-2 p-3 rounded-md bg-default-100">
+                <Chip size="sm" color={PLATFORM_COLOR[p]} variant="flat">{PLATFORM_LABEL[p]}</Chip>
+                <span className="text-2xl font-semibold ml-auto">{plat[p] || 0}</span>
+              </div>
+            ))}
+          </div>
+        </CardBody>
+      </Card>
+
+      {(data.users_recent || []).length > 0 && (
+        <Card>
+          <CardHeader className="text-sm text-default-500">最近注册用户</CardHeader>
+          <CardBody className="space-y-1">
+            {(data.users_recent || []).map((u: any) => (
+              <div key={u.id} className="flex items-center justify-between text-sm">
+                <span>#{u.id} {u.email || u.username}</span>
+                <span className="text-xs text-default-400">{u.created_at?.slice(0, 10)}</span>
+              </div>
+            ))}
+          </CardBody>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+
+function TenantsView({ token }: { token: string | null }) {
+  const headers = { Authorization: `Bearer ${token}` };
+  const [tenants, setTenants] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<any>(null);
+  const detailModal = useDisclosure();
+
+  useEffect(() => {
+    if (!token) return;
+    setLoading(true);
+    fetch(API("/monitor/admin/users"), { headers })
+      .then((r) => r.json())
+      .then((d) => { setTenants(d.users || []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [token]);
+
+  const openDetail = (u: any) => {
+    setSelected(u);
+    detailModal.onOpen();
+  };
+
+  if (loading) return <Card><CardBody><Spinner /></CardBody></Card>;
+
+  return (
+    <>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+        {tenants.map((u) => {
+          const plat = u.posts_by_platform || {};
+          return (
+            <Card
+              key={u.id}
+              isPressable
+              onPress={() => openDetail(u)}
+              className="hover:scale-[1.01] transition-transform"
+            >
+              <CardBody className="space-y-3">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="text-sm font-semibold">{u.email || u.username}</div>
+                    <div className="text-xs text-default-400">#{u.id} · {u.username}</div>
+                  </div>
+                  <Chip size="sm" variant="flat"
+                    color={u.role === "admin" ? "warning" : (u.is_active ? "success" : "default")}>
+                    {u.role === "admin" ? "管理员" : (u.is_active ? u.plan || "user" : "停用")}
+                  </Chip>
+                </div>
+
+                <div className="grid grid-cols-4 gap-2 text-center">
+                  <div className="bg-default-100 rounded p-2">
+                    <div className="text-xs text-default-400">帖子</div>
+                    <div className="text-lg font-semibold">{u.post_count}</div>
+                  </div>
+                  <div className="bg-default-100 rounded p-2">
+                    <div className="text-xs text-default-400">账号</div>
+                    <div className="text-lg font-semibold">{u.account_count}</div>
+                  </div>
+                  <div className="bg-default-100 rounded p-2">
+                    <div className="text-xs text-default-400">博主</div>
+                    <div className="text-lg font-semibold">{u.creator_count}</div>
+                  </div>
+                  <div className="bg-default-100 rounded p-2">
+                    <div className="text-xs text-default-400">直播</div>
+                    <div className="text-lg font-semibold">{u.live_count}</div>
+                  </div>
+                </div>
+
+                <div className="flex gap-1 flex-wrap">
+                  {(["xhs", "douyin", "mp"] as const).map((p) =>
+                    plat[p] ? (
+                      <Chip key={p} size="sm" variant="flat" color={PLATFORM_COLOR[p]}>
+                        {PLATFORM_LABEL[p]} {plat[p]}
+                      </Chip>
+                    ) : null
+                  )}
+                </div>
+
+                {u.last_post_at && (
+                  <div className="text-xs text-default-400">
+                    最近活跃：{u.last_post_at.slice(0, 16)}
+                  </div>
+                )}
+              </CardBody>
+            </Card>
+          );
+        })}
+      </div>
+
+      <Modal isOpen={detailModal.isOpen} onClose={detailModal.onClose} size="4xl" scrollBehavior="inside">
+        <ModalContent>
+          {selected && (
+            <>
+              <ModalHeader className="flex flex-col gap-1">
+                <span>{selected.email || selected.username}</span>
+                <span className="text-xs text-default-400">
+                  #{selected.id} · {selected.username} · {selected.role} · {selected.plan || "—"}
+                </span>
+              </ModalHeader>
+              <ModalBody>
+                <TenantDetail token={token} userId={selected.id} />
+              </ModalBody>
+              <ModalFooter>
+                <Button variant="flat" onPress={detailModal.onClose}>关闭</Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+    </>
+  );
+}
+
+
+function TenantDetail({ token, userId }: { token: string | null; userId: number }) {
+  const headers = { Authorization: `Bearer ${token}` };
+  const [posts, setPosts] = useState<any[]>([]);
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [platform, setPlatform] = useState<string>("");
+
+  useEffect(() => {
+    if (!token) return;
+    setLoading(true);
+    const q = platform ? `?platform=${platform}` : "";
+    Promise.all([
+      fetch(API(`/monitor/admin/users/${userId}/posts${q}`), { headers }).then((r) => r.json()),
+      fetch(API(`/monitor/admin/users/${userId}/accounts`), { headers }).then((r) => r.json()),
+    ]).then(([p, a]) => {
+      setPosts(p.posts || []);
+      setAccounts(a.accounts || []);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  }, [token, userId, platform]);
+
+  if (loading) return <Spinner />;
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <div className="text-sm font-medium mb-2">该用户的账号（{accounts.length}）</div>
+        {accounts.length === 0 ? (
+          <p className="text-sm text-default-400">无</p>
+        ) : (
+          <div className="space-y-1">
+            {accounts.map((a: any) => (
+              <div key={a.id} className="flex items-center gap-2 text-sm">
+                <Chip size="sm" variant="flat" color={PLATFORM_COLOR[a.platform] || "default"}>
+                  {PLATFORM_LABEL[a.platform] || a.platform}
+                </Chip>
+                <span>#{a.id} {a.name}</span>
+                {a.cookie_status === "expired" && (
+                  <Chip size="sm" color="danger" variant="flat">cookie 过期</Chip>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-sm font-medium">监控帖子（{posts.length}）</span>
+          <div className="flex gap-1">
+            <Chip size="sm"
+              variant={platform === "" ? "solid" : "flat"}
+              color={platform === "" ? "primary" : "default"}
+              className="cursor-pointer"
+              onClick={() => setPlatform("")}>全部</Chip>
+            {(["xhs", "douyin", "mp"] as const).map((p) => (
+              <Chip key={p} size="sm"
+                variant={platform === p ? "solid" : "flat"}
+                color={platform === p ? "primary" : "default"}
+                className="cursor-pointer"
+                onClick={() => setPlatform(p)}>
+                {PLATFORM_LABEL[p]}
+              </Chip>
+            ))}
+          </div>
+        </div>
+        {posts.length === 0 ? (
+          <p className="text-sm text-default-400">无</p>
+        ) : (
+          <Table aria-label="user-posts" removeWrapper isStriped>
+            <TableHeader>
+              <TableColumn>平台</TableColumn>
+              <TableColumn>标题</TableColumn>
+              <TableColumn>互动</TableColumn>
+              <TableColumn>分组</TableColumn>
+              <TableColumn>添加时间</TableColumn>
+            </TableHeader>
+            <TableBody>
+              {posts.slice(0, 200).map((p: any) => (
+                <TableRow key={p.id}>
+                  <TableCell>
+                    <Chip size="sm" variant="flat" color={PLATFORM_COLOR[p.platform] || "default"}>
+                      {PLATFORM_LABEL[p.platform] || p.platform}
+                    </Chip>
+                  </TableCell>
+                  <TableCell className="max-w-md truncate">
+                    <a href={p.note_url} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                      {p.title || p.note_id}
+                    </a>
+                  </TableCell>
+                  <TableCell>
+                    <span className="text-xs">
+                      ❤ {p.liked_count ?? 0} · ⭐ {p.collected_count ?? 0} · 💬 {p.comment_count ?? 0}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-xs">{p.group_name || "—"}</TableCell>
+                  <TableCell className="text-xs text-default-400">{p.created_at?.slice(0, 16) || "—"}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+        {posts.length > 200 && (
+          <p className="text-xs text-default-400 mt-1">仅显示前 200 条（共 {posts.length}）</p>
+        )}
+      </div>
+    </div>
   );
 }
