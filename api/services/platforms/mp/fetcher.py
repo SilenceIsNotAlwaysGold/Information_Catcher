@@ -71,8 +71,15 @@ def _extract_ids_from_url(url: str) -> Optional[Dict[str, str]]:
 
 
 def _parse_js_var(html: str, name: str) -> str:
-    """提取 `var xxx = "..."` 或 `xxx: "..."` 格式的 JS 变量值。"""
-    # var msg_title = '...'  或  var msg_title = "..."
+    """提取 `var xxx = "..."` / `xxx: "..."` / `var xxx = htmlDecode("...")` 格式的 JS 变量值。"""
+    # 优先：var xxx = htmlDecode("...") / decodeURIComponent("...")
+    m = re.search(
+        rf'var\s+{name}\s*=\s*(?:htmlDecode|decodeURIComponent)\(\s*["\']([^"\']*)["\']\s*\)',
+        html,
+    )
+    if m:
+        return m.group(1).strip()
+    # 普通：var xxx = '...' 或 var xxx = "..."
     m = re.search(rf'var\s+{name}\s*=\s*["\']([^"\']*)["\']', html)
     if m:
         return m.group(1).strip()
@@ -80,6 +87,10 @@ def _parse_js_var(html: str, name: str) -> str:
     m = re.search(rf'var\s+{name}\s*=\s*([^;\n]+)\s*;', html)
     if m:
         v = m.group(1).strip().strip("\"'")
+        # 再剥一层 htmlDecode("...")
+        wrap = re.match(r'(?:htmlDecode|decodeURIComponent)\(\s*["\']([^"\']*)["\']\s*\)', v)
+        if wrap:
+            return wrap.group(1).strip()
         return v
     return ""
 
@@ -157,6 +168,145 @@ async def fetch_article_stats(
     }
 
 
+async def search_sogou_articles(
+    nickname: str, max_count: int = 10,
+) -> list[Dict[str, str]]:
+    """通过搜狗微信搜索拉某个公众号最近文章（零配置，best-effort）。
+
+    返回 [{title, url, published_at, creator_name, post_id}, ...]，
+    其中 url 是 mp.weixin.qq.com 真实链接（搜狗的 link?url= 重定向已跟随）。
+    """
+    if not nickname or not nickname.strip():
+        return []
+    nickname = nickname.strip()
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
+    from urllib.parse import quote
+    search_url = (
+        f"https://weixin.sogou.com/weixin?type=2&query={quote(nickname)}"
+    )
+
+    async with httpx.AsyncClient(
+        timeout=15, follow_redirects=False, headers=headers,
+    ) as c:
+        try:
+            r = await c.get(search_url)
+        except Exception as e:
+            logger.warning(f"[mp][sogou] search '{nickname}' fail: {e}")
+            return []
+        if r.status_code != 200 or "antispider" in r.text or "captcha" in r.text.lower():
+            logger.warning(f"[mp][sogou] '{nickname}' 命中风控/验证码 (status={r.status_code})")
+            return []
+        html = r.text
+
+        # 搜狗结果项：每条 <li id="sogou_vr_..."> 含 <a target="_blank" href="/link?url=..." ...>标题</a>
+        # 公众号名在 <a class="account">公众号名</a>
+        items = re.findall(
+            r'<li[^>]+id="sogou_vr_[^"]*"[^>]*>(.*?)</li>',
+            html, re.DOTALL,
+        )
+        if not items:
+            return []
+
+        results: list[Dict[str, str]] = []
+        for item_html in items[:max_count * 2]:  # 多取一些后过滤
+            # 标题：取 <h3> 内的 <a target="_blank" href="/link?...">...</a>
+            t = re.search(
+                r'<h3>\s*<a[^>]+href="(/link\?url=[^"]+)"[^>]*>(.*?)</a>',
+                item_html, re.DOTALL,
+            )
+            if not t:
+                continue
+            link_path = t.group(1).replace("&amp;", "&")
+            # 标题里 <em><!--red_beg-->...<!--red_end--></em> 高亮标签要剥
+            raw_title = t.group(2)
+            raw_title = re.sub(r"<!--red_(beg|end)-->", "", raw_title)
+            title = _strip_html(raw_title).strip()
+            if not title:
+                continue
+
+            # 公众号名（搜狗结构：<span class="all-time-y2">公众号</span>）
+            acc_match = re.search(
+                r'<span[^>]+class="all-time-y2"[^>]*>([^<]+)</span>',
+                item_html,
+            )
+            if not acc_match:
+                # 兼容旧结构 class="account"
+                acc_match = re.search(
+                    r'<a[^>]+class="account"[^>]*>([^<]+)</a>',
+                    item_html,
+                )
+            account_name = (acc_match.group(1).strip() if acc_match else "")
+
+            # 名称过滤（双向 substring；为空时不过滤）
+            if account_name and nickname not in account_name and account_name not in nickname:
+                continue
+
+            # 发布时间（timeConvert('1508898314')）
+            ts = 0
+            ts_match = re.search(r"timeConvert\(['\"](\d{10})['\"]\)", item_html)
+            if ts_match:
+                try: ts = int(ts_match.group(1))
+                except: pass
+
+            # 跟随 sogou 跳转。第一跳是 JS 拼接的签名 URL，再跳一次到真实 /s?__biz=...
+            try:
+                rr = await c.get("https://weixin.sogou.com" + link_path)
+                # 拼出签名 URL
+                parts = re.findall(r"url\s*\+=\s*['\"]([^'\"]+)['\"]", rr.text)
+                signed_url = "".join(parts) if parts else (rr.headers.get("location") or "")
+                if not signed_url or "mp.weixin.qq.com" not in signed_url:
+                    continue
+                # 第二跳：访问签名 URL 后被重定向到带 __biz/mid/idx 的真实 URL
+                async with httpx.AsyncClient(
+                    timeout=12, follow_redirects=True, headers=_request_headers(),
+                ) as c2:
+                    r3 = await c2.get(signed_url)
+                    real_url = str(r3.url)
+            except Exception as e:
+                logger.debug(f"[mp][sogou] follow redirect fail: {e}")
+                continue
+
+            ids = _extract_ids_from_url(real_url)
+            if not ids:
+                # 兜底：从最终 HTML 里抓 biz/mid/idx JS 变量
+                try:
+                    biz = _parse_js_var(r3.text, "biz") or _parse_js_var(r3.text, "__biz")
+                    mid = _parse_js_var(r3.text, "mid")
+                    idx = _parse_js_var(r3.text, "idx")
+                    if biz and mid and idx:
+                        ids = {"biz": biz, "mid": mid, "idx": idx}
+                except Exception:
+                    pass
+            if not ids:
+                continue
+            post_id = _build_post_id(ids["biz"], ids["mid"], ids["idx"])
+            # 重建标准 URL（不带过期签名）
+            canonical_url = (
+                f"https://mp.weixin.qq.com/s?__biz={ids['biz']}"
+                f"&mid={ids['mid']}&idx={ids['idx']}"
+            )
+            results.append({
+                "post_id": post_id,
+                "url": canonical_url,
+                "title": title[:200],
+                "creator_name": account_name,
+                "published_at": ts,
+                "xsec_token": "",
+            })
+            if len(results) >= max_count:
+                break
+
+        return results
+
+
 class MpPlatform(Platform):
     name = "mp"
     label = "公众号"
@@ -168,7 +318,8 @@ class MpPlatform(Platform):
             return None
 
         ids = _extract_ids_from_url(link)
-        # 短链 /s/HASH 没参数 → 跟随一次 30x 拿真实 URL
+        # 短链 /s/HASH：没 query 参数。微信返回文章 HTML 而非 30x，所以先 follow，
+        # 优先看最终 URL 里有没有 query；没有就从 HTML 的 JS 变量里挖 biz/mid/idx
         if not ids:
             try:
                 async with httpx.AsyncClient(timeout=12, follow_redirects=True, max_redirects=3) as c:
@@ -177,8 +328,15 @@ class MpPlatform(Platform):
                 ids = _extract_ids_from_url(final)
                 if ids:
                     link = final
+                else:
+                    biz = _parse_js_var(r.text, "biz") or _parse_js_var(r.text, "__biz")
+                    mid = _parse_js_var(r.text, "mid")
+                    idx = _parse_js_var(r.text, "idx")
+                    if biz and mid and idx:
+                        ids = {"biz": biz, "mid": mid, "idx": idx}
+                        # link 保持短链形态可访问；不强行重写
             except Exception as e:
-                logger.warning(f"[mp] short-link follow fail: {e}")
+                logger.warning(f"[mp] short-link resolve fail: {e}")
                 return None
 
         if not ids:
@@ -273,3 +431,32 @@ class MpPlatform(Platform):
             "copyright_stat": copyright_stat,
             "source_url": source_url,
         }, "ok")
+
+    async def fetch_creator_posts(
+        self, creator_url: str, account: Optional[Dict[str, Any]] = None,
+    ) -> list[Dict[str, Any]]:
+        """公众号"博主追新"：零配置，走搜狗微信搜索。
+
+        creator_url 字段含义对公众号略宽泛：
+          - 公众号昵称（推荐，"测试公众号"）
+          - 任意一篇该公众号文章 URL（兜底从 nickname JS 变量提取）
+
+        best-effort：搜狗有风控/验证码、只返回最近 ~10 篇。
+        """
+        nickname = (creator_url or "").strip()
+        if not nickname:
+            return []
+
+        # 如果传的是文章 URL，先访问拿 nickname
+        if "mp.weixin.qq.com" in nickname:
+            try:
+                async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+                    r = await c.get(nickname, headers=_request_headers())
+                    nickname = _parse_js_var(r.text, "nickname") or _parse_js_var(r.text, "user_name") or ""
+            except Exception as e:
+                logger.warning(f"[mp] resolve nickname from url fail: {e}")
+                return []
+            if not nickname:
+                return []
+
+        return await search_sogou_articles(nickname, max_count=10)

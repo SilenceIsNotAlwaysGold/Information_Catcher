@@ -400,7 +400,7 @@ async def add_creator(
     if not plat:
         raise HTTPException(
             status_code=400,
-            detail="无法识别平台，请提供平台明确的博主主页 URL（小红书 / 抖音 / 公众号）",
+            detail="无法识别平台。请提供博主主页 URL（小红书/抖音）或公众号名称（公众号请明确指定 platform=mp）",
         )
     cid = await db.add_creator(
         user_id=current_user["id"],

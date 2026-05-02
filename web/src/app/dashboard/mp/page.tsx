@@ -60,6 +60,80 @@ export default function MpPage() {
   const [authSaving, setAuthSaving] = useState(false);
   const [authStatus, setAuthStatus] = useState<{ has_auth: boolean; mp_auth_at: string | null }>({ has_auth: false, mp_auth_at: null });
 
+  // 订阅公众号（零配置，走搜狗微信搜索）
+  const followModal = useDisclosure();
+  const [followName, setFollowName] = useState("");
+  const [followBusy, setFollowBusy] = useState(false);
+  const [followError, setFollowError] = useState("");
+  const [followResult, setFollowResult] = useState<{ added: number; fetched: number } | null>(null);
+  const [creators, setCreators] = useState<any[]>([]);
+
+  const loadCreators = async () => {
+    const r = await fetch(`/api/monitor/creators`, { headers });
+    if (r.ok) {
+      const d = await r.json();
+      setCreators((d.creators || []).filter((c: any) => c.platform === "mp"));
+    }
+  };
+  useEffect(() => { if (token) loadCreators(); }, [token]);
+
+  const submitFollow = async () => {
+    setFollowError(""); setFollowResult(null);
+    if (!followName.trim()) { setFollowError("请输入公众号名称"); return; }
+    setFollowBusy(true);
+    try {
+      const r = await fetch(`/api/monitor/creators`, {
+        method: "POST", headers,
+        body: JSON.stringify({
+          creator_url: followName.trim(),
+          creator_name: followName.trim(),
+          platform: "mp",
+        }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        setFollowError(j.detail || "添加失败");
+        return;
+      }
+      const d = await r.json();
+      // 立即触发一次拉取
+      const c = await fetch(`/api/monitor/creators/${d.id}/check`, {
+        method: "POST", headers,
+      });
+      if (c.ok) {
+        const cd = await c.json();
+        setFollowResult({ added: cd.added || 0, fetched: cd.fetched || 0 });
+      }
+      setFollowName("");
+      await loadCreators();
+      await load();
+    } catch (e: any) {
+      setFollowError(e.message || "失败");
+    } finally {
+      setFollowBusy(false);
+    }
+  };
+
+  const unfollow = async (cid: number) => {
+    if (!confirm("取消订阅这个公众号？已抓到的文章会保留")) return;
+    await fetch(`/api/monitor/creators/${cid}`, { method: "DELETE", headers });
+    await loadCreators();
+  };
+
+  const checkOne = async (cid: number) => {
+    const r = await fetch(`/api/monitor/creators/${cid}/check`, {
+      method: "POST", headers,
+    });
+    if (r.ok) {
+      const d = await r.json();
+      alert(`刷新完成：抓到 ${d.fetched || 0} 篇，新增 ${d.added || 0} 篇`);
+      await load();
+    } else {
+      const j = await r.json().catch(() => ({}));
+      alert(`抓取失败：${j.detail || "未知错误"}`);
+    }
+  };
+
   const loadAuthStatus = async () => {
     const r = await fetch(`/api/auth/me`, { headers });
     if (r.ok) {
@@ -241,11 +315,45 @@ export default function MpPage() {
             onPress={handleCheck} isLoading={checking}>
             立即抓取
           </Button>
+          <Button size="sm" color="success" variant="flat"
+            startContent={<Plus size={16} />}
+            onPress={() => { setFollowName(""); setFollowError(""); setFollowResult(null); followModal.onOpen(); }}>
+            订阅公众号
+          </Button>
           <Button size="sm" color="primary" startContent={<Plus size={16} />} onPress={onOpen}>
             添加文章
           </Button>
         </div>
       </div>
+
+      {creators.length > 0 && (
+        <Card>
+          <CardHeader className="flex-col items-start gap-1">
+            <span className="text-sm font-medium">已订阅公众号 ({creators.length})</span>
+            <span className="text-xs text-default-400">每 6 小时自动检查更新；命中风控时部分文章可能拉不到</span>
+          </CardHeader>
+          <CardBody className="flex flex-row gap-2 flex-wrap">
+            {creators.map((c) => (
+              <Chip key={c.id} size="sm" variant="flat" color="success"
+                onClose={() => unfollow(c.id)}
+                endContent={
+                  <Button size="sm" variant="light" isIconOnly
+                    onPress={() => checkOne(c.id)}
+                    className="ml-1 min-w-0 w-5 h-5">
+                    <RefreshCw size={11} />
+                  </Button>
+                }>
+                {c.creator_name || c.creator_url}
+                {c.last_check_at && (
+                  <span className="text-[10px] text-default-400 ml-1">
+                    · {c.last_check_at.slice(5, 16)}
+                  </span>
+                )}
+              </Chip>
+            ))}
+          </CardBody>
+        </Card>
+      )}
 
       <Card>
         <CardHeader className="flex-col items-start gap-2">
@@ -468,6 +576,42 @@ export default function MpPage() {
             <Button color="primary" onPress={submitAuth} isLoading={authSaving}
               isDisabled={!authForm.uin || !authForm.key}>
               保存凭证
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* 订阅公众号 modal */}
+      <Modal isOpen={followModal.isOpen} onClose={followModal.onClose} size="lg">
+        <ModalContent>
+          <ModalHeader>订阅公众号（零配置）</ModalHeader>
+          <ModalBody className="space-y-3">
+            <p className="text-xs text-default-500">
+              输入公众号名称即可订阅。系统通过<strong>搜狗微信搜索</strong>抓最近 ~10 篇文章并自动入库；
+              之后每 6 小时检查一次更新。无需 cookie / 凭证。
+            </p>
+            <Input
+              autoFocus
+              label="公众号名称"
+              placeholder="例：人民日报 / 36氪 / 阮一峰的网络日志"
+              value={followName}
+              onValueChange={setFollowName}
+              description="也可以粘贴一篇该公众号的文章链接，系统会自动识别名称"
+            />
+            {followError && <p className="text-sm text-danger">{followError}</p>}
+            {followResult && (
+              <div className="text-sm text-success bg-success-50 rounded p-2">
+                ✅ 已订阅。首批抓到 {followResult.fetched} 篇，新增 {followResult.added} 篇。
+              </div>
+            )}
+            <p className="text-xs text-warning">
+              ⚠️ 搜狗微信偶尔会出验证码，命中时本次返回 0 篇；下次定时任务会再试。
+            </p>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="light" onPress={followModal.onClose}>关闭</Button>
+            <Button color="primary" onPress={submitFollow} isLoading={followBusy}>
+              订阅并立即抓取
             </Button>
           </ModalFooter>
         </ModalContent>
