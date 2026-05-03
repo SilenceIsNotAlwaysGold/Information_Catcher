@@ -2,8 +2,14 @@
 "use client";
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { mutate as swrMutate } from 'swr';
 import { User, LoginRequest } from '@/types';
 import { authApi } from '@/lib/api';
+
+// 与 useApi.ts 中 useMe 的 SWR key 形状必须一致
+const ME_KEY = (token: string) => ['/api/auth/me', token] as const;
+const seedMe = (token: string, user: User) =>
+  swrMutate(ME_KEY(token), user, { revalidate: false });
 
 interface AuthContextType {
   user: User | null;
@@ -32,6 +38,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authApi.getCurrentUser(savedToken)
         .then((userData) => {
           setUser(userData);
+          seedMe(savedToken, userData);
         })
         .catch(() => {
           // token无效，清除
@@ -51,6 +58,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(response.access_token);
     setUser(response.user);
     localStorage.setItem('token', response.access_token);
+    seedMe(response.access_token, response.user);
   };
 
   const register = async (email: string, password: string) => {
@@ -67,6 +75,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const userData = await authApi.getCurrentUser(data.access_token);
       setUser(userData);
+      seedMe(data.access_token, userData);
     } catch {
       // 忽略，下次刷新会重新拉
     }
@@ -75,7 +84,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const updateToken = (newToken: string) => {
     setToken(newToken);
     localStorage.setItem("token", newToken);
-    authApi.getCurrentUser(newToken).then(setUser).catch(() => {});
+    authApi.getCurrentUser(newToken)
+      .then((u) => { setUser(u); seedMe(newToken, u); })
+      .catch(() => {});
   };
 
   const logout = () => {

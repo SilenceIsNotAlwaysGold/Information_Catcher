@@ -12,9 +12,12 @@ import {
 import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
 } from "@nextui-org/modal";
-import { RefreshCw, ExternalLink, Sparkles, Send, Download } from "lucide-react";
+import { RefreshCw, ExternalLink, Sparkles, Send, Download, TrendingUp } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
+import { EmptyState } from "@/components/EmptyState";
+import { TableSkeleton } from "@/components/TableSkeleton";
+import { toastOk, toastErr } from "@/lib/toast";
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -105,7 +108,7 @@ export default function DouyinTrendingPage() {
       });
       const d = await r.json();
       if (!r.ok) {
-        alert(d.detail || "抓取正文失败");
+        toastErr(d.detail || "抓取正文失败");
         return;
       }
       setActive({
@@ -135,7 +138,7 @@ export default function DouyinTrendingPage() {
       );
       const d = await r.json();
       if (!r.ok) {
-        alert(d.detail || "改写失败");
+        toastErr(d.detail || "改写失败");
         return;
       }
       setRewritePreview(d.rewritten);
@@ -157,7 +160,7 @@ export default function DouyinTrendingPage() {
       if (!r.ok) {
         let msg = "锁定失败";
         try { const j = await r.json(); msg = j.detail || msg; } catch {}
-        alert(msg);
+        toastErr(msg);
         return;
       }
       setRewritePreview(rewriteVariants[idx]);
@@ -185,12 +188,16 @@ export default function DouyinTrendingPage() {
       });
       const d = await r.json();
       if (!r.ok) {
-        alert(d.detail || "同步失败");
+        toastErr(d.detail || "同步失败");
         return;
       }
       const okCount = (d.results || []).filter((x: any) => x.ok).length;
       const failCount = (d.results || []).filter((x: any) => !x.ok).length;
-      alert(`同步完成：成功 ${okCount} 条${failCount ? `，失败 ${failCount} 条` : ""}`);
+      if (failCount > 0) {
+        toastErr(`同步完成：成功 ${okCount} 条，失败 ${failCount} 条`);
+      } else {
+        toastOk(`同步完成：成功 ${okCount} 条`);
+      }
       setSelected(new Set());
       await load();
     } finally {
@@ -292,6 +299,21 @@ export default function DouyinTrendingPage() {
           </Button>
         </CardHeader>
         <CardBody className="p-0">
+          {loading ? (
+            <TableSkeleton rows={6} cols={8} />
+          ) : posts.length === 0 ? (
+            <EmptyState
+              icon={TrendingUp}
+              title="还没有抖音热门视频"
+              hint="请先在管理员页配置抖音账号 cookie 并设置 trending 关键词，然后点「立即抓取」拉取一次。"
+              action={
+                <Button color="primary" startContent={<Sparkles size={14} />}
+                  onPress={triggerCheck} isLoading={triggering}>
+                  立即抓取
+                </Button>
+              }
+            />
+          ) : (
           <Table aria-label="douyin trending posts" removeWrapper isHeaderSticky>
             <TableHeader>
               <TableColumn className="w-10">
@@ -314,7 +336,7 @@ export default function DouyinTrendingPage() {
               <TableColumn>改写预览</TableColumn>
               <TableColumn>操作</TableColumn>
             </TableHeader>
-            <TableBody emptyContent="暂无抖音热门视频。请先在管理员页配置抖音账号 cookie 并设置 trending 关键词，然后点「立即抓取」。">
+            <TableBody>
               {posts.map((p) => (
                 <TableRow key={p.note_id}>
                   <TableCell>
@@ -400,6 +422,7 @@ export default function DouyinTrendingPage() {
               ))}
             </TableBody>
           </Table>
+          )}
         </CardBody>
       </Card>
 

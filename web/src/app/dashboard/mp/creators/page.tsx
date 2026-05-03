@@ -3,8 +3,11 @@
 import { useEffect, useState } from "react";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Chip } from "@nextui-org/chip";
+import { Skeleton } from "@nextui-org/skeleton";
+import { Newspaper } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav, CreatorsCard } from "@/components/platform";
+import { EmptyState } from "@/components/EmptyState";
 
 type Post = {
   note_id: string;
@@ -74,9 +77,23 @@ export default function MpCreatorsPage() {
         </CardHeader>
         <CardBody className="space-y-4">
           {loading ? (
-            <p className="text-sm text-default-400">加载中…</p>
+            <div className="space-y-3">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="space-y-2">
+                  <Skeleton className="h-5 w-40 rounded-lg" />
+                  <div className="ml-6 space-y-1">
+                    <Skeleton className="h-4 w-3/4 rounded-md" />
+                    <Skeleton className="h-4 w-2/3 rounded-md" />
+                  </div>
+                </div>
+              ))}
+            </div>
           ) : grouped.length === 0 ? (
-            <p className="text-sm text-default-400">还没有抓到任何已订阅公众号的文章</p>
+            <EmptyState
+              icon={Newspaper}
+              title="还没有抓到任何已订阅公众号的文章"
+              hint="在上方「订阅公众号」中添加目标公众号，定时任务会自动追新；也可以在「文章列表」页粘贴文章链接手动抓取。"
+            />
           ) : (
             grouped.map((g) => (
               <div key={g.author} className="space-y-1">

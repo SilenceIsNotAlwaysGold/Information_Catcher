@@ -11,6 +11,8 @@ import {
 import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { CreatorRow, PlatformKey, PLATFORM_LABEL } from "./types";
+import { toastOk, toastErr } from "@/lib/toast";
+import { confirmDialog } from "@/components/ConfirmDialog";
 
 /**
  * 通用「博主追新」卡片组件，三个平台共用。
@@ -89,7 +91,14 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
   };
 
   const unfollow = async (cid: number) => {
-    if (!confirm("取消订阅这个博主？已抓到的帖子会保留")) return;
+    const ok = await confirmDialog({
+      title: "取消订阅",
+      content: "取消订阅这个博主？已抓到的帖子会保留",
+      confirmText: "取消订阅",
+      cancelText: "保留",
+      danger: true,
+    });
+    if (!ok) return;
     await fetch(`/api/monitor/creators/${cid}`, { method: "DELETE", headers });
     await load();
   };
@@ -98,11 +107,11 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
     const r = await fetch(`/api/monitor/creators/${cid}/check`, { method: "POST", headers });
     if (r.ok) {
       const d = await r.json();
-      alert(`刷新完成：抓到 ${d.fetched || 0} 篇，新增 ${d.added || 0} 篇`);
+      toastOk(`刷新完成：抓到 ${d.fetched || 0} 篇，新增 ${d.added || 0} 篇`);
       await load();
     } else {
       const j = await r.json().catch(() => ({}));
-      alert(`抓取失败：${j.detail || "未知错误"}`);
+      toastErr(`抓取失败：${j.detail || "未知错误"}`);
     }
   };
 

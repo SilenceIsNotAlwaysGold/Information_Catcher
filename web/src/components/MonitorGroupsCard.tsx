@@ -14,6 +14,8 @@ import {
 } from "@nextui-org/modal";
 import { Accordion, AccordionItem } from "@nextui-org/accordion";
 import { Plus, Pencil, Trash2 } from "lucide-react";
+import { toastErr } from "@/lib/toast";
+import { confirmDialog } from "@/components/ConfirmDialog";
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -128,7 +130,7 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
         });
         const d = await r.json();
         if (!r.ok) {
-          alert(d.detail || "新建失败"); return;
+          toastErr(d.detail || "新建失败"); return;
         }
         await fetch(API(`/groups/${d.id}`), {
           method: "PATCH", headers,
@@ -148,9 +150,16 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
   };
 
   const remove = async (g: Group) => {
-    if (g.is_builtin) { alert("内置分组不能删除"); return; }
+    if (g.is_builtin) { toastErr("内置分组不能删除"); return; }
     const fallback = groups.find((x) => x.is_builtin);
-    if (!confirm(`删除分组「${g.name}」？该分组下的帖子会迁到「${fallback?.name ?? "无分组"}」`)) return;
+    const ok = await confirmDialog({
+      title: "删除分组",
+      content: `删除分组「${g.name}」？该分组下的帖子会迁到「${fallback?.name ?? "无分组"}」`,
+      confirmText: "删除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
     const url = fallback ? API(`/groups/${g.id}?fallback=${fallback.id}`) : API(`/groups/${g.id}`);
     await fetch(url, { method: "DELETE", headers });
     await load();

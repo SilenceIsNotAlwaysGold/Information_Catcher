@@ -1,23 +1,29 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
-import { Input, Textarea } from "@nextui-org/input";
-import { Select, SelectItem } from "@nextui-org/select";
+import { Input } from "@nextui-org/input";
 import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
 } from "@nextui-org/table";
 import { Chip } from "@nextui-org/chip";
-import {
-  Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
-} from "@nextui-org/modal";
+import { useDisclosure } from "@nextui-org/modal";
 import { Tabs, Tab } from "@nextui-org/tabs";
 import { Tooltip } from "@nextui-org/tooltip";
-import { Plus, RefreshCw, Trash2, BarChart2, Settings, Search } from "lucide-react";
+import { Plus, RefreshCw, Trash2, BarChart2, Settings, Search, FileText, Inbox } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
+import { EmptyState } from "@/components/EmptyState";
+import { TableSkeleton } from "@/components/TableSkeleton";
+import { toastOk, toastErr } from "@/lib/toast";
+import { confirmDialog } from "@/components/ConfirmDialog";
+import { useAccounts, useGroups } from "@/lib/useApi";
+
+// 添加帖子 Modal —— 首屏不需要，懒加载
+const AddPostsModal = dynamic(() => import("./_modals/AddPostsModal"), { ssr: false });
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -49,9 +55,6 @@ type Alert = {
   created_at: string;
 };
 
-type Account = { id: number; name: string };
-type Group = { id: number; name: string; is_builtin: number };
-
 // 仅当帖子明确属于 xhs 时显示。老数据 platform 为空也按 xhs 处理（老数据库默认 xhs）。
 const isXhs = (p: Post) => !p.platform || p.platform === "xhs";
 
@@ -61,30 +64,33 @@ export default function XhsPostsPage() {
 
   const [posts, setPosts] = useState<Post[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [groups, setGroups] = useState<Group[]>([]);
+  // accounts / groups 走 SWR 共享缓存
+  const { accounts } = useAccounts();
+  const { groups } = useGroups();
   const [links, setLinks] = useState("");
   const [selectedAccount, setSelectedAccount] = useState<string>("");
   const [selectedGroupId, setSelectedGroupId] = useState<string>("");
   const [adding, setAdding] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [addResults, setAddResults] = useState<{ link: string; ok: boolean; reason?: string }[]>([]);
   const [search, setSearch] = useState("");
 
   const { isOpen, onOpen, onClose } = useDisclosure();
 
+  // 仅 posts / alerts 是本页特有数据，accounts/groups 已由 SWR 在后台保鲜
   const load = useCallback(async () => {
-    const [p, a, ac, gr] = await Promise.all([
-      fetch(API("/posts"), { headers }).then((r) => r.json()),
-      fetch(API("/alerts?limit=30"), { headers }).then((r) => r.json()),
-      fetch(API("/accounts"), { headers }).then((r) => r.json()),
-      fetch(API("/groups"), { headers }).then((r) => r.json()),
-    ]);
-    // 仅保留小红书帖子
-    setPosts((p.posts ?? []).filter(isXhs));
-    setAlerts(a.alerts ?? []);
-    setGroups(gr.groups ?? []);
-    setAccounts(ac.accounts ?? []);
+    setLoading(true);
+    try {
+      const [p, a] = await Promise.all([
+        fetch(API("/posts"), { headers }).then((r) => r.json()),
+        fetch(API("/alerts?limit=30"), { headers }).then((r) => r.json()),
+      ]);
+      setPosts((p.posts ?? []).filter(isXhs));
+      setAlerts(a.alerts ?? []);
+    } finally {
+      setLoading(false);
+    }
   }, [token]);
 
   useEffect(() => { load(); }, [load]);
@@ -131,7 +137,14 @@ export default function XhsPostsPage() {
 
   const handleClearAlerts = async () => {
     if (!alerts.length) return;
-    if (!confirm(`确认清空全部 ${alerts.length} 条告警记录？`)) return;
+    const ok = await confirmDialog({
+      title: "清空告警记录",
+      content: `确认清空全部 ${alerts.length} 条告警记录？`,
+      confirmText: "清空",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
     await fetch(API("/alerts"), { method: "DELETE", headers });
     await load();
   };
@@ -173,13 +186,20 @@ export default function XhsPostsPage() {
   const handleCleanupDead = async () => {
     const dead = posts.filter((p) => (p.fail_count ?? 0) >= 5);
     if (!dead.length) {
-      alert("没有连续失败超过 5 次的帖子");
+      toastErr("没有连续失败超过 5 次的帖子");
       return;
     }
-    if (!confirm(`将停抓 ${dead.length} 条已失效的帖子（不可撤销，但帖子不会真删除，可以重新添加）？`)) return;
+    const ok = await confirmDialog({
+      title: "清理失效帖子",
+      content: `将停抓 ${dead.length} 条已失效的帖子（不可撤销，但帖子不会真删除，可以重新添加）？`,
+      confirmText: "停抓",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
     const r = await fetch(API("/posts/cleanup-dead"), { method: "POST", headers });
     const d = await r.json();
-    alert(`已清理 ${d.cleaned} 条失效帖子`);
+    toastOk(`已清理 ${d.cleaned} 条失效帖子`);
     await load();
   };
 
@@ -234,7 +254,25 @@ export default function XhsPostsPage() {
         </div>
       </div>
 
-      {/* Tabs — 一个分组一个 Tab */}
+      {/* Loading / Empty / Tabs */}
+      {loading ? (
+        <Card><CardBody className="p-0"><TableSkeleton rows={6} cols={6} /></CardBody></Card>
+      ) : posts.length === 0 && alerts.length === 0 ? (
+        <Card>
+          <CardBody>
+            <EmptyState
+              icon={FileText}
+              title="还没有监控小红书帖子"
+              hint="粘贴小红书笔记链接（xhslink.com / xiaohongshu.com）即可开始监控点赞、收藏、评论变化。"
+              action={
+                <Button color="primary" startContent={<Plus size={16} />} onPress={onOpen}>
+                  添加小红书帖子
+                </Button>
+              }
+            />
+          </CardBody>
+        </Card>
+      ) : (
       <Tabs>
         {groups.map((g) => {
           const groupPosts = filteredPosts.filter((p) => p.group_id === g.id);
@@ -256,7 +294,10 @@ export default function XhsPostsPage() {
                     <TableColumn>最后检测</TableColumn>
                     <TableColumn>操作</TableColumn>
                   </TableHeader>
-                  <TableBody emptyContent={`「${g.name}」分组下暂无帖子`}>
+                  <TableBody emptyContent={
+                    <EmptyState icon={Inbox} title={`「${g.name}」分组下暂无帖子`}
+                      hint={search ? "尝试清除搜索条件，或为该分组添加帖子。" : "在添加帖子时选择该分组，即可入组。"} />
+                  }>
                     {groupPosts.map((p) => (
                         <TableRow key={p.note_id}>
                           <TableCell>
@@ -325,7 +366,10 @@ export default function XhsPostsPage() {
                   <TableColumn>时间</TableColumn>
                   <TableColumn>操作</TableColumn>
                 </TableHeader>
-                <TableBody emptyContent="暂无告警记录">
+                <TableBody emptyContent={
+                  <EmptyState icon={Inbox} title="暂无告警记录"
+                    hint="数据指标超过阈值时会在这里显示告警。" />
+                }>
                   {alerts.map((a) => (
                     <TableRow key={a.id}>
                       <TableCell>
@@ -358,64 +402,26 @@ export default function XhsPostsPage() {
           </Card>
         </Tab>
       </Tabs>
+      )}
 
-      {/* Add Posts Modal */}
-      <Modal isOpen={isOpen} onClose={onClose} size="lg">
-        <ModalContent>
-          <ModalHeader>添加小红书帖子链接</ModalHeader>
-          <ModalBody className="space-y-4">
-            <Select
-              label="分组"
-              placeholder="选择分组"
-              selectedKeys={selectedGroupId ? new Set([selectedGroupId]) : new Set()}
-              onSelectionChange={(keys) => setSelectedGroupId(Array.from(keys)[0] as string ?? "")}
-            >
-              {groups.map((g) => (
-                <SelectItem key={String(g.id)}>{g.name}</SelectItem>
-              ))}
-            </Select>
-            <Textarea
-              label="帖子链接"
-              placeholder={"每行粘贴一个小红书链接：\n- xhslink.com/...\n- xiaohongshu.com/explore/{id}\n- xiaohongshu.com/discovery/item/{id}"}
-              value={links}
-              onValueChange={setLinks}
-              minRows={5}
-            />
-            {accounts.length > 0 && (
-              <Select
-                label="绑定账号（可选）"
-                placeholder="不选则不使用 Cookie 抓取"
-                selectedKeys={selectedAccount ? new Set([selectedAccount]) : new Set()}
-                onSelectionChange={(keys) => setSelectedAccount(Array.from(keys)[0] as string ?? "")}
-              >
-                {accounts.map((a) => (
-                  <SelectItem key={String(a.id)}>{a.name}</SelectItem>
-                ))}
-              </Select>
-            )}
-
-            {addResults.length > 0 && (
-              <div className="space-y-1">
-                {addResults.map((r, i) => (
-                  <div key={i} className="flex items-center gap-2 text-sm">
-                    <Chip size="sm" color={r.ok ? "success" : "danger"} variant="flat">
-                      {r.ok ? "成功" : "失败"}
-                    </Chip>
-                    <span className="truncate text-default-500">{r.link}</span>
-                    {r.reason && <span className="text-danger text-xs">{r.reason}</span>}
-                  </div>
-                ))}
-              </div>
-            )}
-          </ModalBody>
-          <ModalFooter>
-            <Button variant="flat" onPress={onClose}>取消</Button>
-            <Button color="primary" isLoading={adding} onPress={handleAdd}>
-              解析并添加
-            </Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
+      {/* Add Posts Modal —— 懒加载，仅当用户打开后才加载 chunk */}
+      {isOpen && (
+        <AddPostsModal
+          isOpen={isOpen}
+          onClose={onClose}
+          groups={groups}
+          accounts={accounts}
+          links={links}
+          setLinks={setLinks}
+          selectedGroupId={selectedGroupId}
+          setSelectedGroupId={setSelectedGroupId}
+          selectedAccount={selectedAccount}
+          setSelectedAccount={setSelectedAccount}
+          addResults={addResults}
+          adding={adding}
+          onSubmit={handleAdd}
+        />
+      )}
     </div>
   );
 }

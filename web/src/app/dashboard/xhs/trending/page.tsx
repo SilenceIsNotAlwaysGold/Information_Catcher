@@ -12,9 +12,12 @@ import {
 import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
 } from "@nextui-org/modal";
-import { RefreshCw, ExternalLink, Sparkles, Send } from "lucide-react";
+import { RefreshCw, ExternalLink, Sparkles, Send, TrendingUp } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
+import { EmptyState } from "@/components/EmptyState";
+import { TableSkeleton } from "@/components/TableSkeleton";
+import { toastOk, toastErr } from "@/lib/toast";
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -81,7 +84,7 @@ export default function XhsTrendingPage() {
       });
       const d = await r.json();
       if (!r.ok) {
-        alert(d.detail || "触发失败"); return;
+        toastErr(d.detail || "触发失败"); return;
       }
       // 后台异步执行；轮询刷新
       for (let i = 0; i < 6; i++) {
@@ -135,7 +138,7 @@ export default function XhsTrendingPage() {
       });
       const d = await r.json();
       if (!r.ok) {
-        alert(d.detail || "抓取正文失败");
+        toastErr(d.detail || "抓取正文失败");
         return;
       }
       // 立刻把弹窗里的 active.* 更新，避免必须刷新
@@ -167,7 +170,7 @@ export default function XhsTrendingPage() {
       );
       const d = await r.json();
       if (!r.ok) {
-        alert(d.detail || "改写失败");
+        toastErr(d.detail || "改写失败");
         return;
       }
       setRewritePreview(d.rewritten);
@@ -189,7 +192,7 @@ export default function XhsTrendingPage() {
       if (!r.ok) {
         let msg = "锁定失败";
         try { const j = await r.json(); msg = j.detail || msg; } catch {}
-        alert(msg);
+        toastErr(msg);
         return;
       }
       setRewritePreview(rewriteVariants[idx]);
@@ -217,12 +220,16 @@ export default function XhsTrendingPage() {
       });
       const d = await r.json();
       if (!r.ok) {
-        alert(d.detail || "同步失败");
+        toastErr(d.detail || "同步失败");
         return;
       }
       const okCount = (d.results || []).filter((x: any) => x.ok).length;
       const failCount = (d.results || []).filter((x: any) => !x.ok).length;
-      alert(`同步完成：成功 ${okCount} 条${failCount ? `，失败 ${failCount} 条` : ""}`);
+      if (failCount > 0) {
+        toastErr(`同步完成：成功 ${okCount} 条，失败 ${failCount} 条`);
+      } else {
+        toastOk(`同步完成：成功 ${okCount} 条`);
+      }
       setSelected(new Set());
       await load();
     } finally {
@@ -330,6 +337,21 @@ export default function XhsTrendingPage() {
           </Button>
         </CardHeader>
         <CardBody className="p-0">
+          {loading ? (
+            <TableSkeleton rows={6} cols={8} />
+          ) : posts.length === 0 ? (
+            <EmptyState
+              icon={TrendingUp}
+              title="还没有热门数据"
+              hint="管理员在「监控设置 → 热门内容监控」开启关键词搜索后，定时抓取的帖子会自动出现。也可以点上方「立即抓取」手动触发一次。"
+              action={
+                <Button color="primary" startContent={<Sparkles size={14} />}
+                  onPress={triggerCheck} isLoading={triggering}>
+                  立即抓取
+                </Button>
+              }
+            />
+          ) : (
           <Table aria-label="trending posts" removeWrapper isHeaderSticky>
             <TableHeader>
               <TableColumn className="w-10">
@@ -352,7 +374,7 @@ export default function XhsTrendingPage() {
               <TableColumn>改写预览</TableColumn>
               <TableColumn>操作</TableColumn>
             </TableHeader>
-            <TableBody emptyContent="暂无热门内容">
+            <TableBody>
               {posts.map((p) => (
                 <TableRow key={p.note_id}>
                   <TableCell>
@@ -438,6 +460,7 @@ export default function XhsTrendingPage() {
               ))}
             </TableBody>
           </Table>
+          )}
         </CardBody>
       </Card>
 

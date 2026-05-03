@@ -1,20 +1,26 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import dynamic from "next/dynamic";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
-import { Input, Textarea } from "@nextui-org/input";
 import { Chip } from "@nextui-org/chip";
 import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
 } from "@nextui-org/table";
-import {
-  Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
-} from "@nextui-org/modal";
+import { useDisclosure } from "@nextui-org/modal";
 import { Tooltip } from "@nextui-org/tooltip";
-import { Plus, RefreshCw, Trash2, Download, Radio } from "lucide-react";
+import { Plus, RefreshCw, Trash2, Download, Radio, FileText } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
+import { EmptyState } from "@/components/EmptyState";
+import { TableSkeleton } from "@/components/TableSkeleton";
+import { toastOk, toastErr } from "@/lib/toast";
+import { confirmDialog } from "@/components/ConfirmDialog";
+
+// 添加视频 / 订阅直播 Modal —— 首屏不需要，懒加载
+const AddDouyinPostsModal = dynamic(() => import("./_modals/AddDouyinPostsModal"), { ssr: false });
+const SubscribeLiveModal = dynamic(() => import("./_modals/SubscribeLiveModal"), { ssr: false });
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -57,13 +63,19 @@ export default function DouyinPostsPage() {
   const [links, setLinks] = useState("");
   const [adding, setAdding] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [results, setResults] = useState<{ link: string; ok: boolean; reason?: string }[]>([]);
   const { isOpen, onOpen, onClose } = useDisclosure();
 
   const load = useCallback(async () => {
-    const r = await fetch(API("/posts?platform=douyin"), { headers });
-    const d = await r.json();
-    setPosts(d.posts ?? []);
+    setLoading(true);
+    try {
+      const r = await fetch(API("/posts?platform=douyin"), { headers });
+      const d = await r.json();
+      setPosts(d.posts ?? []);
+    } finally {
+      setLoading(false);
+    }
   }, [token]);
 
   useEffect(() => { load(); }, [load]);
@@ -93,7 +105,14 @@ export default function DouyinPostsPage() {
   };
 
   const handleDelete = async (note_id: string) => {
-    if (!confirm("确认删除这条监控？")) return;
+    const ok = await confirmDialog({
+      title: "删除监控",
+      content: "确认删除这条监控？",
+      confirmText: "删除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
     await fetch(API(`/posts/${note_id}`), { method: "DELETE", headers });
     await load();
   };
@@ -163,7 +182,14 @@ export default function DouyinPostsPage() {
   };
 
   const deleteLive = async (id: number) => {
-    if (!confirm("取消该直播订阅？")) return;
+    const ok = await confirmDialog({
+      title: "取消直播订阅",
+      content: "取消该直播订阅？",
+      confirmText: "取消订阅",
+      cancelText: "保留",
+      danger: true,
+    });
+    if (!ok) return;
     await fetch(API(`/lives/${id}`), { method: "DELETE", headers });
     await loadLives();
   };
@@ -172,11 +198,11 @@ export default function DouyinPostsPage() {
     const r = await fetch(API(`/lives/${id}/check`), { method: "POST", headers });
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));
-      alert(`抓取失败：${j.detail || "未知错误"}`);
+      toastErr(`抓取失败：${j.detail || "未知错误"}`);
       return;
     }
     const d = await r.json();
-    alert(`当前在线：${d.state?.online ?? "—"}`);
+    toastOk(`当前在线：${d.state?.online ?? "—"}`);
     await loadLives();
   };
 
@@ -208,6 +234,20 @@ export default function DouyinPostsPage() {
           </ul>
         </CardHeader>
         <CardBody className="p-0">
+          {loading ? (
+            <TableSkeleton rows={5} cols={6} />
+          ) : posts.length === 0 ? (
+            <EmptyState
+              icon={FileText}
+              title="还没有添加抖音视频"
+              hint="支持 v.douyin.com 短链 / www.douyin.com/video/{id} 长链 / iesdouyin 移动分享链。"
+              action={
+                <Button color="primary" startContent={<Plus size={16} />} onPress={onOpen}>
+                  添加抖音视频
+                </Button>
+              }
+            />
+          ) : (
           <Table aria-label="douyin-posts" removeWrapper>
             <TableHeader>
               <TableColumn>视频</TableColumn>
@@ -218,7 +258,7 @@ export default function DouyinPostsPage() {
               <TableColumn>最后检测</TableColumn>
               <TableColumn>操作</TableColumn>
             </TableHeader>
-            <TableBody emptyContent="还没有添加抖音视频">
+            <TableBody>
               {posts.map((p) => (
                 <TableRow key={p.note_id}>
                   <TableCell>
@@ -259,7 +299,7 @@ export default function DouyinPostsPage() {
                             if (!r.ok) {
                               let msg = "下载失败";
                               try { const j = await r.json(); msg = j.detail || msg; } catch {}
-                              alert(msg);
+                              toastErr(msg);
                               return;
                             }
                             const blob = await r.blob();
@@ -285,6 +325,7 @@ export default function DouyinPostsPage() {
               ))}
             </TableBody>
           </Table>
+          )}
         </CardBody>
       </Card>
 
@@ -304,6 +345,21 @@ export default function DouyinPostsPage() {
           </Button>
         </CardHeader>
         <CardBody className="p-0">
+          {livesLoading ? (
+            <TableSkeleton rows={3} cols={5} />
+          ) : lives.length === 0 ? (
+            <EmptyState
+              icon={Radio}
+              title="还没有订阅直播间"
+              hint="支持 https://live.douyin.com/{room_id}，订阅后会定时拉取在线人数与礼物榜。"
+              action={
+                <Button color="danger" variant="flat" startContent={<Plus size={14} />}
+                  onPress={() => { setLiveError(""); liveModal.onOpen(); }}>
+                  订阅直播间
+                </Button>
+              }
+            />
+          ) : (
           <Table aria-label="douyin-lives" removeWrapper>
             <TableHeader>
               <TableColumn>主播 / 房间</TableColumn>
@@ -312,7 +368,7 @@ export default function DouyinPostsPage() {
               <TableColumn>最后检测</TableColumn>
               <TableColumn>操作</TableColumn>
             </TableHeader>
-            <TableBody emptyContent={livesLoading ? "加载中…" : "还没有订阅直播间"}>
+            <TableBody>
               {lives.map((l) => (
                 <TableRow key={l.id}>
                   <TableCell>
@@ -354,55 +410,37 @@ export default function DouyinPostsPage() {
               ))}
             </TableBody>
           </Table>
+          )}
         </CardBody>
       </Card>
 
-      <Modal isOpen={isOpen} onClose={onClose} size="lg">
-        <ModalContent>
-          <ModalHeader>添加抖音视频</ModalHeader>
-          <ModalBody>
-            <Textarea
-              label="视频链接（每行一个）"
-              placeholder={"v.douyin.com/xxx/\n或 www.douyin.com/video/{id}"}
-              value={links} onValueChange={setLinks} minRows={4}
-            />
-            {results.length > 0 && (
-              <div className="text-xs space-y-1">
-                {results.map((r, i) => (
-                  <div key={i} className={r.ok ? "text-success" : "text-danger"}>
-                    {r.ok ? "✓" : "✗"} {r.link.slice(0, 60)}{r.reason ? ` — ${r.reason}` : ""}
-                  </div>
-                ))}
-              </div>
-            )}
-          </ModalBody>
-          <ModalFooter>
-            <Button variant="light" onPress={onClose}>取消</Button>
-            <Button color="primary" onPress={handleAdd} isLoading={adding}>添加</Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
-      <Modal isOpen={liveModal.isOpen} onClose={liveModal.onClose} size="lg">
-        <ModalContent>
-          <ModalHeader>订阅抖音直播间</ModalHeader>
-          <ModalBody className="space-y-3">
-            <p className="text-xs text-default-500">
-              支持 <code>https://live.douyin.com/&#123;room_id&#125;</code>。需要先在管理员页配置抖音账号 cookie。
-            </p>
-            <Input label="直播间 URL" placeholder="https://live.douyin.com/123456789"
-              value={liveRoomUrl} onValueChange={setLiveRoomUrl} autoFocus />
-            <Input label="主播名（可选）" value={liveStreamer} onValueChange={setLiveStreamer} />
-            <Input label="在线人数预警阈值（可选）" type="number" placeholder="例如 1000"
-              value={liveThreshold} onValueChange={setLiveThreshold} />
-            {liveError && <p className="text-sm text-danger">{liveError}</p>}
-          </ModalBody>
-          <ModalFooter>
-            <Button variant="light" onPress={liveModal.onClose}>取消</Button>
-            <Button color="primary" onPress={submitLive} isLoading={liveBusy}>订阅</Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
+      {/* Modal —— 懒加载 */}
+      {isOpen && (
+        <AddDouyinPostsModal
+          isOpen={isOpen}
+          onClose={onClose}
+          links={links}
+          setLinks={setLinks}
+          results={results}
+          adding={adding}
+          onSubmit={handleAdd}
+        />
+      )}
+      {liveModal.isOpen && (
+        <SubscribeLiveModal
+          isOpen={liveModal.isOpen}
+          onClose={liveModal.onClose}
+          liveRoomUrl={liveRoomUrl}
+          setLiveRoomUrl={setLiveRoomUrl}
+          liveStreamer={liveStreamer}
+          setLiveStreamer={setLiveStreamer}
+          liveThreshold={liveThreshold}
+          setLiveThreshold={setLiveThreshold}
+          liveError={liveError}
+          liveBusy={liveBusy}
+          onSubmit={submitLive}
+        />
+      )}
     </div>
   );
 }

@@ -16,10 +16,12 @@ import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
 } from "@nextui-org/modal";
 import { Tabs, Tab } from "@nextui-org/tabs";
-import { Trash2, Save, Pencil, QrCode, RefreshCw, ShieldCheck } from "lucide-react";
+import { Trash2, Save, Pencil, QrCode, RefreshCw, ShieldCheck, Server } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PromptTemplatesCard } from "@/components/PromptTemplatesCard";
 import { MonitorGroupsCard } from "@/components/MonitorGroupsCard";
+import { EmptyState } from "@/components/EmptyState";
+import { TableSkeleton } from "@/components/TableSkeleton";
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -143,6 +145,7 @@ export default function MonitorSettingsPage() {
   // 未出现在此 map 的 key === "沿用全局"
   const [platformOverrides, setPlatformOverrides] = useState<Record<string, string>>({});
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(true);
   const [accountForm, setAccountForm] = useState(emptyAccountForm);
   const [saved, setSaved] = useState(false);
 
@@ -318,23 +321,28 @@ export default function MonitorSettingsPage() {
   };
 
   const load = async () => {
-    const [s, a] = await Promise.all([
-      fetch(API("/settings"), { headers }).then((r) => r.json()),
-      fetch(API("/accounts"), { headers }).then((r) => r.json()),
-    ]);
-    // 拆分：dotted key（"xhs.likes_threshold"）→ platformOverrides；其余 → settings
-    const baseSettings: Record<string, string> = {};
-    const overrides: Record<string, string> = {};
-    for (const [k, v] of Object.entries(s as Record<string, string>)) {
-      if (/^(xhs|douyin|mp)\./.test(k)) {
-        overrides[k] = v;
-      } else {
-        baseSettings[k] = v;
+    setAccountsLoading(true);
+    try {
+      const [s, a] = await Promise.all([
+        fetch(API("/settings"), { headers }).then((r) => r.json()),
+        fetch(API("/accounts"), { headers }).then((r) => r.json()),
+      ]);
+      // 拆分：dotted key（"xhs.likes_threshold"）→ platformOverrides；其余 → settings
+      const baseSettings: Record<string, string> = {};
+      const overrides: Record<string, string> = {};
+      for (const [k, v] of Object.entries(s as Record<string, string>)) {
+        if (/^(xhs|douyin|mp)\./.test(k)) {
+          overrides[k] = v;
+        } else {
+          baseSettings[k] = v;
+        }
       }
+      setSettings((prev) => ({ ...prev, ...baseSettings }));
+      setPlatformOverrides(overrides);
+      setAccounts(a.accounts ?? []);
+    } finally {
+      setAccountsLoading(false);
     }
-    setSettings((prev) => ({ ...prev, ...baseSettings }));
-    setPlatformOverrides(overrides);
-    setAccounts(a.accounts ?? []);
   };
 
   useEffect(() => { load(); }, [token]);
@@ -767,7 +775,9 @@ export default function MonitorSettingsPage() {
             <code className="bg-default-100 px-1 rounded">web_session</code>。
           </p>
 
-          {accounts.length > 0 ? (
+          {accountsLoading ? (
+            <TableSkeleton rows={3} cols={5} />
+          ) : accounts.length > 0 ? (
             <>
               <div className="flex justify-end">
                 <Button size="sm" variant="flat"
@@ -821,7 +831,11 @@ export default function MonitorSettingsPage() {
               </Table>
             </>
           ) : (
-            <p className="text-sm text-default-400">暂无账号</p>
+            <EmptyState
+              icon={Server}
+              title="暂无账号"
+              hint="填写下方账号名称后点「扫码登录」，用小红书 App 扫码即可自动保存账号。"
+            />
           )}
 
           <Divider />

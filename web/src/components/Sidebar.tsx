@@ -5,7 +5,7 @@ import Link from "next/link";
 import {
   LayoutDashboard, Upload, Settings, LogOut, TrendingUp,
   ShieldCheck, Music2, Newspaper, ChevronDown, ChevronRight,
-  FileText, Users, Moon, Sun,
+  FileText, Users, Moon, Sun, X,
 } from "lucide-react";
 import { Button } from "@nextui-org/button";
 import { Tooltip } from "@nextui-org/tooltip";
@@ -79,7 +79,14 @@ const adminNavItem: NavItem = {
 
 const COLLAPSE_KEY = "sidebar.collapsed.modules";
 
-export function Sidebar() {
+export type SidebarProps = {
+  /** 移动端 drawer 是否打开（仅在 <md 生效） */
+  mobileOpen?: boolean;
+  /** 关闭 drawer 的回调（点击遮罩 / 链接 / 关闭按钮触发） */
+  onMobileClose?: () => void;
+};
+
+export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps = {}) {
   const pathname = usePathname();
   const { t } = useI18n();
   const { logout, user } = useAuth();
@@ -125,10 +132,33 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="fixed left-0 top-0 h-screen w-16 lg:w-64 bg-content1 border-r border-divider flex flex-col z-40">
-      <div className="h-16 flex items-center justify-center lg:justify-start px-4 border-b border-divider gap-2">
-        <span className="text-2xl">🪐</span>
-        <span className="hidden lg:block font-bold text-base text-foreground">Pulse</span>
+    <>
+      {/* 移动端遮罩：仅在 <md 且 drawer 打开时显示 */}
+      <div
+        className={`md:hidden fixed inset-0 z-40 bg-black/50 transition-opacity duration-200
+          ${mobileOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"}`}
+        onClick={onMobileClose}
+        aria-hidden="true"
+      />
+      <aside
+        className={`fixed left-0 top-0 h-screen w-64 md:w-16 lg:w-64 bg-content1 border-r border-divider flex flex-col z-50
+          transition-transform duration-200 ease-out
+          ${mobileOpen ? "translate-x-0" : "-translate-x-full"} md:translate-x-0`}
+      >
+      <div className="h-16 flex items-center justify-between md:justify-center lg:justify-start px-4 border-b border-divider gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-2xl">🪐</span>
+          <span className="hidden max-md:block lg:block font-bold text-base text-foreground">Pulse</span>
+        </div>
+        {/* 移动端 drawer 关闭按钮 */}
+        <button
+          type="button"
+          onClick={onMobileClose}
+          className="md:hidden p-1 rounded hover:bg-default-100 text-default-500"
+          aria-label="关闭菜单"
+        >
+          <X size={20} />
+        </button>
       </div>
 
       <nav className="flex-1 py-3 overflow-y-auto">
@@ -144,7 +174,7 @@ export function Sidebar() {
                   <button
                     type="button"
                     onClick={() => toggle(blk.module)}
-                    className="hidden lg:flex w-full items-center gap-2 px-3 pt-2 pb-1 text-left
+                    className="hidden max-md:flex lg:flex w-full items-center gap-2 px-3 pt-2 pb-1 text-left
                                hover:bg-default-100 rounded transition-colors"
                   >
                     {isOpen
@@ -163,30 +193,30 @@ export function Sidebar() {
                     )}
                   </button>
                 )}
-                {/* 子项：折叠时仅在 lg 屏隐藏，w-16 状态下始终显示（移动端折叠没意义） */}
-                <div className={isOpen ? "" : "hidden lg:hidden"}>
+                {/* 子项：折叠时仅在 lg 屏隐藏；移动端 drawer 内（max-md）按宽态显示 */}
+                <div className={isOpen ? "" : "max-md:hidden hidden lg:hidden"}>
                   {blk.items.map((item) => {
                     const isActive = item.key === activeKey;
-                    const indent = isPlatformGroup ? "lg:ml-4" : "";
+                    const indent = isPlatformGroup ? "max-md:ml-4 lg:ml-4" : "";
                     return (
                       <li key={item.key}>
                         <Tooltip
                           content={item.wip ? `${item.label}（开发中）` : item.label}
                           placement="right" className="lg:hidden"
                         >
-                          <Link href={item.href}>
+                          <Link href={item.href} onClick={onMobileClose}>
                             <div className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors ${indent}
                               ${isActive ? "bg-primary text-primary-foreground"
                                          : item.wip ? "text-default-400 hover:bg-default-100"
                                                     : "text-default-600 hover:bg-default-100"}`}>
-                              {/* 平台子项在窄屏显示平台 icon，宽屏显示 section icon */}
+                              {/* 平台子项在窄屏显示平台 icon，宽屏（含移动端 drawer）显示 section icon */}
                               {isPlatformGroup ? (
                                 <>
-                                  <span className="lg:hidden">{platformGroupIcon[platform]}</span>
-                                  <span className="hidden lg:block">{item.icon}</span>
+                                  <span className="max-md:hidden lg:hidden">{platformGroupIcon[platform]}</span>
+                                  <span className="hidden max-md:block lg:block">{item.icon}</span>
                                 </>
                               ) : item.icon}
-                              <span className="hidden lg:block text-sm font-medium flex-1">
+                              <span className="hidden max-md:block lg:block text-sm font-medium flex-1">
                                 {item.label}
                               </span>
                             </div>
@@ -203,14 +233,14 @@ export function Sidebar() {
       </nav>
 
       <div className="border-t border-divider p-3 space-y-2">
-        <div className="hidden lg:flex items-center gap-2 mb-1 px-1">
+        <div className="hidden max-md:flex lg:flex items-center gap-2 mb-1 px-1">
           <span className="text-sm text-default-500 truncate">{user?.username}</span>
         </div>
         <div className="flex items-center gap-2">
           <Tooltip content={t("common.logout")} placement="right">
-            <Button isIconOnly variant="light" className="w-full lg:w-auto" onClick={logout}>
+            <Button isIconOnly variant="light" className="w-full max-md:w-auto lg:w-auto" onClick={logout}>
               <LogOut size={18} />
-              <span className="hidden lg:inline ml-2 text-sm">{t("common.logout")}</span>
+              <span className="hidden max-md:inline lg:inline ml-2 text-sm">{t("common.logout")}</span>
             </Button>
           </Tooltip>
           <Tooltip
@@ -229,5 +259,6 @@ export function Sidebar() {
         </div>
       </div>
     </aside>
+    </>
   );
 }

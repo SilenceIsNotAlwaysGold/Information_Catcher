@@ -1,21 +1,29 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import dynamic from "next/dynamic";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
-import { Input, Textarea } from "@nextui-org/input";
+import { Input } from "@nextui-org/input";
 import { Chip } from "@nextui-org/chip";
 import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
 } from "@nextui-org/table";
-import {
-  Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
-} from "@nextui-org/modal";
+import { useDisclosure } from "@nextui-org/modal";
 import { Tooltip } from "@nextui-org/tooltip";
-import { Select, SelectItem } from "@nextui-org/select";
-import { Plus, RefreshCw, Trash2, Sparkles, ChevronDown, Search, Wand2, Copy, Key } from "lucide-react";
+import { Plus, RefreshCw, Trash2, Sparkles, ChevronDown, Search, Wand2, Key, Newspaper } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
+import { useMe, mutateMe, usePrompts } from "@/lib/useApi";
+import { toastErr } from "@/lib/toast";
+import { confirmDialog } from "@/components/ConfirmDialog";
+import { EmptyState } from "@/components/EmptyState";
+import { TableSkeleton } from "@/components/TableSkeleton";
+
+// Modal —— 首屏不需要，懒加载
+const AddMpPostsModal = dynamic(() => import("./_modals/AddMpPostsModal"), { ssr: false });
+const MpAuthModal = dynamic(() => import("./_modals/MpAuthModal"), { ssr: false });
+const CrossRewriteModal = dynamic(() => import("./_modals/CrossRewriteModal"), { ssr: false });
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -54,6 +62,7 @@ export default function MpPostsPage() {
   const [links, setLinks] = useState("");
   const [adding, setAdding] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [results, setResults] = useState<{ link: string; ok: boolean; reason?: string }[]>([]);
   const { isOpen, onOpen, onClose } = useDisclosure();
   const [summarizingId, setSummarizingId] = useState<string | null>(null);
@@ -61,23 +70,15 @@ export default function MpPostsPage() {
   const [searchQ, setSearchQ] = useState("");
   const [activeAuthor, setActiveAuthor] = useState<string | null>(null);
 
-  // 客户端凭证（手动模式）
+  // 客户端凭证（手动模式）—— /api/auth/me 走 SWR 缓存
   const authModal = useDisclosure();
   const [authForm, setAuthForm] = useState({ uin: "", key: "", pass_ticket: "", appmsg_token: "" });
   const [authSaving, setAuthSaving] = useState(false);
-  const [authStatus, setAuthStatus] = useState<{ has_auth: boolean; mp_auth_at: string | null }>({ has_auth: false, mp_auth_at: null });
-
-  const loadAuthStatus = async () => {
-    const r = await fetch(`/api/auth/me`, { headers });
-    if (r.ok) {
-      const u = await r.json();
-      setAuthStatus({
-        has_auth: !!(u.mp_auth_uin && u.mp_auth_key),
-        mp_auth_at: u.mp_auth_at || null,
-      });
-    }
+  const { data: me } = useMe();
+  const authStatus = {
+    has_auth: !!(me?.mp_auth_uin && me?.mp_auth_key),
+    mp_auth_at: me?.mp_auth_at || null,
   };
-  useEffect(() => { if (token) loadAuthStatus(); }, [token]);
 
   const submitAuth = async () => {
     setAuthSaving(true);
@@ -88,7 +89,7 @@ export default function MpPostsPage() {
       });
       authModal.onClose();
       setAuthForm({ uin: "", key: "", pass_ticket: "", appmsg_token: "" });
-      await loadAuthStatus();
+      await mutateMe();
     } finally {
       setAuthSaving(false);
     }
@@ -102,30 +103,14 @@ export default function MpPostsPage() {
   const [crossError, setCrossError] = useState("");
 
   // 改写配置
-  type CrossMode = "xhs" | "douyin" | "mp" | "saved" | "custom";
+  type CrossMode = "xhs" | "douyin" | "mp" | "saved" | "custom"; // 与 _modals/CrossRewriteModal.tsx 中的同名类型保持一致
   const [crossMode, setCrossMode] = useState<CrossMode>("xhs");
   const [crossPromptId, setCrossPromptId] = useState<string>("");  // saved 模式选中的 prompt id
   const [crossPromptText, setCrossPromptText] = useState<string>("");  // custom 模式
   const [crossVariantCount, setCrossVariantCount] = useState<number>(3);
 
-  // 用户保存的 prompt 列表
-  type SavedPrompt = { id: number; name: string; content: string; is_default?: number };
-  const [savedPrompts, setSavedPrompts] = useState<SavedPrompt[]>([]);
-  const [promptsLoading, setPromptsLoading] = useState(false);
-
-  const loadPrompts = useCallback(async () => {
-    setPromptsLoading(true);
-    try {
-      const r = await fetch(API("/prompts"), { headers });
-      if (r.ok) {
-        const d = await r.json();
-        setSavedPrompts(d.prompts || []);
-      }
-    } finally {
-      setPromptsLoading(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+  // 用户保存的 prompt 列表 —— 走 SWR 缓存
+  const { prompts: savedPrompts, isLoading: promptsLoading } = usePrompts();
 
   const openCrossRewrite = (note_id: string) => {
     setCrossNoteId(note_id);
@@ -135,7 +120,6 @@ export default function MpPostsPage() {
     setCrossMode("xhs");
     setCrossPromptText("");
     crossModal.onOpen();
-    loadPrompts();
   };
 
   const runCrossRewrite = async () => {
@@ -212,7 +196,7 @@ export default function MpPostsPage() {
       if (!r.ok) {
         let msg = `HTTP ${r.status}`;
         try { const j = await r.json(); msg = j.detail || msg; } catch {}
-        alert(`摘要失败：${msg}`);
+        toastErr(`摘要失败：${msg}`);
         return;
       }
       await load();
@@ -235,9 +219,14 @@ export default function MpPostsPage() {
   };
 
   const load = useCallback(async () => {
-    const r = await fetch(API("/posts?platform=mp"), { headers });
-    const d = await r.json();
-    setPosts(d.posts ?? []);
+    setLoading(true);
+    try {
+      const r = await fetch(API("/posts?platform=mp"), { headers });
+      const d = await r.json();
+      setPosts(d.posts ?? []);
+    } finally {
+      setLoading(false);
+    }
   }, [token]);
 
   useEffect(() => { load(); }, [load]);
@@ -267,7 +256,14 @@ export default function MpPostsPage() {
   };
 
   const handleDelete = async (note_id: string) => {
-    if (!confirm("确认删除这条监控？")) return;
+    const ok = await confirmDialog({
+      title: "删除监控",
+      content: "确认删除这条监控？",
+      confirmText: "删除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
     await fetch(API(`/posts/${note_id}`), { method: "DELETE", headers });
     await load();
   };
@@ -352,6 +348,26 @@ export default function MpPostsPage() {
           </div>
         </CardHeader>
         <CardBody className="p-0">
+          {loading ? (
+            <TableSkeleton rows={5} cols={4} />
+          ) : posts.length === 0 ? (
+            <EmptyState
+              icon={Newspaper}
+              title="还没有添加任何公众号文章"
+              hint="粘贴 mp.weixin.qq.com 文章链接（biz/mid/idx 完整链接 或 /s/HASH 短链）开始抓取标题、原文、阅读数。"
+              action={
+                <Button color="primary" startContent={<Plus size={16} />} onPress={onOpen}>
+                  添加文章
+                </Button>
+              }
+            />
+          ) : filteredPosts.length === 0 ? (
+            <EmptyState
+              icon={Search}
+              title="没有匹配的文章"
+              hint="尝试清空搜索关键词或切换公众号筛选。"
+            />
+          ) : (
           <Table aria-label="mp-posts" removeWrapper>
             <TableHeader>
               <TableColumn>文章</TableColumn>
@@ -359,7 +375,7 @@ export default function MpPostsPage() {
               <TableColumn>最后抓取</TableColumn>
               <TableColumn>操作</TableColumn>
             </TableHeader>
-            <TableBody emptyContent={searchQ ? "没有匹配的文章" : "还没有添加任何公众号文章"}>
+            <TableBody>
               {filteredPosts.flatMap((p) => {
                 const hasSummary = !!(p.summary && p.summary.length > 0);
                 const expanded = expandedSummary.has(p.note_id);
@@ -452,227 +468,53 @@ export default function MpPostsPage() {
               })}
             </TableBody>
           </Table>
+          )}
         </CardBody>
       </Card>
 
-      <Modal isOpen={isOpen} onClose={onClose} size="lg">
-        <ModalContent>
-          <ModalHeader>添加公众号文章</ModalHeader>
-          <ModalBody>
-            <Textarea
-              label="文章链接（每行一个）"
-              placeholder={"https://mp.weixin.qq.com/s?__biz=...&mid=...&idx=...\n或 https://mp.weixin.qq.com/s/HASH"}
-              value={links} onValueChange={setLinks} minRows={4}
-            />
-            {results.length > 0 && (
-              <div className="text-xs space-y-1">
-                {results.map((r, i) => (
-                  <div key={i} className={r.ok ? "text-success" : "text-danger"}>
-                    {r.ok ? "✓" : "✗"} {r.link.slice(0, 60)}{r.reason ? ` — ${r.reason}` : ""}
-                  </div>
-                ))}
-              </div>
-            )}
-          </ModalBody>
-          <ModalFooter>
-            <Button variant="light" onPress={onClose}>取消</Button>
-            <Button color="primary" onPress={handleAdd} isLoading={adding}>添加</Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
-      {/* 阅读数凭证录入 Modal */}
-      <Modal isOpen={authModal.isOpen} onClose={authModal.onClose} size="2xl" scrollBehavior="inside">
-        <ModalContent>
-          <ModalHeader className="flex items-center gap-2">
-            <Key size={18} className="text-warning" />
-            录入公众号客户端凭证
-            <Chip size="sm" variant="flat">v1 手动模式</Chip>
-          </ModalHeader>
-          <ModalBody className="space-y-3">
-            <div className="text-sm text-default-600 space-y-2 bg-default-50 rounded-lg p-3">
-              <p className="font-medium">为什么要录入凭证？</p>
-              <p className="text-xs text-default-500">
-                公众号阅读数 / 在看数只能通过模拟客户端抓取，需要 <code>uin / key / pass_ticket / appmsg_token</code> 4 个字段，
-                key 大约 30 分钟过期，过期后需要重新录入。
-              </p>
-              <p className="font-medium pt-1">如何获取？</p>
-              <ol className="text-xs text-default-500 ml-4 space-y-0.5 list-decimal">
-                <li>用 Charles / Fiddler / mitmproxy 抓微信包（手机和电脑同一 wifi 配代理）</li>
-                <li>在微信里打开任意公众号文章</li>
-                <li>找到 <code>/mp/getappmsgext</code> 请求，从 URL 参数复制 uin / key / pass_ticket / appmsg_token</li>
-                <li>粘贴到下面输入框保存</li>
-              </ol>
-              <p className="text-xs text-warning">
-                ⚠️ key 过期后调用会失败、显示阅读数 0；管理员可考虑接 NewRank SaaS（issue #23）避免维护
-              </p>
-            </div>
-            <Input label="uin" placeholder="MzXxxxxxx 或纯数字"
-              value={authForm.uin}
-              onValueChange={(v) => setAuthForm((f) => ({ ...f, uin: v }))} />
-            <Input label="key" placeholder="abc..." type="password"
-              value={authForm.key}
-              onValueChange={(v) => setAuthForm((f) => ({ ...f, key: v }))} />
-            <Input label="pass_ticket（可选）" placeholder="abc..."
-              value={authForm.pass_ticket}
-              onValueChange={(v) => setAuthForm((f) => ({ ...f, pass_ticket: v }))} />
-            <Input label="appmsg_token（可选）" placeholder="abc..."
-              value={authForm.appmsg_token}
-              onValueChange={(v) => setAuthForm((f) => ({ ...f, appmsg_token: v }))} />
-            <p className="text-xs text-default-400">
-              {authStatus.has_auth
-                ? `当前凭证更新于 ${authStatus.mp_auth_at?.slice(0, 16)}（提交新值会覆盖）`
-                : "尚未录入凭证。无凭证时阅读数显示为 0，但文章正文/标题/摘要等仍然可抓。"}
-            </p>
-          </ModalBody>
-          <ModalFooter>
-            <Button variant="light" onPress={authModal.onClose}>取消</Button>
-            <Button color="primary" onPress={submitAuth} isLoading={authSaving}
-              isDisabled={!authForm.uin || !authForm.key}>
-              保存凭证
-            </Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
-      {/* AI 改写 modal */}
-      <Modal isOpen={crossModal.isOpen} onClose={crossModal.onClose} size="2xl" scrollBehavior="inside">
-        <ModalContent>
-          <ModalHeader className="flex items-center gap-2">
-            <Wand2 size={18} className="text-primary" />
-            AI 改写
-            <Chip size="sm" variant="flat">{crossVariantCount} 个变体</Chip>
-          </ModalHeader>
-          <ModalBody className="space-y-3">
-            {/* 目标平台 / 模式选择 */}
-            <div>
-              <p className="text-xs text-default-500 mb-2">目标平台 / 改写风格</p>
-              <div className="flex flex-wrap gap-2">
-                {([
-                  { key: "xhs",    label: "小红书" },
-                  { key: "douyin", label: "抖音" },
-                  { key: "mp",     label: "公众号" },
-                  { key: "saved",  label: "我的 Prompt" },
-                  { key: "custom", label: "自定义" },
-                ] as { key: CrossMode; label: string }[]).map((opt) => (
-                  <Chip key={opt.key}
-                    size="sm"
-                    variant={crossMode === opt.key ? "solid" : "flat"}
-                    color={crossMode === opt.key ? "primary" : "default"}
-                    className="cursor-pointer"
-                    onClick={() => setCrossMode(opt.key)}
-                  >
-                    {opt.label}
-                  </Chip>
-                ))}
-              </div>
-            </div>
-
-            {/* saved 模式：选择已保存 prompt */}
-            {crossMode === "saved" && (
-              <div>
-                <Select
-                  size="sm"
-                  label="选择保存的 Prompt"
-                  placeholder={promptsLoading ? "加载中…" : "—"}
-                  selectedKeys={crossPromptId ? [crossPromptId] : []}
-                  onSelectionChange={(keys) => {
-                    const v = Array.from(keys)[0];
-                    setCrossPromptId(v ? String(v) : "");
-                  }}
-                >
-                  {savedPrompts.map((p) => (
-                    <SelectItem key={String(p.id)} textValue={p.name}>
-                      {p.name}
-                    </SelectItem>
-                  ))}
-                </Select>
-                {savedPrompts.length === 0 && !promptsLoading && (
-                  <p className="text-xs text-default-400 mt-1">
-                    还没有保存的 prompt，可以去「Prompt 管理」创建，或选「自定义」直接写。
-                  </p>
-                )}
-              </div>
-            )}
-
-            {/* custom 模式：直接输 prompt */}
-            {crossMode === "custom" && (
-              <div>
-                <Textarea
-                  size="sm"
-                  label="自定义 Prompt"
-                  placeholder={"请把以下原文改写为...\n\n要求：...\n\n原文：\n{content}"}
-                  description="必须包含 {content} 占位符——它会被原文正文替换。"
-                  minRows={6}
-                  value={crossPromptText}
-                  onValueChange={setCrossPromptText}
-                />
-              </div>
-            )}
-
-            {/* 变体数量 */}
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-default-500">变体数量：</span>
-              {[1, 3, 5].map((n) => (
-                <Chip key={n} size="sm"
-                  variant={crossVariantCount === n ? "solid" : "flat"}
-                  color={crossVariantCount === n ? "primary" : "default"}
-                  className="cursor-pointer"
-                  onClick={() => setCrossVariantCount(n)}>
-                  {n}
-                </Chip>
-              ))}
-            </div>
-
-            {/* 错误提示 */}
-            {crossError && (
-              <p className="text-sm text-danger">{crossError}</p>
-            )}
-
-            {/* 改写中 */}
-            {crossLoading && (
-              <div className="text-center py-8 text-default-500">
-                AI 改写中…（公众号长文，请稍候 10-30s）
-              </div>
-            )}
-
-            {/* 结果 */}
-            {!crossLoading && crossVariants.length > 0 && (
-              <>
-                <p className="text-xs text-default-500">
-                  生成了 {crossVariants.length} 个不同温度的变体，挑一个复制使用：
-                </p>
-                {crossVariants.map((v, i) => (
-                  <div key={i} className="rounded-lg p-3 border bg-default-50 border-default-200 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-medium text-default-500">变体 #{i + 1}</span>
-                      <Tooltip content="复制到剪贴板">
-                        <Button isIconOnly size="sm" variant="flat"
-                          onPress={async () => {
-                            await navigator.clipboard.writeText(v);
-                          }}>
-                          <Copy size={14} />
-                        </Button>
-                      </Tooltip>
-                    </div>
-                    <pre className="whitespace-pre-wrap text-sm text-default-700 font-sans">{v}</pre>
-                  </div>
-                ))}
-              </>
-            )}
-          </ModalBody>
-          <ModalFooter>
-            <Button variant="light" onPress={crossModal.onClose}>关闭</Button>
-            <Button color="primary"
-              startContent={<Wand2 size={14} />}
-              onPress={runCrossRewrite}
-              isLoading={crossLoading}
-              isDisabled={crossLoading}>
-              开始改写
-            </Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
+      {/* Modal —— 懒加载，仅当用户打开后才加载 chunk */}
+      {isOpen && (
+        <AddMpPostsModal
+          isOpen={isOpen}
+          onClose={onClose}
+          links={links}
+          setLinks={setLinks}
+          results={results}
+          adding={adding}
+          onSubmit={handleAdd}
+        />
+      )}
+      {authModal.isOpen && (
+        <MpAuthModal
+          isOpen={authModal.isOpen}
+          onClose={authModal.onClose}
+          authForm={authForm}
+          setAuthForm={setAuthForm}
+          authStatus={authStatus}
+          authSaving={authSaving}
+          onSubmit={submitAuth}
+        />
+      )}
+      {crossModal.isOpen && (
+        <CrossRewriteModal
+          isOpen={crossModal.isOpen}
+          onClose={crossModal.onClose}
+          crossMode={crossMode}
+          setCrossMode={setCrossMode}
+          crossPromptId={crossPromptId}
+          setCrossPromptId={setCrossPromptId}
+          crossPromptText={crossPromptText}
+          setCrossPromptText={setCrossPromptText}
+          crossVariantCount={crossVariantCount}
+          setCrossVariantCount={setCrossVariantCount}
+          savedPrompts={savedPrompts}
+          promptsLoading={promptsLoading}
+          crossError={crossError}
+          crossLoading={crossLoading}
+          crossVariants={crossVariants}
+          onRun={runCrossRewrite}
+        />
+      )}
     </div>
   );
 }

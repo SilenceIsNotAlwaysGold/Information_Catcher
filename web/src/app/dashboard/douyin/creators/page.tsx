@@ -6,8 +6,11 @@ import { Chip } from "@nextui-org/chip";
 import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
 } from "@nextui-org/table";
+import { Users } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav, CreatorsCard, PostRow } from "@/components/platform";
+import { EmptyState } from "@/components/EmptyState";
+import { TableSkeleton } from "@/components/TableSkeleton";
 
 export default function DouyinCreatorsPage() {
   const { token } = useAuth();
@@ -47,6 +50,15 @@ export default function DouyinCreatorsPage() {
           </p>
         </CardHeader>
         <CardBody className="p-0">
+          {loading ? (
+            <TableSkeleton rows={5} cols={5} />
+          ) : posts.length === 0 ? (
+            <EmptyState
+              icon={Users}
+              title="暂无追新内容"
+              hint="在上方「订阅博主」中粘贴抖音博主主页 URL 开始追新，新作品会自动入库到「我的关注」分组。"
+            />
+          ) : (
           <Table aria-label="douyin-creator-posts" removeWrapper>
             <TableHeader>
               <TableColumn>视频</TableColumn>
@@ -55,7 +67,7 @@ export default function DouyinCreatorsPage() {
               <TableColumn>评论</TableColumn>
               <TableColumn>检测时间</TableColumn>
             </TableHeader>
-            <TableBody emptyContent={loading ? "加载中…" : "暂无追新内容"}>
+            <TableBody>
               {posts.map((p) => (
                 <TableRow key={p.note_id}>
                   <TableCell>
@@ -82,6 +94,7 @@ export default function DouyinCreatorsPage() {
               ))}
             </TableBody>
           </Table>
+          )}
         </CardBody>
       </Card>
     </div>

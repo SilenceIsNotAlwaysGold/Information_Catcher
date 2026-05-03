@@ -11,7 +11,10 @@ import {
 import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
 } from "@nextui-org/modal";
-import { Plus, Pencil, Trash2, Star } from "lucide-react";
+import { Plus, Pencil, Trash2, Star, Wand2 } from "lucide-react";
+import { confirmDialog } from "@/components/ConfirmDialog";
+import { EmptyState } from "./EmptyState";
+import { TableSkeleton } from "./TableSkeleton";
 
 type Prompt = {
   id: number;
@@ -30,6 +33,7 @@ export function PromptTemplatesCard({ token }: { token: string | null }) {
   };
 
   const [prompts, setPrompts] = useState<Prompt[]>([]);
+  const [loading, setLoading] = useState(true);
   const editor = useDisclosure();
   const [editingId, setEditingId] = useState<number | null>(null);
   const [name, setName] = useState("");
@@ -37,9 +41,14 @@ export function PromptTemplatesCard({ token }: { token: string | null }) {
   const [saving, setSaving] = useState(false);
 
   const load = async () => {
-    const r = await fetch(API("/prompts"), { headers });
-    const d = await r.json();
-    setPrompts(d.prompts ?? []);
+    setLoading(true);
+    try {
+      const r = await fetch(API("/prompts"), { headers });
+      const d = await r.json();
+      setPrompts(d.prompts ?? []);
+    } finally {
+      setLoading(false);
+    }
   };
   useEffect(() => { if (token) load(); }, [token]);
 
@@ -72,7 +81,14 @@ export function PromptTemplatesCard({ token }: { token: string | null }) {
   };
 
   const remove = async (id: number) => {
-    if (!confirm("确认删除该 prompt？")) return;
+    const ok = await confirmDialog({
+      title: "删除 Prompt",
+      content: "确认删除该 prompt？",
+      confirmText: "删除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
     await fetch(API(`/prompts/${id}`), { method: "DELETE", headers });
     await load();
   };
@@ -93,8 +109,20 @@ export function PromptTemplatesCard({ token }: { token: string | null }) {
           </Button>
         </CardHeader>
         <CardBody className="p-0">
-          {prompts.length === 0 ? (
-            <p className="p-4 text-sm text-default-400">暂无 prompt，请新建一个</p>
+          {loading ? (
+            <TableSkeleton rows={3} cols={4} />
+          ) : prompts.length === 0 ? (
+            <EmptyState
+              icon={Wand2}
+              title="暂无 Prompt 模板"
+              hint="新建一个改写 Prompt（必须包含 {content} 占位符），可在改写时选用。"
+              action={
+                <Button color="primary" variant="flat" startContent={<Plus size={14} />}
+                  onPress={openCreate}>
+                  新建 Prompt
+                </Button>
+              }
+            />
           ) : (
             <Table aria-label="prompts" removeWrapper>
               <TableHeader>

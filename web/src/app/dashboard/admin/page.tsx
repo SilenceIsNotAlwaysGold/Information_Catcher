@@ -18,6 +18,10 @@ import {
 import { Spinner } from "@nextui-org/spinner";
 import { Tooltip } from "@nextui-org/tooltip";
 import { ShieldCheck, Users, Server, Cpu, RefreshCw, QrCode, Plus, Pencil, KeyRound } from "lucide-react";
+import { toastErr } from "@/lib/toast";
+import { EmptyState } from "@/components/EmptyState";
+import { TableSkeleton } from "@/components/TableSkeleton";
+import { CardSkeleton } from "@/components/CardSkeleton";
 
 const API = (path: string) => `/api${path}`;
 
@@ -237,7 +241,7 @@ export default function AdminPage() {
           const j = await r.json();
           msg = j.detail || msg;
         } catch { /* not json */ }
-        alert(`保存失败：${msg}`);
+        toastErr(`保存失败：${msg}`);
         return;
       }
       editModal.onClose();
@@ -417,7 +421,11 @@ export default function AdminPage() {
                   <TableColumn>状态</TableColumn>
                   <TableColumn>操作</TableColumn>
                 </TableHeader>
-                <TableBody emptyContent={loading ? "加载中..." : "暂无用户"}>
+                <TableBody emptyContent={
+                  loading
+                    ? <TableSkeleton rows={4} cols={7} />
+                    : <EmptyState icon={Users} title="暂无用户" hint="点右上角「新建用户」添加平台账户。" />
+                }>
                   {users.map((u) => (
                     <TableRow key={u.id}>
                       <TableCell>
@@ -521,7 +529,12 @@ export default function AdminPage() {
                   <TableColumn>共享</TableColumn>
                   <TableColumn>操作</TableColumn>
                 </TableHeader>
-                <TableBody emptyContent={loading ? "加载中..." : "暂无账号"}>
+                <TableBody emptyContent={
+                  loading
+                    ? <TableSkeleton rows={4} cols={9} />
+                    : <EmptyState icon={Server} title="暂无平台账号"
+                        hint="点右上角「扫码新增」用小红书 App 扫码登录，或「手动录入 Cookie」直接粘贴 cookie 字符串。" />
+                }>
                   {accounts.map((a) => (
                     <TableRow key={a.id}>
                       <TableCell>
@@ -1121,7 +1134,13 @@ function TenantsView({ token }: { token: string | null }) {
     detailModal.onOpen();
   };
 
-  if (loading) return <Card><CardBody><Spinner /></CardBody></Card>;
+  if (loading) return <CardSkeleton cards={6} cols={3} />;
+
+  if (tenants.length === 0) {
+    return <Card><CardBody>
+      <EmptyState icon={Users} title="暂无租户" hint="平台上还没有任何用户，新建用户后会显示在这里。" />
+    </CardBody></Card>;
+  }
 
   return (
     <>

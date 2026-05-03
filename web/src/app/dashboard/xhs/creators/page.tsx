@@ -9,9 +9,11 @@ import {
 import { Chip } from "@nextui-org/chip";
 import { Button } from "@nextui-org/button";
 import { Tooltip } from "@nextui-org/tooltip";
-import { BarChart2, ExternalLink } from "lucide-react";
+import { BarChart2, ExternalLink, Users } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav, CreatorsCard } from "@/components/platform";
+import { EmptyState } from "@/components/EmptyState";
+import { TableSkeleton } from "@/components/TableSkeleton";
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -70,6 +72,15 @@ export default function XhsCreatorsPage() {
           </div>
         </CardHeader>
         <CardBody className="p-0">
+          {loading ? (
+            <TableSkeleton rows={5} cols={6} />
+          ) : posts.length === 0 ? (
+            <EmptyState
+              icon={Users}
+              title="还没有抓到博主帖子"
+              hint="在上方「订阅博主」中粘贴小红书博主主页 URL 开始追新，新帖会自动入库到「我的关注」分组。"
+            />
+          ) : (
           <Table aria-label="creator-posts" removeWrapper>
             <TableHeader>
               <TableColumn>标题 / ID</TableColumn>
@@ -80,7 +91,7 @@ export default function XhsCreatorsPage() {
               <TableColumn>最后检测</TableColumn>
               <TableColumn>操作</TableColumn>
             </TableHeader>
-            <TableBody emptyContent={loading ? "加载中…" : "还没有抓到博主帖子"}>
+            <TableBody>
               {posts.map((p) => (
                 <TableRow key={p.note_id}>
                   <TableCell>
@@ -123,6 +134,7 @@ export default function XhsCreatorsPage() {
               ))}
             </TableBody>
           </Table>
+          )}
         </CardBody>
       </Card>
     </div>
