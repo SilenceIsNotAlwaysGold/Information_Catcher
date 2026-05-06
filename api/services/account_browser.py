@@ -137,7 +137,15 @@ def _cookie_str_to_list(cookie_str: str, domain: str = ".xiaohongshu.com") -> Li
 # ── Backends ────────────────────────────────────────────────────────────────
 
 async def _open_builtin(pw, account: Dict) -> Tuple:
-    launch_kwargs = {"headless": True, "args": ["--no-sandbox"]}
+    launch_kwargs = {"headless": True, "args": [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",   # 避免共享内存 OOM（低内存服务器必须）
+        "--disable-gpu",
+        "--single-process",          # 减少进程数，显著降低内存占用
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--js-flags=--max-old-space-size=256",  # 限制 V8 堆到 256MB
+    ]}
     # 使用 effective_proxy_url：socks5+鉴权会被转成本地 http://127.0.0.1:port
     from . import proxy_forwarder
     eff = proxy_forwarder.effective_proxy_url(account)

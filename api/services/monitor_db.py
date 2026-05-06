@@ -244,6 +244,7 @@ CREATE TABLE IF NOT EXISTS fetch_log (
 CREATE INDEX IF NOT EXISTS idx_fetch_log_time ON fetch_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_fetch_log_account ON fetch_log(account_id);
 CREATE INDEX IF NOT EXISTS idx_fetch_log_platform ON fetch_log(platform);
+CREATE INDEX IF NOT EXISTS idx_fetch_log_note_id ON fetch_log(note_id);
 """
 
 
@@ -1195,6 +1196,12 @@ async def log_fetch(
                 "INSERT INTO fetch_log (platform, task_type, status, latency_ms, account_id, note_id, note) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (platform, task_type, status, int(latency_ms), account_id, note_id, note),
+            )
+            # 滚动清理：保留最近 5000 条，防止表无限膨胀
+            await db.execute(
+                "DELETE FROM fetch_log WHERE rowid < ("
+                "  SELECT MIN(rowid) FROM (SELECT rowid FROM fetch_log ORDER BY rowid DESC LIMIT 5000)"
+                ")"
             )
             await db.commit()
     except Exception:
