@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
@@ -60,6 +61,7 @@ app = FastAPI(
 WEBUI_DIR = os.path.join(os.path.dirname(__file__), "ui")
 
 # CORS configuration - allow frontend dev server access
+app.add_middleware(GZipMiddleware, minimum_size=1024)  # 1KB 以上才压缩
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # 允许所有来源（生产环境应限制）
