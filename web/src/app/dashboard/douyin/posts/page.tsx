@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { usePosts, mutatePosts } from "@/lib/useApi";
 import dynamic from "next/dynamic";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
@@ -59,26 +60,13 @@ export default function DouyinPostsPage() {
   const { token } = useAuth();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 
-  const [posts, setPosts] = useState<Post[]>([]);
+  const { posts: rawPosts, isLoading } = usePosts();
+  const posts = (rawPosts as Post[]).filter((p) => p.platform === "douyin");
   const [links, setLinks] = useState("");
   const [adding, setAdding] = useState(false);
   const [checking, setChecking] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [results, setResults] = useState<{ link: string; ok: boolean; reason?: string }[]>([]);
   const { isOpen, onOpen, onClose } = useDisclosure();
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await fetch(API("/posts?platform=douyin"), { headers });
-      const d = await r.json();
-      setPosts(d.posts ?? []);
-    } finally {
-      setLoading(false);
-    }
-  }, [token]);
-
-  useEffect(() => { load(); }, [load]);
 
   const handleAdd = async () => {
     const items = links.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -92,7 +80,7 @@ export default function DouyinPostsPage() {
       const d = await r.json();
       setResults(d.results ?? []);
       setLinks("");
-      await load();
+      await mutatePosts();
     } finally {
       setAdding(false);
     }
@@ -101,7 +89,7 @@ export default function DouyinPostsPage() {
   const handleCheck = async () => {
     setChecking(true);
     await fetch(API("/check"), { method: "POST", headers });
-    setTimeout(async () => { await load(); setChecking(false); }, 4000);
+    setTimeout(() => { mutatePosts(); setChecking(false); }, 4000);
   };
 
   const handleDelete = async (note_id: string) => {
@@ -114,7 +102,7 @@ export default function DouyinPostsPage() {
     });
     if (!ok) return;
     await fetch(API(`/posts/${note_id}`), { method: "DELETE", headers });
-    await load();
+    await mutatePosts();
   };
 
   const statusChip = (p: Post) => {
@@ -234,7 +222,7 @@ export default function DouyinPostsPage() {
           </ul>
         </CardHeader>
         <CardBody className="p-0">
-          {loading ? (
+          {isLoading ? (
             <TableSkeleton rows={5} cols={6} />
           ) : posts.length === 0 ? (
             <EmptyState

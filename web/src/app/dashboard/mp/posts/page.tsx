@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState } from "react";
 import dynamic from "next/dynamic";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
@@ -14,7 +14,7 @@ import { Tooltip } from "@nextui-org/tooltip";
 import { Plus, RefreshCw, Trash2, Sparkles, ChevronDown, Search, Wand2, Key, Newspaper } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
-import { useMe, mutateMe, usePrompts } from "@/lib/useApi";
+import { useMe, mutateMe, usePrompts, usePosts, mutatePosts } from "@/lib/useApi";
 import { toastErr } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/EmptyState";
@@ -58,11 +58,11 @@ export default function MpPostsPage() {
   const { token } = useAuth();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 
-  const [posts, setPosts] = useState<Post[]>([]);
+  const { posts: rawPosts, isLoading } = usePosts();
+  const posts = (rawPosts as Post[]).filter((p) => p.platform === "mp");
   const [links, setLinks] = useState("");
   const [adding, setAdding] = useState(false);
   const [checking, setChecking] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [results, setResults] = useState<{ link: string; ok: boolean; reason?: string }[]>([]);
   const { isOpen, onOpen, onClose } = useDisclosure();
   const [summarizingId, setSummarizingId] = useState<string | null>(null);
@@ -199,7 +199,7 @@ export default function MpPostsPage() {
         toastErr(`摘要失败：${msg}`);
         return;
       }
-      await load();
+      await mutatePosts();
       setExpandedSummary((prev) => {
         const next = new Set(prev);
         next.add(note_id);
@@ -218,19 +218,6 @@ export default function MpPostsPage() {
     });
   };
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await fetch(API("/posts?platform=mp"), { headers });
-      const d = await r.json();
-      setPosts(d.posts ?? []);
-    } finally {
-      setLoading(false);
-    }
-  }, [token]);
-
-  useEffect(() => { load(); }, [load]);
-
   const handleAdd = async () => {
     const items = links.split("\n").map((s) => s.trim()).filter(Boolean);
     if (!items.length) return;
@@ -243,7 +230,7 @@ export default function MpPostsPage() {
       const d = await r.json();
       setResults(d.results ?? []);
       setLinks("");
-      await load();
+      await mutatePosts();
     } finally {
       setAdding(false);
     }
@@ -252,7 +239,7 @@ export default function MpPostsPage() {
   const handleCheck = async () => {
     setChecking(true);
     await fetch(API("/check"), { method: "POST", headers });
-    setTimeout(async () => { await load(); setChecking(false); }, 4000);
+    setTimeout(() => { mutatePosts(); setChecking(false); }, 4000);
   };
 
   const handleDelete = async (note_id: string) => {
@@ -265,7 +252,7 @@ export default function MpPostsPage() {
     });
     if (!ok) return;
     await fetch(API(`/posts/${note_id}`), { method: "DELETE", headers });
-    await load();
+    await mutatePosts();
   };
 
   const statusChip = (p: Post) => {
@@ -348,7 +335,7 @@ export default function MpPostsPage() {
           </div>
         </CardHeader>
         <CardBody className="p-0">
-          {loading ? (
+          {isLoading ? (
             <TableSkeleton rows={5} cols={4} />
           ) : posts.length === 0 ? (
             <EmptyState

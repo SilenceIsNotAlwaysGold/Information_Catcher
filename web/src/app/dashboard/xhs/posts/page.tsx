@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
@@ -20,7 +20,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 import { toastOk, toastErr } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
-import { useAccounts, useGroups } from "@/lib/useApi";
+import { useAccounts, useGroups, usePosts, useAlerts, mutatePosts, mutateAlerts } from "@/lib/useApi";
 
 // 添加帖子 Modal —— 首屏不需要，懒加载
 const AddPostsModal = dynamic(() => import("./_modals/AddPostsModal"), { ssr: false });
@@ -62,9 +62,10 @@ export default function XhsPostsPage() {
   const { token } = useAuth();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [alerts, setAlerts] = useState<Alert[]>([]);
-  // accounts / groups 走 SWR 共享缓存
+  // posts / alerts 走 SWR 共享缓存；accounts / groups 同理
+  const { posts: rawPosts, isLoading } = usePosts();
+  const posts = (rawPosts as Post[]).filter(isXhs);
+  const { alerts } = useAlerts(30);
   const { accounts } = useAccounts();
   const { groups } = useGroups();
   const [links, setLinks] = useState("");
@@ -72,28 +73,10 @@ export default function XhsPostsPage() {
   const [selectedGroupId, setSelectedGroupId] = useState<string>("");
   const [adding, setAdding] = useState(false);
   const [checking, setChecking] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [addResults, setAddResults] = useState<{ link: string; ok: boolean; reason?: string }[]>([]);
   const [search, setSearch] = useState("");
 
   const { isOpen, onOpen, onClose } = useDisclosure();
-
-  // 仅 posts / alerts 是本页特有数据，accounts/groups 已由 SWR 在后台保鲜
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [p, a] = await Promise.all([
-        fetch(API("/posts"), { headers }).then((r) => r.json()),
-        fetch(API("/alerts?limit=30"), { headers }).then((r) => r.json()),
-      ]);
-      setPosts((p.posts ?? []).filter(isXhs));
-      setAlerts(a.alerts ?? []);
-    } finally {
-      setLoading(false);
-    }
-  }, [token]);
-
-  useEffect(() => { load(); }, [load]);
 
   const handleAdd = async () => {
     const items = links.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -113,7 +96,7 @@ export default function XhsPostsPage() {
       const data = await res.json();
       setAddResults(data.results ?? []);
       setLinks("");
-      await load();
+      await mutatePosts();
     } finally {
       setAdding(false);
     }
@@ -121,18 +104,18 @@ export default function XhsPostsPage() {
 
   const handleDelete = async (note_id: string) => {
     await fetch(API(`/posts/${note_id}`), { method: "DELETE", headers });
-    await load();
+    await mutatePosts();
   };
 
   const handleCheck = async () => {
     setChecking(true);
     await fetch(API("/check"), { method: "POST", headers });
-    setTimeout(async () => { await load(); setChecking(false); }, 3000);
+    setTimeout(() => { mutatePosts(); setChecking(false); }, 3000);
   };
 
   const handleDeleteAlert = async (id: number) => {
     await fetch(API(`/alerts/${id}`), { method: "DELETE", headers });
-    await load();
+    await mutateAlerts();
   };
 
   const handleClearAlerts = async () => {
@@ -146,7 +129,7 @@ export default function XhsPostsPage() {
     });
     if (!ok) return;
     await fetch(API("/alerts"), { method: "DELETE", headers });
-    await load();
+    await mutateAlerts();
   };
 
   const alertTypeColor = (t: string): "warning" | "primary" | "success" =>
@@ -200,7 +183,7 @@ export default function XhsPostsPage() {
     const r = await fetch(API("/posts/cleanup-dead"), { method: "POST", headers });
     const d = await r.json();
     toastOk(`已清理 ${d.cleaned} 条失效帖子`);
-    await load();
+    await mutatePosts();
   };
 
   // 搜索过滤：标题 / note_id / 作者
@@ -255,7 +238,7 @@ export default function XhsPostsPage() {
       </div>
 
       {/* Loading / Empty / Tabs */}
-      {loading ? (
+      {isLoading ? (
         <Card><CardBody className="p-0"><TableSkeleton rows={6} cols={6} /></CardBody></Card>
       ) : posts.length === 0 && alerts.length === 0 ? (
         <Card>
