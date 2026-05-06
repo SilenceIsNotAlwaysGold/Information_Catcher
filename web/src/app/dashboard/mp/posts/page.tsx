@@ -75,6 +75,7 @@ export default function MpPostsPage() {
   const [authForm, setAuthForm] = useState({ uin: "", key: "", pass_ticket: "", appmsg_token: "" });
   const [authSaving, setAuthSaving] = useState(false);
   const { data: me } = useMe();
+  const isAdmin = me?.role === "admin";
   const authStatus = {
     has_auth: !!(me?.mp_auth_uin && me?.mp_auth_key),
     mp_auth_at: me?.mp_auth_at || null,
@@ -387,6 +388,9 @@ export default function MpPostsPage() {
                           )}
                         </div>
                         <div className="flex items-center gap-2 text-xs text-default-400">
+                          {isAdmin && p.owner_username && (
+                            <Chip size="sm" variant="flat" color="secondary">{p.owner_username}</Chip>
+                          )}
                           {p.author && (
                             <span className="text-success">📢 {p.author}</span>
                           )}

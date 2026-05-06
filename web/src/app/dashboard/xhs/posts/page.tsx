@@ -20,7 +20,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 import { toastOk, toastErr } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
-import { useAccounts, useGroups, usePosts, useAlerts, mutatePosts, mutateAlerts } from "@/lib/useApi";
+import { useAccounts, useGroups, usePosts, useAlerts, useMe, mutatePosts, mutateAlerts } from "@/lib/useApi";
 
 // 添加帖子 Modal —— 首屏不需要，懒加载
 const AddPostsModal = dynamic(() => import("./_modals/AddPostsModal"), { ssr: false });
@@ -63,6 +63,8 @@ export default function XhsPostsPage() {
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 
   // posts / alerts 走 SWR 共享缓存；accounts / groups 同理
+  const { data: me } = useMe();
+  const isAdmin = me?.role === "admin";
   const { posts: rawPosts, isLoading } = usePosts();
   const posts = (rawPosts as Post[]).filter(isXhs);
   const { alerts } = useAlerts(30);
@@ -253,6 +255,67 @@ export default function XhsPostsPage() {
                 </Button>
               }
             />
+          </CardBody>
+        </Card>
+      ) : isAdmin ? (
+        /* Admin 平铺视图：所有用户帖子 + 所属用户列 */
+        <Card>
+          <CardBody className="p-0">
+            <Table aria-label="all-posts-admin" removeWrapper>
+              <TableHeader>
+                <TableColumn>标题 / ID</TableColumn>
+                <TableColumn>所属用户</TableColumn>
+                <TableColumn>状态</TableColumn>
+                <TableColumn>点赞</TableColumn>
+                <TableColumn>收藏</TableColumn>
+                <TableColumn>评论</TableColumn>
+                <TableColumn>最后检测</TableColumn>
+                <TableColumn>操作</TableColumn>
+              </TableHeader>
+              <TableBody emptyContent={<EmptyState icon={FileText} title="暂无帖子" hint="还没有任何用户添加帖子。" />}>
+                {filteredPosts.map((p) => (
+                  <TableRow key={p.note_id}>
+                    <TableCell>
+                      <div className="flex flex-col">
+                        <a href={p.note_url} target="_blank" rel="noreferrer"
+                          className="text-primary text-sm truncate max-w-xs hover:underline">
+                          {p.title || p.note_id}
+                        </a>
+                        <span className="text-xs text-default-400">{p.note_id}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Chip size="sm" variant="flat" color="secondary">{p.owner_username ?? "—"}</Chip>
+                    </TableCell>
+                    <TableCell>{fetchStatusChip(p)}</TableCell>
+                    <TableCell><span className="font-medium">{p.liked_count ?? "—"}</span></TableCell>
+                    <TableCell><span className="font-medium">{p.collected_count ?? "—"}</span></TableCell>
+                    <TableCell><span className="font-medium">{p.comment_count ?? "—"}</span></TableCell>
+                    <TableCell>
+                      <span className="text-xs text-default-400">
+                        {p.checked_at ? p.checked_at.slice(0, 16) : "待检测"}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex gap-1">
+                        <Tooltip content="历史数据">
+                          <Button isIconOnly size="sm" variant="light"
+                            as={Link} href={`/dashboard/xhs/posts/history?note_id=${p.note_id}`}>
+                            <BarChart2 size={15} />
+                          </Button>
+                        </Tooltip>
+                        <Tooltip content="删除" color="danger">
+                          <Button isIconOnly size="sm" variant="light" color="danger"
+                            onPress={() => handleDelete(p.note_id)}>
+                            <Trash2 size={15} />
+                          </Button>
+                        </Tooltip>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </CardBody>
         </Card>
       ) : (

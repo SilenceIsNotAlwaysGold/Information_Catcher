@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { usePosts, mutatePosts, useLives, mutateLives } from "@/lib/useApi";
+import { usePosts, mutatePosts, useLives, mutateLives, useMe } from "@/lib/useApi";
 import dynamic from "next/dynamic";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
@@ -60,6 +60,8 @@ export default function DouyinPostsPage() {
   const { token } = useAuth();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 
+  const { data: me } = useMe();
+  const isAdmin = me?.role === "admin";
   const { posts: rawPosts, isLoading } = usePosts();
   const posts = (rawPosts as Post[]).filter((p) => p.platform === "douyin");
   const [links, setLinks] = useState("");
@@ -240,6 +242,9 @@ export default function DouyinPostsPage() {
                         {p.title || p.note_id}
                       </a>
                       <div className="flex items-center gap-1 flex-wrap">
+                        {isAdmin && p.owner_username && (
+                          <Chip size="sm" variant="flat" color="secondary">{p.owner_username}</Chip>
+                        )}
                         {p.author && (
                           <span className="text-xs text-success">📢 {p.author}</span>
                         )}
