@@ -1,40 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { usePosts } from "@/lib/useApi";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Chip } from "@nextui-org/chip";
 import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
 } from "@nextui-org/table";
 import { Users } from "lucide-react";
-import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav, CreatorsCard, PostRow } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 
 export default function DouyinCreatorsPage() {
-  const { token } = useAuth();
-  const [posts, setPosts] = useState<PostRow[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const load = useCallback(async () => {
-    if (!token) return;
-    setLoading(true);
-    try {
-      const r = await fetch(`/api/monitor/posts?platform=douyin`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (r.ok) {
-        const d = await r.json();
-        const all: PostRow[] = d.posts ?? [];
-        setPosts(all.filter((p) => (p.group_name || "") === "我的关注"));
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [token]);
-
-  useEffect(() => { load(); }, [load]);
+  const { posts: rawPosts, isLoading: loading } = usePosts();
+  const posts = (rawPosts as PostRow[]).filter(
+    (p) => p.platform === "douyin" && (p.group_name || "") === "我的关注"
+  );
 
   return (
     <div className="p-6 space-y-4 max-w-6xl">

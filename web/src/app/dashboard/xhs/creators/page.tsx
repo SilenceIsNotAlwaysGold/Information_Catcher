@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { usePosts } from "@/lib/useApi";
 import Link from "next/link";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import {
@@ -10,7 +10,6 @@ import { Chip } from "@nextui-org/chip";
 import { Button } from "@nextui-org/button";
 import { Tooltip } from "@nextui-org/tooltip";
 import { BarChart2, ExternalLink, Users } from "lucide-react";
-import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav, CreatorsCard } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
@@ -33,28 +32,8 @@ type Post = {
 const isXhs = (p: Post) => !p.platform || p.platform === "xhs";
 
 export default function XhsCreatorsPage() {
-  const { token } = useAuth();
-  const headers = { Authorization: `Bearer ${token}` };
-
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await fetch(API("/posts"), { headers });
-      const d = await r.json();
-      // 仅 xhs + 「我的关注」分组（博主追新自动入库的目标分组）
-      const list: Post[] = (d.posts || []).filter(
-        (p: Post) => isXhs(p) && p.group_name === "我的关注",
-      );
-      setPosts(list);
-    } finally {
-      setLoading(false);
-    }
-  }, [token]);
-
-  useEffect(() => { if (token) load(); }, [token, load]);
+  const { posts: rawPosts, isLoading: loading } = usePosts();
+  const posts = (rawPosts as Post[]).filter((p) => isXhs(p) && p.group_name === "我的关注");
 
   return (
     <div className="p-6 space-y-4">

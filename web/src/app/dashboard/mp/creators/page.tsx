@@ -1,13 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Chip } from "@nextui-org/chip";
 import { Skeleton } from "@nextui-org/skeleton";
 import { Newspaper } from "lucide-react";
-import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav, CreatorsCard } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
+import { usePosts } from "@/lib/useApi";
 
 type Post = {
   note_id: string;
@@ -18,29 +17,9 @@ type Post = {
   copyright_stat?: string | null;
 };
 
-const API = (path: string) => `/api/monitor${path}`;
-
 export default function MpCreatorsPage() {
-  const { token } = useAuth();
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    if (!token) return;
-    const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
-    (async () => {
-      setLoading(true);
-      try {
-        const r = await fetch(API("/posts?platform=mp"), { headers });
-        if (r.ok) {
-          const d = await r.json();
-          setPosts(d.posts ?? []);
-        }
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [token]);
+  const { posts: rawPosts, isLoading: loading } = usePosts();
+  const posts = (rawPosts as Post[]).filter((p) => p.platform === "mp");
 
   // 按 author 分组，每组取最近 10 篇（按 checked_at 倒序）
   const grouped = (() => {

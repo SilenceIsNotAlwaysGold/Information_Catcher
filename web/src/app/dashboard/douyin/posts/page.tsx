@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { usePosts, mutatePosts } from "@/lib/useApi";
+import { useState } from "react";
+import { usePosts, mutatePosts, useLives, mutateLives } from "@/lib/useApi";
 import dynamic from "next/dynamic";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
@@ -117,30 +117,14 @@ export default function DouyinPostsPage() {
   };
 
   // ── 直播订阅 ──────────────────────────────────────────────────
-  const [lives, setLives] = useState<Live[]>([]);
-  const [livesLoading, setLivesLoading] = useState(false);
+  const { lives: rawLives, isLoading: livesLoading } = useLives();
+  const lives = (rawLives as Live[]);
   const liveModal = useDisclosure();
   const [liveRoomUrl, setLiveRoomUrl] = useState("");
   const [liveStreamer, setLiveStreamer] = useState("");
   const [liveThreshold, setLiveThreshold] = useState("");
   const [liveBusy, setLiveBusy] = useState(false);
   const [liveError, setLiveError] = useState("");
-
-  const loadLives = useCallback(async () => {
-    if (!token) return;
-    setLivesLoading(true);
-    try {
-      const r = await fetch(API("/lives"), { headers });
-      if (r.ok) {
-        const d = await r.json();
-        setLives(d.lives ?? []);
-      }
-    } finally {
-      setLivesLoading(false);
-    }
-  }, [token]);
-
-  useEffect(() => { loadLives(); }, [loadLives]);
 
   const submitLive = async () => {
     setLiveError("");
@@ -163,7 +147,7 @@ export default function DouyinPostsPage() {
       }
       setLiveRoomUrl(""); setLiveStreamer(""); setLiveThreshold("");
       liveModal.onClose();
-      await loadLives();
+      await mutateLives();
     } finally {
       setLiveBusy(false);
     }
@@ -179,7 +163,7 @@ export default function DouyinPostsPage() {
     });
     if (!ok) return;
     await fetch(API(`/lives/${id}`), { method: "DELETE", headers });
-    await loadLives();
+    await mutateLives();
   };
 
   const checkLive = async (id: number) => {
@@ -191,7 +175,7 @@ export default function DouyinPostsPage() {
     }
     const d = await r.json();
     toastOk(`当前在线：${d.state?.online ?? "—"}`);
-    await loadLives();
+    await mutateLives();
   };
 
   return (

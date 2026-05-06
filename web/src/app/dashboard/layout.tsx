@@ -8,6 +8,17 @@ import { Menu, Search } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
 import { PLATFORM_LABEL, type PlatformKey } from "@/components/platform";
 import { GlobalSearch, useGlobalSearch } from "@/components/GlobalSearch";
+import { usePosts, useAlerts, useAccounts, useGroups, useLives } from "@/lib/useApi";
+
+// 预热最常用 SWR 缓存：布局挂载后立即拉取，子页面导航时数据已就绪，无需重新请求
+function CachePrefetcher() {
+  usePosts();
+  useAlerts(30);
+  useAccounts();
+  useGroups();
+  useLives();
+  return null;
+}
 
 // 从当前路由推断顶部栏标题（仅移动端 topbar 使用）
 function inferTopbarTitle(pathname: string): string {
@@ -96,11 +107,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </button>
         </header>
 
-        {children}
+          {children}
       </main>
 
       {/* 全局搜索弹窗，受控显示 */}
       <GlobalSearch open={searchOpen} onClose={closeSearch} />
+      {/* 预热常用数据缓存，无 UI 输出 */}
+      <CachePrefetcher />
     </div>
   );
 }
