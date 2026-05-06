@@ -23,7 +23,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .routers import auth_router, crawler_router, data_router, websocket_router, publisher_router, monitor_router
+from .routers import (
+    auth_router, crawler_router, data_router, websocket_router,
+    publisher_router, monitor_router,
+    dashboard_overview_router, health_ops_router,
+    global_search_router, image_gen_router,
+)
 from .services.auth_service import init_user_db
 from .services import monitor_db
 from .services import scheduler as monitor_scheduler
@@ -70,6 +75,10 @@ app.include_router(data_router, prefix="/api")
 app.include_router(websocket_router, prefix="/api")
 app.include_router(publisher_router, prefix="/api")
 app.include_router(monitor_router, prefix="/api")
+app.include_router(dashboard_overview_router, prefix="/api")
+app.include_router(health_ops_router, prefix="/api")
+app.include_router(global_search_router, prefix="/api")
+app.include_router(image_gen_router, prefix="/api")
 
 # 初始化用户数据库（创建默认admin账号）
 init_user_db()

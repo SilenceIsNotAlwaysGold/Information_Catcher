@@ -588,13 +588,26 @@ async def run_live_check():
 
 
 async def run_cookie_health_check():
-    """Daily job: probe each active account's cookie. Notify on transition to expired."""
+    """Cookie 健康度探针（按租户分发推送）。
+
+    流程：
+      1) 遍历所有 active 账号 → 调 cookie_health.check_cookie 拿到 valid/expired/unknown
+      2) 写回 cookie_status + cookie_last_check
+      3) 把「这次新转 expired」的账号按 user_id 分桶
+         - 普通用户桶：用该用户在 users 表里配置的 wecom/feishu webhook
+         - 共享池桶（is_shared=1，user_id 缺失/为 0）：fallback 到 settings 的全局 webhook
+      4) 每桶单独发一次 notify_cookie_expired，避免把 A 用户的过期账号推给 B 用户
+    """
+    from . import auth_service
+
     settings = await db.get_all_settings()
-    wecom_url  = settings.get("webhook_url", "")
-    feishu_url = settings.get("feishu_webhook_url", "")
+    global_wecom  = settings.get("webhook_url", "")
+    global_feishu = settings.get("feishu_webhook_url", "")
 
     accounts = await db.get_accounts(include_secrets=True)
-    newly_expired: list = []
+    # newly_expired_by_uid：键 None 留给共享池/无主账号 → 走全局 webhook
+    newly_expired_by_uid: dict = {}
+
     for acc in accounts:
         if not acc.get("is_active"):
             continue
@@ -602,11 +615,45 @@ async def run_cookie_health_check():
         new_status = await cookie_health.check_cookie(acc)
         await db.update_cookie_status(acc["id"], new_status)
         logger.info(f"[cookie_check] {acc.get('name')}: {prev} -> {new_status}")
-        if new_status == "expired" and prev != "expired":
-            newly_expired.append(acc.get("name") or f"#{acc['id']}")
 
-    if newly_expired and (wecom_url or feishu_url):
-        await notifier.notify_cookie_expired(wecom_url, feishu_url, newly_expired)
+        if new_status == "expired" and prev != "expired":
+            display = acc.get("name") or f"#{acc['id']}"
+            uid = acc.get("user_id")
+            # 共享池 / 老数据（user_id=0 或 NULL）统一归到 None 桶
+            if acc.get("is_shared") or not uid:
+                bucket_key = None
+            else:
+                bucket_key = int(uid)
+            newly_expired_by_uid.setdefault(bucket_key, []).append(display)
+
+    if not newly_expired_by_uid:
+        return
+
+    user_cache: dict = {}
+    for uid, names in newly_expired_by_uid.items():
+        if uid is None:
+            wecom = global_wecom
+            feishu = global_feishu
+        else:
+            if uid not in user_cache:
+                user_cache[uid] = auth_service.get_user_by_id(uid) or {}
+            u = user_cache[uid]
+            wecom = u.get("wecom_webhook_url", "") or ""
+            feishu = u.get("feishu_webhook_url", "") or ""
+
+        wecom_sent = 0
+        feishu_sent = 0
+        if wecom or feishu:
+            try:
+                await notifier.notify_cookie_expired(wecom, feishu, names)
+                wecom_sent = 1 if wecom else 0
+                feishu_sent = 1 if feishu else 0
+            except Exception as e:
+                logger.warning(f"[cookie_check] notify error tenant={uid}: {e}")
+        logger.info(
+            f"[cookie_check] tenant={uid} expired={names} "
+            f"→ wecom_sent={wecom_sent} feishu_sent={feishu_sent}"
+        )
 
 
 async def run_daily_report():
@@ -874,12 +921,13 @@ async def start_scheduler():
     # 直播间状态轮询（每 5 分钟）
     scheduler.add_job(run_live_check, "interval", minutes=5,
                       id="live_check", replace_existing=True)
-    # Cookie health probe — paused during the "新号静置实验" so the new account
-    # is not touched by our system at all. Re-enable when we know whether the
-    # warning was caused by our access pattern or by external multi-device login.
-    # scheduler.add_job(run_cookie_health_check,
-    #                   CronTrigger(hour=9, minute=0, timezone="Asia/Shanghai"),
-    #                   id="cookie_health", replace_existing=True)
+    # Cookie 健康度探针：每 6 小时跑一次，按 user_id 分桶推送 webhook。
+    # 间隔不能太短，否则探测请求本身可能触发风控；6h 兼顾及时性 + 安全性。
+    scheduler.add_job(
+        run_cookie_health_check,
+        CronTrigger(hour="*/6", minute=0, timezone="Asia/Shanghai"),
+        id="cookie_health", replace_existing=True,
+    )
     scheduler.start()
     logger.info(f"[scheduler] started — interval={interval}min, report={report_time}")
 

@@ -6,6 +6,7 @@ import {
   LayoutDashboard, Upload, Settings, LogOut, TrendingUp,
   ShieldCheck, Music2, Newspaper, ChevronDown, ChevronRight,
   FileText, Users, Moon, Sun, X,
+  Image as ImageIcon,
 } from "lucide-react";
 import { Button } from "@nextui-org/button";
 import { Tooltip } from "@nextui-org/tooltip";
@@ -69,8 +70,9 @@ const baseNavItems: NavItem[] = [
   ...buildPlatformItems("douyin"),
   ...buildPlatformItems("mp"),
 
-  { key: "import",   href: "/dashboard/import",           icon: <Upload size={20} />,   label: "数据导入", module: "common" },
-  { key: "settings", href: "/dashboard/monitor/settings", icon: <Settings size={20} />, label: "设置",     module: "common" },
+  { key: "import",      href: "/dashboard/import",                icon: <Upload size={20} />,    label: "数据导入",   module: "common" },
+  { key: "tools-image", href: "/dashboard/tools/product-image",   icon: <ImageIcon size={20} />, label: "商品图工具", module: "common" },
+  { key: "settings",    href: "/dashboard/monitor/settings",      icon: <Settings size={20} />,  label: "设置",       module: "common" },
 ];
 
 const adminNavItem: NavItem = {

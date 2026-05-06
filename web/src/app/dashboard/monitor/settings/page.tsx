@@ -16,8 +16,9 @@ import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
 } from "@nextui-org/modal";
 import { Tabs, Tab } from "@nextui-org/tabs";
-import { Trash2, Save, Pencil, QrCode, RefreshCw, ShieldCheck, Server } from "lucide-react";
+import { Trash2, Save, Pencil, QrCode, RefreshCw, ShieldCheck, Server, Send } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { toastOk, toastErr } from "@/lib/toast";
 import { PromptTemplatesCard } from "@/components/PromptTemplatesCard";
 import { MonitorGroupsCard } from "@/components/MonitorGroupsCard";
 import { EmptyState } from "@/components/EmptyState";
@@ -39,6 +40,7 @@ type Account = {
   fp_api_url: string;
   cookie_status?: string; // valid | expired | unknown
   cookie_checked_at?: string | null;
+  cookie_last_check?: string | null;
 };
 
 type Settings = {
@@ -261,6 +263,30 @@ export default function MonitorSettingsPage() {
   const toggleBool = (key: keyof Settings) =>
     set(key, settings[key] === "1" ? "0" : "1");
 
+  // ── Webhook 测试按钮 ────────────────────────────────────────────────────
+  const [testingWebhook, setTestingWebhook] = useState<{ wecom?: boolean; feishu?: boolean }>({});
+  const testWebhook = async (channel: "wecom" | "feishu", url: string) => {
+    if (!url) return;
+    setTestingWebhook((s) => ({ ...s, [channel]: true }));
+    try {
+      const resp = await fetch(API("/health/test-webhook"), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ channel, url }),
+      });
+      const data = await resp.json().catch(() => ({} as any));
+      if (resp.ok && data.ok) {
+        toastOk(data.message || "测试消息已发送，请到群里确认");
+      } else {
+        toastErr(`发送失败：${data.message || data.detail || resp.statusText}`);
+      }
+    } catch (e: any) {
+      toastErr(`发送失败：${e?.message || String(e)}`);
+    } finally {
+      setTestingWebhook((s) => ({ ...s, [channel]: false }));
+    }
+  };
+
   // ── 平台覆盖：一组操作 helpers ───────────────────────────────────────────
   // 是否有任何平台级覆盖（任意一个 enable 或 threshold 已设值）
   const hasPlatformOverride = (platform: PlatformKey) =>
@@ -471,9 +497,20 @@ export default function MonitorSettingsPage() {
 
   const cookieStatusChip = (a: Account) => {
     const s = a.cookie_status || "unknown";
-    if (s === "valid") return <Chip size="sm" color="success" variant="flat">正常</Chip>;
-    if (s === "expired") return <Chip size="sm" color="danger" variant="flat">已失效</Chip>;
-    return <Chip size="sm" color="default" variant="flat">未检测</Chip>;
+    const last = a.cookie_last_check || a.cookie_checked_at || "";
+    const lastShort = last ? last.slice(5, 16).replace("T", " ") : "";
+    const chip =
+      s === "valid"
+        ? <Chip size="sm" color="success" variant="flat">正常</Chip>
+        : s === "expired"
+          ? <Chip size="sm" color="danger" variant="flat">已失效</Chip>
+          : <Chip size="sm" color="default" variant="flat">未检测</Chip>;
+    return (
+      <div className="flex items-center gap-1.5">
+        {chip}
+        {lastShort && <span className="text-[10px] text-default-400">{lastShort}</span>}
+      </div>
+    );
   };
 
   // ── 渲染：单个平台 tab 内容（阈值 + 沿用全局） ──────────────────────────
@@ -550,12 +587,38 @@ export default function MonitorSettingsPage() {
             placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
             value={settings.webhook_url}
             onValueChange={(v) => set("webhook_url", v)}
+            endContent={
+              <Button
+                size="sm"
+                variant="flat"
+                color="primary"
+                startContent={!testingWebhook.wecom ? <Send size={14} /> : undefined}
+                isLoading={!!testingWebhook.wecom}
+                isDisabled={!settings.webhook_url || !!testingWebhook.wecom}
+                onPress={() => testWebhook("wecom", settings.webhook_url)}
+              >
+                测试
+              </Button>
+            }
           />
           <Input
             label="飞书机器人 Webhook URL"
             placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
             value={settings.feishu_webhook_url}
             onValueChange={(v) => set("feishu_webhook_url", v)}
+            endContent={
+              <Button
+                size="sm"
+                variant="flat"
+                color="primary"
+                startContent={!testingWebhook.feishu ? <Send size={14} /> : undefined}
+                isLoading={!!testingWebhook.feishu}
+                isDisabled={!settings.feishu_webhook_url || !!testingWebhook.feishu}
+                onPress={() => testWebhook("feishu", settings.feishu_webhook_url)}
+              >
+                测试
+              </Button>
+            }
           />
           {isAdmin ? (
             <Input

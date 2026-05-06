@@ -16,5 +16,14 @@ from .data import router as data_router
 from .websocket import router as websocket_router
 from .publisher import router as publisher_router
 from .monitor import router as monitor_router
+from .dashboard_overview import router as dashboard_overview_router
+from .health_ops import router as health_ops_router
+from .global_search import router as global_search_router
+from .image_gen import router as image_gen_router
 
-__all__ = ["auth_router", "crawler_router", "data_router", "websocket_router", "publisher_router", "monitor_router"]
+__all__ = [
+    "auth_router", "crawler_router", "data_router", "websocket_router",
+    "publisher_router", "monitor_router",
+    "dashboard_overview_router", "health_ops_router",
+    "global_search_router", "image_gen_router",
+]

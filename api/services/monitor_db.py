@@ -1,4 +1,5 @@
 import aiosqlite
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict
 
@@ -423,6 +424,9 @@ async def _migrate(db):
     # monitor_accounts columns for proxy / fingerprint
     for col, coldef in _ACCOUNT_EXTRA_COLUMNS:
         await _ensure_column(db, "monitor_accounts", col, coldef)
+    # Cookie health 探针：上次成功/失败检测的时间戳（ISO 字符串）。
+    # 与历史的 cookie_checked_at 共存，前者只有探针在写、后者也兼容旧逻辑。
+    await _ensure_column(db, "monitor_accounts", "cookie_last_check", "TEXT DEFAULT ''")
     # post grouping: 'own' = my posts, 'observe' = others' posts (legacy)
     await _ensure_column(db, "monitor_posts", "post_type", "TEXT DEFAULT 'observe'")
     # Track per-post fetch outcome so the UI can flag XHS-locked / deleted notes.
@@ -651,7 +655,7 @@ async def get_all_settings() -> Dict[str, str]:
 _ACCOUNT_COLUMNS_SELECT = (
     "id, name, cookie, proxy_url, user_agent, viewport, timezone, locale, "
     "fp_browser_type, fp_profile_id, fp_api_url, created_at, is_active, "
-    "cookie_status, cookie_checked_at, is_shared, last_used_at, usage_count, user_id, "
+    "cookie_status, cookie_checked_at, cookie_last_check, is_shared, last_used_at, usage_count, user_id, "
     "COALESCE(platform,'xhs') AS platform"
 )
 
@@ -794,11 +798,17 @@ async def mark_account_used(account_id: int) -> None:
 
 
 async def update_cookie_status(account_id: int, status: str) -> None:
+    """更新 cookie 健康状态 + 同步刷新两个时间戳：
+    - cookie_checked_at：保留旧字段，部分老代码/前端在用。
+    - cookie_last_check：探针专用 ISO 时间戳，给 admin/前端展示「上次检测时间」。
+    """
+    now_iso = datetime.now().isoformat(timespec="seconds")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE monitor_accounts SET cookie_status=?, "
-            "cookie_checked_at=datetime('now', 'localtime') WHERE id=?",
-            (status, account_id),
+            "cookie_checked_at=datetime('now', 'localtime'), "
+            "cookie_last_check=? WHERE id=?",
+            (status, now_iso, account_id),
         )
         await db.commit()
 
