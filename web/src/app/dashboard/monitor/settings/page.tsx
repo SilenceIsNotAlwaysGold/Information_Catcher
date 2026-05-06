@@ -151,6 +151,9 @@ export default function MonitorSettingsPage() {
   const [accountForm, setAccountForm] = useState(emptyAccountForm);
   const [saved, setSaved] = useState(false);
 
+  const [imageConfig, setImageConfig] = useState({ base_url: "", api_key_input: "", model: "", size: "1024x1024", has_key: false });
+  const [savingImage, setSavingImage] = useState(false);
+
   const editModal = useDisclosure();
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState(emptyEditForm);
@@ -349,10 +352,19 @@ export default function MonitorSettingsPage() {
   const load = async () => {
     setAccountsLoading(true);
     try {
-      const [s, a] = await Promise.all([
+      const [s, a, imgCfg] = await Promise.all([
         fetch(API("/settings"), { headers }).then((r) => r.json()),
         fetch(API("/accounts"), { headers }).then((r) => r.json()),
+        fetch("/api/monitor/image/config", { headers }).then((r) => r.json()).catch(() => ({})),
       ]);
+      setImageConfig((prev) => ({
+        ...prev,
+        base_url: imgCfg.base_url || "",
+        model: imgCfg.model || "",
+        size: imgCfg.size || "1024x1024",
+        has_key: !!imgCfg.has_key,
+        api_key_input: "",
+      }));
       // 拆分：dotted key（"xhs.likes_threshold"）→ platformOverrides；其余 → settings
       const baseSettings: Record<string, string> = {};
       const overrides: Record<string, string> = {};
@@ -769,6 +781,62 @@ export default function MonitorSettingsPage() {
           </CardBody>
         </Card>
       )}
+
+      {/* 商品图 API 配置 */}
+      <Card>
+        <CardHeader className="font-semibold flex items-center justify-between">
+          <span>商品图 API 配置</span>
+          {imageConfig.has_key && <Chip size="sm" color="success" variant="flat">Key 已保存</Chip>}
+        </CardHeader>
+        <CardBody className="space-y-4">
+          <p className="text-xs text-default-400">
+            接入 OpenAI 兼容图像生成 API（豆包 / 通义万相 / 即梦 / 智谱 CogView 等），配置后可在「商品图工具」页生成图片。
+          </p>
+          <Input label="API Base URL" placeholder="https://api.openai.com/v1"
+            value={imageConfig.base_url}
+            onValueChange={(v) => setImageConfig((c) => ({ ...c, base_url: v }))} />
+          <Input label="API Key" type="password"
+            placeholder={imageConfig.has_key ? "已保存，留空不覆盖旧值" : "sk-..."}
+            value={imageConfig.api_key_input}
+            onValueChange={(v) => setImageConfig((c) => ({ ...c, api_key_input: v }))} />
+          <div className="grid grid-cols-2 gap-3">
+            <Input label="模型名称" placeholder="dall-e-3 / wanx2.1-t2i-turbo / ..."
+              value={imageConfig.model}
+              onValueChange={(v) => setImageConfig((c) => ({ ...c, model: v }))} />
+            <Input label="默认尺寸" placeholder="1024x1024"
+              value={imageConfig.size}
+              onValueChange={(v) => setImageConfig((c) => ({ ...c, size: v }))} />
+          </div>
+          <Button
+            color="primary" variant="flat" size="sm"
+            startContent={<Save size={14} />}
+            isLoading={savingImage}
+            onPress={async () => {
+              setSavingImage(true);
+              try {
+                const res = await fetch("/api/monitor/image/config", {
+                  method: "POST",
+                  headers,
+                  body: JSON.stringify({
+                    base_url: imageConfig.base_url,
+                    api_key: imageConfig.api_key_input || undefined,
+                    model: imageConfig.model,
+                    size: imageConfig.size,
+                  }),
+                }).then((r) => r.json());
+                if (res.ok) {
+                  toastOk("商品图 API 配置已保存");
+                  setImageConfig((c) => ({ ...c, api_key_input: "", has_key: !!(c.api_key_input || c.has_key) }));
+                } else {
+                  toastErr(res.detail || "保存失败");
+                }
+              } catch { toastErr("网络错误"); } finally { setSavingImage(false); }
+            }}
+          >
+            保存商品图配置
+          </Button>
+        </CardBody>
+      </Card>
 
       {/* Prompt Templates */}
       <PromptTemplatesCard token={token} />

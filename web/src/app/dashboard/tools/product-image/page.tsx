@@ -10,7 +10,7 @@ import { Spinner } from "@nextui-org/spinner";
 import { Chip } from "@nextui-org/chip";
 import {
   Image as ImageIcon, Sparkles, Settings as SettingsIcon, Download,
-  ChevronDown, ChevronRight, Wand2, AlertCircle,
+  Wand2, AlertCircle,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
@@ -128,7 +128,7 @@ export default function ProductImagePage() {
 
   const handleGenerate = async () => {
     if (!prompt.trim()) { toastErr("请填写 prompt"); return; }
-    if (!cfg.has_key) { toastErr("请先在上方配置并保存 API Key"); setCfgOpen(true); return; }
+    if (!cfg.has_key) { toastErr("请先在「设置」页配置商品图 API Key"); return; }
     setGenerating(true);
     setGenError("");
     setItems([]);
@@ -218,79 +218,33 @@ export default function ProductImagePage() {
         </div>
       </div>
 
-      {/* 配置卡 */}
-      <Card>
-        <CardHeader className="flex items-center justify-between">
-          <button
-            type="button"
-            onClick={() => setCfgOpen((v) => !v)}
-            className="flex items-center gap-2 text-left"
-            aria-expanded={cfgOpen}
-          >
-            {cfgOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-            <SettingsIcon size={18} className="text-default-500" />
-            <span className="font-semibold">API 配置</span>
-            {cfg.has_key
-              ? <Chip size="sm" variant="flat" color="success">已配置</Chip>
-              : <Chip size="sm" variant="flat" color="warning">未配置</Chip>}
-          </button>
-          <span className="text-xs text-default-400">
-            {cfg.has_key ? `model: ${cfg.model || "-"} · size: ${cfg.size}` : "请先填写并保存"}
-          </span>
-        </CardHeader>
-        {cfgOpen && (
-          <CardBody className="space-y-4">
+      {/* 配置状态提示 */}
+      <Card className={cfg.has_key ? "border-success/30" : "border-warning/30"}>
+        <CardBody className="flex flex-row items-center gap-3 py-3">
+          <SettingsIcon size={18} className="text-default-400 shrink-0" />
+          <div className="flex-1 min-w-0">
             {cfgLoading ? (
-              <div className="flex items-center justify-center py-8">
-                <Spinner size="sm" />
-                <span className="ml-2 text-sm text-default-500">加载配置中…</span>
-              </div>
+              <span className="text-sm text-default-500">加载配置中…</span>
+            ) : cfg.has_key ? (
+              <span className="text-sm text-default-600">
+                API 已配置
+                {cfg.model && <span className="text-default-400 ml-2">model: {cfg.model} · size: {cfg.size}</span>}
+              </span>
             ) : (
-              <>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <Input
-                    label="API base_url"
-                    placeholder="https://api.openai.com/v1"
-                    value={cfg.base_url}
-                    onValueChange={(v) => setCfgField("base_url", v)}
-                    description="OpenAI 兼容路径，会自动拼 /images/generations"
-                  />
-                  <Input
-                    label="API Key"
-                    type="password"
-                    placeholder={cfg.has_key ? "（已保存，留空则不覆盖）" : "sk-..."}
-                    value={cfg.api_key}
-                    onValueChange={(v) => setCfgField("api_key", v)}
-                    description={cfg.has_key ? "已存有 key，留空将保留旧值" : "首次保存请填写"}
-                  />
-                  <Input
-                    label="Model"
-                    placeholder="dall-e-3 / cogview-3 / wanx-v1 ..."
-                    value={cfg.model}
-                    onValueChange={(v) => setCfgField("model", v)}
-                  />
-                  <Select
-                    label="默认尺寸"
-                    selectedKeys={cfg.size ? [cfg.size] : []}
-                    onSelectionChange={(keys) => {
-                      const k = Array.from(keys as Set<string>)[0];
-                      if (k) setCfgField("size", k);
-                    }}
-                  >
-                    {SIZE_OPTIONS.map((o) => (
-                      <SelectItem key={o.key} value={o.key}>{o.label}</SelectItem>
-                    ))}
-                  </Select>
-                </div>
-                <div className="flex justify-end">
-                  <Button color="primary" onPress={saveConfig} isLoading={cfgSaving}>
-                    保存配置
-                  </Button>
-                </div>
-              </>
+              <span className="text-sm text-warning-600">API 尚未配置，请先在设置页填写</span>
             )}
-          </CardBody>
-        )}
+          </div>
+          <Chip
+            as="a"
+            href="/dashboard/monitor/settings"
+            size="sm"
+            variant="flat"
+            color={cfg.has_key ? "default" : "warning"}
+            className="cursor-pointer shrink-0"
+          >
+            {cfg.has_key ? "修改配置" : "去设置"}
+          </Chip>
+        </CardBody>
       </Card>
 
       {/* 主区域：左输入 / 右结果 */}
