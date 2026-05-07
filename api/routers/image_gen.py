@@ -26,7 +26,10 @@ from ..services import monitor_db
 from ..services.platforms import get_platform, detect_platform
 from ..services import monitor_fetcher
 from ..services import storage
+from ..services import qiniu_uploader
+from ..services import local_storage
 from ..services import feishu_bitable
+from ..services import image_upload_worker
 
 logger = logging.getLogger(__name__)
 
@@ -385,7 +388,10 @@ async def generate_image(
     used_reference = img_bytes is not None
     src_url = (req.source_post_url or "").strip()
     src_title = (req.source_post_title or "").strip()
-    storage_ready = await storage.is_configured()
+    # 异步上传策略：始终先写本地（拿到立即可用的 URL），如配了七牛就把记录标 pending
+    # 后台 scheduler 异步推到云端，用户立刻能拿到 URL 同步飞书也能用。
+    local_ready = await local_storage.is_configured()
+    qiniu_ready = await qiniu_uploader.is_configured()
 
     all_images: List[dict] = []
     timeout = httpx.Timeout(180.0, connect=30.0)
@@ -412,28 +418,42 @@ async def generate_image(
                     }
                 return err
 
-            # 每张：上传七牛拿 URL（如配置了）+ 写历史记录。
-            # 上传失败不影响生成结果返回（用户仍能下载 b64），只是没 URL。
+            # 每张：①写本地拿到立即可用 URL ②写历史 ③配了七牛就标 pending
+            # 用户立刻能下载 + 同步飞书；后台 scheduler 慢慢把图推到七牛 CDN
             for offset, img in enumerate(images or []):
                 global_idx = start_index + len(all_images) + offset
                 set_idx = global_idx // images_per_set + 1
                 in_set_idx = global_idx % images_per_set + 1
 
-                qiniu_url = ""
-                if storage_ready and img.get("b64"):
-                    url, q_err = await storage.upload_b64(img["b64"], user_id=user_id)
-                    if url:
-                        qiniu_url = url
-                        img["url"] = url  # 把公网 URL 也带回前端，方便预览/复制
-                    elif q_err:
-                        logger.warning(f"[image_gen] storage upload failed (set {set_idx}-{in_set_idx}): {q_err}")
+                local_url = ""
+                if local_ready and img.get("b64"):
+                    lurl, lerr = await local_storage.upload_b64(img["b64"], user_id=user_id)
+                    if lurl:
+                        local_url = lurl
+                        img["url"] = lurl  # 立即返回给前端
+                    elif lerr:
+                        logger.warning(f"[image_gen] local write failed (set {set_idx}-{in_set_idx}): {lerr}")
+
+                # qiniu_url 起初 = local_url（飞书同步先用本地，传到七牛后会被覆盖）
+                # upload_status:
+                #   pending  → 配了七牛，待 worker 异步推
+                #   skipped  → 没配七牛，永远不传（local_url 就是终态）
+                #   failed   → 没本地存储也没七牛，记录无 URL
+                if local_url and qiniu_ready:
+                    upload_status = "pending"
+                elif local_url:
+                    upload_status = "skipped"
+                else:
+                    upload_status = "failed"
 
                 try:
                     await monitor_db.add_image_history(
                         user_id=user_id, prompt=prompt,
                         negative_prompt=neg, size=size, model=model,
                         set_idx=set_idx, in_set_idx=in_set_idx,
-                        qiniu_url=qiniu_url,
+                        local_url=local_url,
+                        qiniu_url=local_url,  # 起初等于本地，七牛传完后被 worker 覆盖
+                        upload_status=upload_status,
                         source_post_url=src_url, source_post_title=src_title,
                         used_reference=used_reference,
                     )
@@ -445,8 +465,10 @@ async def generate_image(
     return {
         "images": all_images,
         "requested": n,
-        "storage_uploaded": storage_ready,
-        "storage_backend": await storage.active_backend(),
+        "local_ready": local_ready,
+        "qiniu_async_pending": qiniu_ready,  # 是否会异步推七牛
+        "storage_backend": "local+async-qiniu" if (local_ready and qiniu_ready) else
+                           ("local" if local_ready else "none"),
     }
 
 
@@ -549,6 +571,31 @@ async def delete_history(
     return {"ok": ok}
 
 
+@router.post("/history/{record_id}/retry-upload", summary="把 failed 记录重置为 pending 重试")
+async def retry_upload(
+    record_id: int,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    rec = await monitor_db.get_image_history(record_id)
+    if not rec:
+        return {"ok": False, "error": "记录不存在"}
+    role = (current_user or {}).get("role") or "user"
+    if role != "admin" and rec.get("user_id") != current_user.get("user_id"):
+        return {"ok": False, "error": "无权操作"}
+    await monitor_db.reset_image_upload_failed(record_id)
+    return {"ok": True}
+
+
+@router.post("/upload-worker/run", summary="立即触发一次七牛上传（admin only，调试用）")
+async def trigger_upload_worker(
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    role = (current_user or {}).get("role") or "user"
+    if role != "admin":
+        return {"ok": False, "error": "需要管理员权限"}
+    return await image_upload_worker.run_batch()
+
+
 @router.post("/history/sync-bitable", summary="把历史记录同步到飞书多维表格")
 async def sync_history_to_bitable(
     req: SyncImageBitableRequest,
@@ -557,33 +604,41 @@ async def sync_history_to_bitable(
     if not req.record_ids:
         return {"error": "未选中任何记录", "status": 400}
 
-    settings = await monitor_db.get_all_settings()
-    app_id     = settings.get("feishu_app_id", "")
-    app_secret = settings.get("feishu_app_secret", "")
-    app_token  = settings.get("feishu_bitable_app_token", "")
-    table_id   = settings.get("feishu_bitable_image_table_id", "")
-    if not all([app_id, app_secret, app_token, table_id]):
+    # 优先写用户专属表（OAuth 绑定后自动建），缺失时 fallback 到全局 admin 表
+    from ..services.feishu import bitable as feishu_bitable_v2
+    target = await feishu_bitable_v2.resolve_target(current_user, kind="image")
+    if target["source"] == "none":
         return {
-            "error": "飞书图像表未配置完整（需 app_id / app_secret / app_token / image_table_id）",
+            "error": "未找到飞书图像表。请先「绑定飞书」让系统自动建表，"
+                     "或让管理员在「系统配置」配 feishu_bitable_app_token + feishu_bitable_image_table_id 作为兜底。",
             "status": 400,
         }
+    app_token = target["app_token"]
+    table_id = target["table_id"]
 
-    # 第一次同步时自动创建表头字段
-    try:
-        await feishu_bitable.ensure_fields(
-            app_id, app_secret, app_token, table_id,
-            fields={
-                "Prompt": "text", "图片": "url",
-                "尺寸": "text", "模型": "text",
-                "套号": "number", "套内序号": "number",
-                "来源链接": "url", "来源标题": "text",
-                "生成时间": "text",
-            },
-        )
-    except Exception as e:
-        return {"error": f"准备表格字段失败：{e}", "status": 400}
+    # 全局表第一次同步时自动建字段（用旧路径，需要 app_id/secret）；
+    # 用户专属表 provisioning 时已建好字段，跳过 ensure 即可。
+    if target["source"] == "global":
+        settings = await monitor_db.get_all_settings()
+        app_id     = settings.get("feishu_app_id", "")
+        app_secret = settings.get("feishu_app_secret", "")
+        if not (app_id and app_secret):
+            return {"error": "飞书 app_id / app_secret 未配置", "status": 400}
+        try:
+            await feishu_bitable.ensure_fields(
+                app_id, app_secret, app_token, table_id,
+                fields={
+                    "Prompt": "text", "图片": "url",
+                    "尺寸": "text", "模型": "text",
+                    "套号": "number", "套内序号": "number",
+                    "来源链接": "url", "来源标题": "text",
+                    "生成时间": "text",
+                },
+            )
+        except Exception as e:
+            return {"error": f"准备表格字段失败：{e}", "status": 400}
 
-    user_id = current_user.get("user_id") if current_user else None
+    user_id = current_user.get("id") if current_user else None
     role = (current_user or {}).get("role") or "user"
     scope_uid = None if role == "admin" else user_id
 
@@ -603,8 +658,8 @@ async def sync_history_to_bitable(
             continue
         try:
             src_url = (rec.get("source_post_url") or "").strip()
-            await feishu_bitable.add_record(
-                app_id, app_secret, app_token, table_id,
+            await feishu_bitable_v2.add_record(
+                app_token, table_id,
                 fields={
                     "Prompt": rec.get("prompt", ""),
                     "图片": {"link": url, "text": url},
@@ -621,4 +676,4 @@ async def sync_history_to_bitable(
             results.append({"id": rid, "ok": True})
         except Exception as e:
             results.append({"id": rid, "ok": False, "reason": str(e)})
-    return {"results": results}
+    return {"results": results, "target": target["source"]}

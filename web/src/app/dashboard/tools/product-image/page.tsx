@@ -325,7 +325,11 @@ export default function ProductImagePage() {
     prompt: string;
     size?: string; model?: string;
     set_idx: number; in_set_idx: number;
+    local_url?: string;
     qiniu_url: string;
+    upload_status?: "pending" | "uploaded" | "failed" | "skipped";
+    upload_retries?: number;
+    upload_last_error?: string;
     source_post_url?: string;
     source_post_title?: string;
     used_reference?: number;
@@ -354,12 +358,34 @@ export default function ProductImagePage() {
   };
   useEffect(() => { reloadHistory(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [token]);
 
+  // 异步上传：当有 pending 记录时每 30 秒自动拉一次，让 pending → uploaded 状态变化用户能看到
+  useEffect(() => {
+    const hasPending = history.some((h) => h.upload_status === "pending");
+    if (!hasPending) return;
+    const id = setInterval(reloadHistory, 30000);
+    return () => clearInterval(id);
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [history]);
+
   const toggleHistorySelected = (id: number) => {
     setHistorySelected((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
+  };
+
+  const retryUpload = async (id: number) => {
+    try {
+      const r = await fetch(API(`/history/${id}/retry-upload`), { method: "POST", headers });
+      const data = await r.json().catch(() => ({}));
+      if (data?.ok) {
+        toastOk("已加入上传队列，等下次刷新看状态");
+        reloadHistory();
+      } else {
+        toastErr(`重试失败：${data?.error || "未知"}`);
+      }
+    } catch (e: any) { toastErr(`重试异常：${e?.message || e}`); }
   };
 
   const deleteHistory = async (id: number) => {
@@ -1241,6 +1267,17 @@ export default function ProductImagePage() {
                         {h.used_reference ? (
                           <Chip size="sm" variant="flat" color="default">参考图</Chip>
                         ) : null}
+                        {/* 上传状态徽章：pending → 等待七牛 / uploaded → 已上传 / failed → 重试用尽 / skipped → 仅本地 */}
+                        {h.upload_status === "pending" ? (
+                          <Chip size="sm" variant="flat" color="warning">
+                            ⏳ 待上传七牛
+                            {(h.upload_retries ?? 0) > 0 ? `（已重试 ${h.upload_retries}）` : ""}
+                          </Chip>
+                        ) : h.upload_status === "uploaded" ? (
+                          <Chip size="sm" variant="flat" color="success">已上传七牛</Chip>
+                        ) : h.upload_status === "failed" ? (
+                          <Chip size="sm" variant="flat" color="danger">上传失败</Chip>
+                        ) : null}
                         {h.synced_to_bitable ? (
                           <Chip size="sm" variant="flat" color="success" startContent={<Check size={11} />}>
                             已同步飞书
@@ -1259,6 +1296,17 @@ export default function ProductImagePage() {
                     </div>
                     {/* 操作 */}
                     <div className="flex items-center gap-1 shrink-0">
+                      {h.upload_status === "failed" && (
+                        <Button
+                          size="sm"
+                          variant="flat"
+                          color="warning"
+                          onPress={() => retryUpload(h.id)}
+                          title={h.upload_last_error || ""}
+                        >
+                          重试上传
+                        </Button>
+                      )}
                       {h.qiniu_url && (
                         <Button
                           size="sm"

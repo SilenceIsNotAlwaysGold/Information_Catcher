@@ -13,13 +13,15 @@ from . import trending_fetcher
 from . import comment_fetcher
 from . import cookie_health
 from . import platforms as platform_registry
+from . import image_upload_worker
 
 logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
 
 
-async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: str):
+async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: str,
+                      feishu_chat_id: str = ""):
     note_id = post["note_id"]
     # Use pre-loaded account when available (set by run_monitor); fall back to DB fetch.
     # Check key existence — None means "account deleted", missing key means "not pre-loaded".
@@ -159,8 +161,11 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
     # Group-specific webhooks (fall back to global)
     g_wecom  = (group.get("wecom_webhook_url")  if group else "") or wecom_url
     g_feishu = (group.get("feishu_webhook_url") if group else "") or feishu_url
+    # 飞书群 chat_id：仅当 group 没显式配置 webhook 时才走 chat_id（避免 admin 显式
+    # 路由到特定群的意图被忽略）。group 有 webhook = 显式覆盖，跳过 chat_id。
+    g_feishu_chat = "" if (group and group.get("feishu_webhook_url")) else feishu_chat_id
 
-    if not g_wecom and not g_feishu:
+    if not g_wecom and not g_feishu and not g_feishu_chat:
         return
 
     prefix = (group.get("message_prefix") if group else "") or ""
@@ -221,6 +226,7 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
             g_wecom, g_feishu, title, note_id, post["xsec_token"],
             f"{prefix}{metric_label.get(alert_type.split('_')[0], '指标')}告警".strip(),
             _fmt(template, body_default),
+            feishu_chat_id=g_feishu_chat,
         )
 
     if rules:
@@ -282,6 +288,7 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
                 await notifier.notify_metric(
                     g_wecom, g_feishu, title, note_id, post["xsec_token"],
                     f"{prefix}点赞飙升".strip(), body,
+                    feishu_chat_id=g_feishu_chat,
                 )
 
         if collects_on and collected_delta >= collects_thr:
@@ -292,6 +299,7 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
                 await notifier.notify_metric(
                     g_wecom, g_feishu, title, note_id, post["xsec_token"],
                     f"{prefix}收藏飙升".strip(), body,
+                    feishu_chat_id=g_feishu_chat,
                 )
 
     # Fetch actual comment content when threshold triggered
@@ -310,6 +318,7 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
                     await notifier.notify_new_comments(
                         g_wecom, g_feishu, f"{prefix}{title}".strip(),
                         note_id, post["xsec_token"], new_comments,
+                        feishu_chat_id=g_feishu_chat,
                     )
                     return
             except Exception as e:
@@ -321,6 +330,7 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
         await notifier.notify_metric(
             g_wecom, g_feishu, title, note_id, post["xsec_token"],
             f"{prefix}新评论".strip(), body,
+            feishu_chat_id=g_feishu_chat,
         )
 
 
@@ -339,16 +349,21 @@ async def run_monitor():
             acc = await db.get_account(aid)
             account_cache[aid] = acc  # may be None if deleted
 
-    # 多租户 webhook：按 post.user_id 查用户自己的 webhook
+    # 多租户推送：按 post.user_id 查用户自己的 webhook + 飞书群 chat_id
+    # chat_id 是 OAuth 自动建群后落库的；优先级在 webhook 之上，由 notifier 决定
     from . import auth_service
     webhook_cache: dict = {}
     def _user_webhooks(uid):
         if uid is None:
-            return ("", "")
+            return ("", "", "")
         if uid in webhook_cache:
             return webhook_cache[uid]
         u = auth_service.get_user_by_id(uid) or {}
-        wh = (u.get("wecom_webhook_url", ""), u.get("feishu_webhook_url", ""))
+        wh = (
+            u.get("wecom_webhook_url", "") or "",
+            u.get("feishu_webhook_url", "") or "",
+            u.get("feishu_chat_id", "") or "",
+        )
         webhook_cache[uid] = wh
         return wh
 
@@ -371,8 +386,8 @@ async def run_monitor():
                 aid = post.get("account_id")
                 account = account_cache.get(aid) if aid else None
                 post["_account"] = account
-                wecom_url, feishu_url = _user_webhooks(post.get("user_id"))
-                await _check_post(post, settings, wecom_url, feishu_url)
+                wecom_url, feishu_url, feishu_chat_id = _user_webhooks(post.get("user_id"))
+                await _check_post(post, settings, wecom_url, feishu_url, feishu_chat_id)
                 # 抓取间留 0.5-1.5s 抖动（fetcher 内部的 1-2.5s 是请求级，这里是任务级）
                 await asyncio.sleep(random.uniform(0.5, 1.5))
             except Exception as e:
@@ -420,11 +435,13 @@ async def run_own_comments_check():
             u = auth_service.get_user_by_id(uid) if uid else {}
             wecom = (u or {}).get("wecom_webhook_url", "")
             feishu = (u or {}).get("feishu_webhook_url", "")
-            if wecom or feishu:
+            chat = (u or {}).get("feishu_chat_id", "")
+            if wecom or feishu or chat:
                 title = post.get("title") or post["note_id"]
                 await notifier.notify_new_comments(
                     wecom, feishu, title, post["note_id"],
                     post.get("xsec_token", ""), new_comments,
+                    feishu_chat_id=chat,
                 )
             await db.log_fetch(
                 platform=post.get("platform") or "xhs",
@@ -570,18 +587,20 @@ async def run_live_check():
             room_id=state.get("room_id") or "",
         )
 
-        # 涨幅触发告警（推用户自己的 webhook）
+        # 涨幅触发告警（推用户自己的 webhook / chat_id）
         if thr > 0 and delta >= thr:
             u = auth_service.get_user_by_id(uid) or {}
             wecom = u.get("wecom_webhook_url", "")
             feishu = u.get("feishu_webhook_url", "")
-            if wecom or feishu:
+            chat = u.get("feishu_chat_id", "")
+            if wecom or feishu or chat:
                 title = f"{state.get('streamer_name') or '直播间'} 在线人数 {prev_online}→{new_online}（+{delta}）"
                 try:
                     await notifier.notify_metric(
                         wecom, feishu, title, "", "",
                         "[直播] 涨幅告警",
                         f"房间：{live['room_url']}\n当前在线：{new_online}\n涨幅：+{delta}",
+                        feishu_chat_id=chat,
                     )
                 except Exception as e:
                     logger.warning(f"[live_check] notify error: {e}")
@@ -634,20 +653,22 @@ async def run_cookie_health_check():
         if uid is None:
             wecom = global_wecom
             feishu = global_feishu
+            chat = ""
         else:
             if uid not in user_cache:
                 user_cache[uid] = auth_service.get_user_by_id(uid) or {}
             u = user_cache[uid]
             wecom = u.get("wecom_webhook_url", "") or ""
             feishu = u.get("feishu_webhook_url", "") or ""
+            chat = u.get("feishu_chat_id", "") or ""
 
         wecom_sent = 0
         feishu_sent = 0
-        if wecom or feishu:
+        if wecom or feishu or chat:
             try:
-                await notifier.notify_cookie_expired(wecom, feishu, names)
+                await notifier.notify_cookie_expired(wecom, feishu, names, feishu_chat_id=chat)
                 wecom_sent = 1 if wecom else 0
-                feishu_sent = 1 if feishu else 0
+                feishu_sent = 1 if (feishu or chat) else 0
             except Exception as e:
                 logger.warning(f"[cookie_check] notify error tenant={uid}: {e}")
         logger.info(
@@ -692,7 +713,9 @@ async def run_daily_report():
         u = user_cache.get(uid) or {}
         wecom = (group.get("wecom_webhook_url") if group else "") or u.get("wecom_webhook_url", "")
         feishu = (group.get("feishu_webhook_url") if group else "") or u.get("feishu_webhook_url", "")
-        if not wecom and not feishu:
+        # group 显式配 webhook 时跳过 chat_id（admin 意图覆盖）
+        chat = "" if (group and group.get("feishu_webhook_url")) else (u.get("feishu_chat_id", "") or "")
+        if not wecom and not feishu and not chat:
             skipped += 1
             continue
 
@@ -705,6 +728,7 @@ async def run_daily_report():
             rows=posts,
             group_name=group_name,
             prefix=prefix,
+            feishu_chat_id=chat,
         )
         sent += 1
 
@@ -927,6 +951,12 @@ async def start_scheduler():
         run_cookie_health_check,
         CronTrigger(hour="*/6", minute=0, timezone="Asia/Shanghai"),
         id="cookie_health", replace_existing=True,
+    )
+    # 商品图异步上传到七牛：每 1 分钟跑一次，每次最多 3 张
+    # 监控任务跟它在一台机器上抢出向带宽（这台 ECS ~5Mbps），所以频率/批量都设保守
+    scheduler.add_job(
+        image_upload_worker.run_batch, "interval", minutes=1,
+        id="image_upload_worker", replace_existing=True,
     )
     scheduler.start()
     logger.info(f"[scheduler] started — interval={interval}min, report={report_time}")

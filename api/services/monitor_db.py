@@ -81,6 +81,13 @@ INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_bitable_app_token', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_bitable_table_id', '');
 -- 商品图历史专用的飞书表（同 app_token，不同 table_id；与热门帖表分开）
 INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_bitable_image_table_id', '');
+-- 飞书 OAuth 自动绑定 + 用户级多维表格：
+--   feishu_oauth_redirect_uri        OAuth 回调地址（如 https://你的域名/api/feishu/oauth/callback）
+--   feishu_bitable_root_folder_token 用户表格统一建在该云空间文件夹下
+--   feishu_admin_open_id             admin 的飞书 open_id（用于把 admin 拉进所有用户的群）
+INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_oauth_redirect_uri', '');
+INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_bitable_root_folder_token', '');
+INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_admin_open_id', '');
 -- 七牛云对象存储：用于商品图上传，得到公网 URL 后才能往飞书写
 INSERT OR IGNORE INTO monitor_settings VALUES ('qiniu_access_key', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('qiniu_secret_key', '');
@@ -257,7 +264,9 @@ CREATE INDEX IF NOT EXISTS idx_fetch_log_account ON fetch_log(account_id);
 CREATE INDEX IF NOT EXISTS idx_fetch_log_platform ON fetch_log(platform);
 CREATE INDEX IF NOT EXISTS idx_fetch_log_note_id ON fetch_log(note_id);
 
--- 商品图工具历史记录：每生成一张图就一行；图片同步上传到七牛云后填 qiniu_url。
+-- 商品图工具历史记录：每生成一张图就一行。
+-- 异步上传策略：生成时先写本地（local_url 永远有值），如配了七牛则后台 worker
+-- 异步推到云端，成功后更新 qiniu_url 覆盖本地 URL。upload_status 跟踪状态。
 -- 用 set_idx + in_set_idx 标记套图维度，方便后续按套号筛选/导出。
 CREATE TABLE IF NOT EXISTS image_gen_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -266,22 +275,28 @@ CREATE TABLE IF NOT EXISTS image_gen_history (
     negative_prompt TEXT DEFAULT '',
     size TEXT DEFAULT '',
     model TEXT DEFAULT '',
-    -- 套图编号：set_idx 表示第几套（账号），in_set_idx 表示套内第几张
     set_idx INTEGER DEFAULT 1,
     in_set_idx INTEGER DEFAULT 1,
+    -- URL 双字段：local_url 永远是本地静态 URL（兜底），qiniu_url 是当前对外用的 URL
+    -- 起初 qiniu_url = local_url；上传到七牛成功后 qiniu_url 被替换为 CDN URL
+    local_url TEXT DEFAULT '',
     qiniu_url TEXT DEFAULT '',
     qiniu_key TEXT DEFAULT '',
-    -- 来源标记：如果是基于某作品 URL 生成的，存原作品信息便于追溯
+    -- pending（待上传）/ uploaded（已上传七牛）/ failed（重试用尽）/ skipped（七牛未配）
+    upload_status TEXT DEFAULT 'skipped',
+    upload_retries INTEGER DEFAULT 0,
+    upload_last_error TEXT DEFAULT '',
     source_post_url TEXT DEFAULT '',
     source_post_title TEXT DEFAULT '',
-    -- 是否用了参考图（图生图）
     used_reference INTEGER DEFAULT 0,
-    -- 飞书同步状态
     synced_to_bitable INTEGER DEFAULT 0,
     bitable_record_id TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_image_gen_user_time ON image_gen_history(user_id, created_at DESC);
+-- 无 partial index：image_gen_history 数据量小，list_pending_image_uploads
+-- 每次 LIMIT 5 全表扫足够。partial index 在老表上还没 upload_status 列时
+-- 会建索引失败，复杂度不值得。
 """
 
 
@@ -505,6 +520,18 @@ async def _migrate(db):
     await _ensure_column(db, "trending_posts", "platform", "TEXT NOT NULL DEFAULT 'xhs'")
     await db.execute(
         "UPDATE trending_posts SET platform='xhs' WHERE platform IS NULL OR platform=''"
+    )
+
+    # 商品图历史：异步上传字段（老 deployments 上没有这些列）
+    await _ensure_column(db, "image_gen_history", "local_url", "TEXT DEFAULT ''")
+    await _ensure_column(db, "image_gen_history", "upload_status", "TEXT DEFAULT 'skipped'")
+    await _ensure_column(db, "image_gen_history", "upload_retries", "INTEGER DEFAULT 0")
+    await _ensure_column(db, "image_gen_history", "upload_last_error", "TEXT DEFAULT ''")
+    # 老数据：qiniu_url 非空说明同步上传成功过，标记 uploaded；空则 skipped
+    await db.execute(
+        "UPDATE image_gen_history SET upload_status='uploaded' "
+        "WHERE upload_status IS NULL OR upload_status='' "
+        "  AND qiniu_url IS NOT NULL AND qiniu_url != ''"
     )
 
     # SaaS multi-tenant: each tenant-owned table gets a user_id column.
@@ -1808,7 +1835,8 @@ async def add_image_history(
     *, user_id: Optional[int], prompt: str, negative_prompt: str = "",
     size: str = "", model: str = "",
     set_idx: int = 1, in_set_idx: int = 1,
-    qiniu_url: str = "", qiniu_key: str = "",
+    local_url: str = "", qiniu_url: str = "", qiniu_key: str = "",
+    upload_status: str = "skipped",
     source_post_url: str = "", source_post_title: str = "",
     used_reference: bool = False,
 ) -> int:
@@ -1816,15 +1844,76 @@ async def add_image_history(
         cur = await db.execute(
             """INSERT INTO image_gen_history
                (user_id, prompt, negative_prompt, size, model,
-                set_idx, in_set_idx, qiniu_url, qiniu_key,
-                source_post_url, source_post_title, used_reference)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                set_idx, in_set_idx, local_url, qiniu_url, qiniu_key,
+                upload_status, source_post_url, source_post_title, used_reference)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (user_id, prompt, negative_prompt, size, model,
-             set_idx, in_set_idx, qiniu_url, qiniu_key,
-             source_post_url, source_post_title, 1 if used_reference else 0),
+             set_idx, in_set_idx, local_url, qiniu_url, qiniu_key,
+             upload_status, source_post_url, source_post_title,
+             1 if used_reference else 0),
         )
         await db.commit()
         return cur.lastrowid or 0
+
+
+# ── 异步上传队列 ─────────────────────────────────────────────────────────────
+
+async def list_pending_image_uploads(limit: int = 5) -> List[Dict]:
+    """取还在等待上传到七牛的记录（按 id 升序，最旧的先传）。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM image_gen_history WHERE upload_status='pending' "
+            "ORDER BY id ASC LIMIT ?",
+            (limit,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def mark_image_upload_succeeded(
+    record_id: int, qiniu_url: str, qiniu_key: str = "",
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE image_gen_history "
+            "SET qiniu_url=?, qiniu_key=?, upload_status='uploaded', upload_last_error='' "
+            "WHERE id=?",
+            (qiniu_url, qiniu_key, record_id),
+        )
+        await db.commit()
+
+
+async def mark_image_upload_failed(
+    record_id: int, error: str, max_retries: int = 3,
+) -> None:
+    """递增 retries；超阈值标记 failed，否则保持 pending 等下次。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT upload_retries FROM image_gen_history WHERE id=?", (record_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return
+            retries = (row[0] or 0) + 1
+        new_status = "failed" if retries >= max_retries else "pending"
+        await db.execute(
+            "UPDATE image_gen_history "
+            "SET upload_retries=?, upload_status=?, upload_last_error=? WHERE id=?",
+            (retries, new_status, (error or "")[:500], record_id),
+        )
+        await db.commit()
+
+
+async def reset_image_upload_failed(record_id: int) -> None:
+    """手动重试：把 failed 记录重置为 pending、清空错误。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE image_gen_history "
+            "SET upload_status='pending', upload_retries=0, upload_last_error='' "
+            "WHERE id=? AND upload_status='failed'",
+            (record_id,),
+        )
+        await db.commit()
 
 
 async def list_image_history(
