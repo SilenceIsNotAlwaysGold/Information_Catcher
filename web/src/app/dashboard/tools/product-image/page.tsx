@@ -257,8 +257,9 @@ export default function ProductImagePage() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  // 从小红书/抖音作品 URL 拉取封面图作为参考图
-  const handleFetchPostCover = async () => {
+  // 从小红书/抖音作品 URL 拉取标题+正文，填入 Prompt 区作为生成依据
+  // （不强制把封面图作为参考图，用户如果需要可以单独上传）
+  const handleFetchPostContent = async () => {
     const url = postUrlInput.trim();
     if (!url) { toastErr("请粘贴小红书或抖音作品链接"); return; }
     setFetchingCover(true);
@@ -273,21 +274,28 @@ export default function ProductImagePage() {
         toastErr(`抓取失败：${data?.error || `HTTP ${r.status}`}`);
         return;
       }
-      const b64 = data.cover_b64 || "";
-      if (!b64) { toastErr("作品未提取到封面图"); return; }
-      // 拉到的封面有可能是 jpg，原 b64 不带前缀，预览统一用 image/* 即可
-      setRefImageB64(b64);
-      setRefImagePreview(`data:image/jpeg;base64,${b64}`);
-      setRefImageName(`${data.platform_label || "作品"} · ${data.title?.slice(0, 20) || data.post_id}`);
-      // 自动填充 prompt 提示（如果用户还没输入）
-      if (!prompt && data.title) {
-        const langTag = promptLanguage === "zh" ? "" : "(translate to English) ";
-        setPrompt(`${langTag}基于参考图保持商品主体一致，按下方文案延伸更多生活化场景：${data.title}`);
+      const title = (data.title || "").trim();
+      const desc = (data.desc || "").trim();
+      if (!title && !desc) {
+        toastErr("作品文案为空（可能被风控或无正文），请换一篇");
+        return;
       }
-      // 默认选小红书 3:4 尺寸（可以再切到抖音 9:16）
+
+      // 把文案拼成给图像模型用的中文 brief：标题作为主旨，正文截一段做场景描述
+      const brief = [
+        title && `主旨：${title}`,
+        desc && `内容/场景：${desc.slice(0, 280)}`,  // 截 280 字够 prompt 用，太长 token 浪费
+        "",
+        "请基于上述笔记的内容主旨，生成一张匹配该笔记调性的商品图：商品作为画面主体，",
+        "光线、构图、背景与正文场景一致；高质量，专业商品摄影。",
+      ].filter(Boolean).join("\n");
+      setPrompt(brief);
+
+      // 默认按平台预选尺寸，让生成出来的图直接能发同平台
       if (!genSize && data.platform === "xhs") setGenSize("864x1152");
       else if (!genSize && data.platform === "douyin") setGenSize("720x1280");
-      toastOk(`已加载封面：${data.title?.slice(0, 24) || data.post_id}`);
+
+      toastOk(`已加载文案：${title.slice(0, 24) || data.post_id}`);
     } catch (e: any) {
       toastErr(`抓取异常：${e?.message || e}`);
     } finally {
@@ -667,9 +675,41 @@ export default function ProductImagePage() {
               <span className="font-semibold">生成参数</span>
             </CardHeader>
             <CardBody className="space-y-4">
+              {/* 从小红书/抖音作品 URL 加载文案：拉到的标题+正文会填入 Prompt 区，
+                  让 AI 基于这篇笔记的调性生成对应的商品图 */}
+              <div className="flex flex-col gap-2 rounded-lg bg-default-50 p-3">
+                <div className="flex items-center gap-2 text-xs text-default-600">
+                  <Link2 size={14} className="text-primary" />
+                  <span>从小红书 / 抖音作品 URL 加载文案</span>
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    size="sm"
+                    placeholder="粘贴作品链接（xhslink.com、xiaohongshu.com、douyin.com）"
+                    value={postUrlInput}
+                    onValueChange={setPostUrlInput}
+                    isDisabled={fetchingCover}
+                  />
+                  <Button
+                    size="sm"
+                    color="primary"
+                    variant="flat"
+                    onPress={handleFetchPostContent}
+                    isLoading={fetchingCover}
+                    isDisabled={!postUrlInput.trim() || fetchingCover}
+                  >
+                    {fetchingCover ? "拉取中" : "加载文案"}
+                  </Button>
+                </div>
+                <p className="text-xs text-default-400">
+                  场景：找一篇爆款笔记 → 粘贴链接 → 自动把标题/正文填入 Prompt → 生成对应调性的商品图。
+                  如要保持商品主体一致，可在下方再上传商品参考图。
+                </p>
+              </div>
+
               <Textarea
                 label="Prompt"
-                placeholder="在上方向导点「使用」自动填入，也可直接手动输入"
+                placeholder="在上方向导点「使用」自动填入，或粘贴作品链接「加载文案」自动填充，也可手动输入"
                 minRows={5}
                 value={prompt}
                 onValueChange={setPrompt}
@@ -824,36 +864,6 @@ export default function ProductImagePage() {
               <Chip size="sm" variant="flat" color="default">图生图</Chip>
             </CardHeader>
             <CardBody className="space-y-3">
-              {/* 从小红书/抖音作品 URL 加载封面图 */}
-              <div className="flex flex-col gap-2 rounded-lg bg-default-50 p-3">
-                <div className="flex items-center gap-2 text-xs text-default-600">
-                  <Link2 size={14} className="text-primary" />
-                  <span>从小红书 / 抖音作品 URL 加载封面</span>
-                </div>
-                <div className="flex gap-2">
-                  <Input
-                    size="sm"
-                    placeholder="粘贴作品链接（xhslink.com、xiaohongshu.com、douyin.com）"
-                    value={postUrlInput}
-                    onValueChange={setPostUrlInput}
-                    isDisabled={fetchingCover}
-                  />
-                  <Button
-                    size="sm"
-                    color="primary"
-                    variant="flat"
-                    onPress={handleFetchPostCover}
-                    isLoading={fetchingCover}
-                    isDisabled={!postUrlInput.trim() || fetchingCover}
-                  >
-                    {fetchingCover ? "拉取中" : "加载"}
-                  </Button>
-                </div>
-                <p className="text-xs text-default-400">
-                  10 套图场景：粘贴一个爆款作品链接 → 自动用其封面作为参考 → 数量选 10 → 生成 10 套差异化图
-                </p>
-              </div>
-
               <input
                 ref={fileInputRef}
                 type="file"
