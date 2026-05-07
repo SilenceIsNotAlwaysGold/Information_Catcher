@@ -86,6 +86,10 @@ INSERT OR IGNORE INTO monitor_settings VALUES ('qiniu_access_key', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('qiniu_secret_key', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('qiniu_bucket', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('qiniu_domain', '');
+-- 本地图片存储的公网访问前缀（七牛备选方案）
+-- 例：https://my-server.com:8003 — 配置后图片会写到 data/images/，
+-- 通过 FastAPI 静态目录暴露成 {prefix}/static/images/...
+INSERT OR IGNORE INTO monitor_settings VALUES ('public_url_prefix', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('trending_enabled', '0');
 INSERT OR IGNORE INTO monitor_settings VALUES ('trending_keywords', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('trending_min_likes', '1000');

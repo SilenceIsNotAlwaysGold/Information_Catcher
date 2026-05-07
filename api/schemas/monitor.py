@@ -149,6 +149,12 @@ class UpdateSettingsRequest(BaseModel):
     feishu_app_secret: Optional[str] = None
     feishu_bitable_app_token: Optional[str] = None
     feishu_bitable_table_id: Optional[str] = None
+    feishu_bitable_image_table_id: Optional[str] = None
+    qiniu_access_key: Optional[str] = None
+    qiniu_secret_key: Optional[str] = None
+    qiniu_bucket: Optional[str] = None
+    qiniu_domain: Optional[str] = None
+    public_url_prefix: Optional[str] = None
     trending_enabled: Optional[bool] = None
     trending_keywords: Optional[str] = None
     trending_min_likes: Optional[int] = None

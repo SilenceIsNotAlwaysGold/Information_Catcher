@@ -25,7 +25,7 @@ from .auth import get_current_user
 from ..services import monitor_db
 from ..services.platforms import get_platform, detect_platform
 from ..services import monitor_fetcher
-from ..services import qiniu_uploader
+from ..services import storage
 from ..services import feishu_bitable
 
 logger = logging.getLogger(__name__)
@@ -385,7 +385,7 @@ async def generate_image(
     used_reference = img_bytes is not None
     src_url = (req.source_post_url or "").strip()
     src_title = (req.source_post_title or "").strip()
-    qiniu_ready = await qiniu_uploader.is_configured()
+    storage_ready = await storage.is_configured()
 
     all_images: List[dict] = []
     timeout = httpx.Timeout(180.0, connect=30.0)
@@ -420,13 +420,13 @@ async def generate_image(
                 in_set_idx = global_idx % images_per_set + 1
 
                 qiniu_url = ""
-                if qiniu_ready and img.get("b64"):
-                    url, q_err = await qiniu_uploader.upload_b64(img["b64"], user_id=user_id)
+                if storage_ready and img.get("b64"):
+                    url, q_err = await storage.upload_b64(img["b64"], user_id=user_id)
                     if url:
                         qiniu_url = url
                         img["url"] = url  # 把公网 URL 也带回前端，方便预览/复制
                     elif q_err:
-                        logger.warning(f"[image_gen] qiniu upload failed (set {set_idx}-{in_set_idx}): {q_err}")
+                        logger.warning(f"[image_gen] storage upload failed (set {set_idx}-{in_set_idx}): {q_err}")
 
                 try:
                     await monitor_db.add_image_history(
@@ -445,7 +445,8 @@ async def generate_image(
     return {
         "images": all_images,
         "requested": n,
-        "qiniu_uploaded": qiniu_ready,  # 让前端判断是否要在历史里显示"已同步七牛"
+        "storage_uploaded": storage_ready,
+        "storage_backend": await storage.active_backend(),
     }
 
 
@@ -527,8 +528,12 @@ async def list_history(
         limit=max(1, min(limit, 500)),
         offset=max(0, offset),
     )
-    qiniu_ready = await qiniu_uploader.is_configured()
-    return {"records": rows, "qiniu_configured": qiniu_ready}
+    backend = await storage.active_backend()
+    return {
+        "records": rows,
+        "qiniu_configured": backend != "none",  # 兼容前端字段名（实际指"图片存储已配置"）
+        "storage_backend": backend,
+    }
 
 
 @router.delete("/history/{record_id}", summary="删除历史记录")

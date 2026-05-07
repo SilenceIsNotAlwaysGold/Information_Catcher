@@ -70,6 +70,7 @@ type Settings = {
   qiniu_secret_key: string;
   qiniu_bucket: string;
   qiniu_domain: string;
+  public_url_prefix: string;
   trending_enabled: string;
   trending_keywords: string;
   trending_min_likes: string;
@@ -103,6 +104,7 @@ const DEFAULTS: Settings = {
   qiniu_secret_key: "",
   qiniu_bucket: "",
   qiniu_domain: "",
+  public_url_prefix: "",
   trending_enabled: "0",
   trending_keywords: "",
   trending_min_likes: "1000",
@@ -955,25 +957,53 @@ export default function MonitorSettingsPage() {
             />
           </div>
 
+          {/* 二选一：本地存储（推荐，无需备案）/ 七牛云（需备案域名） */}
           <div>
-            <p className="text-sm font-medium text-default-700 mb-2">七牛云对象存储</p>
-            <div className="grid grid-cols-2 gap-3">
-              <Input label="Access Key" placeholder="七牛 AK"
-                value={settings.qiniu_access_key}
-                onValueChange={(v) => set("qiniu_access_key", v)} />
-              <Input label="Secret Key" type="password" placeholder="七牛 SK"
-                value={settings.qiniu_secret_key}
-                onValueChange={(v) => set("qiniu_secret_key", v)} />
-              <Input label="Bucket" placeholder="存储空间名称（例：my-bucket）"
-                value={settings.qiniu_bucket}
-                onValueChange={(v) => set("qiniu_bucket", v)} />
-              <Input label="访问域名" placeholder="https://cdn.example.com"
-                value={settings.qiniu_domain}
-                onValueChange={(v) => set("qiniu_domain", v)}
-                description="bucket 绑定的 CDN 或测试域名，结尾不带 /" />
+            <p className="text-sm font-medium text-default-700 mb-2">图片存储（二选一）</p>
+            <p className="text-xs text-default-400 leading-relaxed mb-3">
+              生成的图片需要公网可访问的 URL 才能写入飞书。优先级：七牛 → 本地。
+              没备案域名就用本地（直接走部署服务器自己的公网 IP/HTTPS 端口）。
+            </p>
+
+            <div className="rounded-lg border border-divider p-3 space-y-3 mb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-default-700">方案 A · 本地存储</span>
+                <span className="text-xs text-success-600">推荐｜无需备案</span>
+              </div>
+              <Input
+                label="公网访问地址"
+                placeholder="https://my-server.com:8003"
+                value={settings.public_url_prefix}
+                onValueChange={(v) => set("public_url_prefix", v)}
+                description="部署服务器对外可访问的 URL 前缀（含协议+域名/IP+端口，结尾不带 /）。
+                  生成的图片会存到 data/images/，通过 /static/images/* 暴露。
+                  注意：自签名证书飞书表里无法预览缩略图，但 URL 跳转可用。"
+              />
             </div>
-            <p className="text-xs text-default-400 mt-2 leading-relaxed">
-              不配七牛云也能用商品图工具，只是图片不会上传，历史记录里没有 URL，也无法同步飞书。
+
+            <div className="rounded-lg border border-divider p-3 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-default-700">方案 B · 七牛云</span>
+                <span className="text-xs text-warning-600">国内 bucket 必须备案域名</span>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Input label="Access Key" placeholder="七牛 AK"
+                  value={settings.qiniu_access_key}
+                  onValueChange={(v) => set("qiniu_access_key", v)} />
+                <Input label="Secret Key" type="password" placeholder="七牛 SK"
+                  value={settings.qiniu_secret_key}
+                  onValueChange={(v) => set("qiniu_secret_key", v)} />
+                <Input label="Bucket" placeholder="存储空间名称（例：my-bucket）"
+                  value={settings.qiniu_bucket}
+                  onValueChange={(v) => set("qiniu_bucket", v)} />
+                <Input label="访问域名" placeholder="https://cdn.example.com"
+                  value={settings.qiniu_domain}
+                  onValueChange={(v) => set("qiniu_domain", v)}
+                  description="bucket 绑定域名，结尾不带 /" />
+              </div>
+            </div>
+            <p className="text-xs text-default-400 mt-3 leading-relaxed">
+              都不配也能用商品图工具，只是图片不会上传，历史记录里没有 URL，无法同步飞书。
             </p>
           </div>
         </CardBody>

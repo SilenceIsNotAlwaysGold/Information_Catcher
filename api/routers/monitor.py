@@ -946,6 +946,9 @@ async def qr_login_cancel(session_id: str, _: dict = Depends(get_current_user)):
 _ADMIN_ONLY_SETTING_KEYS = {
     "ai_base_url", "ai_api_key", "ai_model", "ai_rewrite_prompt",
     "feishu_app_id", "feishu_app_secret",
+    "feishu_bitable_image_table_id",
+    "qiniu_access_key", "qiniu_secret_key", "qiniu_bucket", "qiniu_domain",
+    "public_url_prefix",
     "check_interval_minutes", "daily_report_time", "daily_report_enabled",
     "trending_account_ids",
     # 第三方数据源
@@ -994,6 +997,9 @@ async def update_settings(
         "ai_base_url", "ai_api_key", "ai_model", "ai_rewrite_prompt",
         "feishu_app_id", "feishu_app_secret",
         "feishu_bitable_app_token", "feishu_bitable_table_id",
+        "feishu_bitable_image_table_id",
+        "qiniu_access_key", "qiniu_secret_key", "qiniu_bucket", "qiniu_domain",
+        "public_url_prefix",
         "trending_keywords", "trending_account_ids",
         "newrank_api_key", "newrank_api_base",
     ]

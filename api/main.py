@@ -204,6 +204,13 @@ async def get_config_options():
     }
 
 
+# 商品图本地存储目录（无论 API_ONLY 都挂载，因为飞书需要从外部访问这些图）
+# 跟 local_storage.py 里的 IMAGES_ROOT 保持一致
+_IMAGES_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "images")
+os.makedirs(_IMAGES_DIR, exist_ok=True)
+app.mount("/static/images", StaticFiles(directory=_IMAGES_DIR), name="images")
+
+
 # Mount static resources - must be placed after all routes
 # 仅在非 API_ONLY 模式下挂载静态资源
 if not API_ONLY and os.path.exists(WEBUI_DIR):
@@ -211,12 +218,12 @@ if not API_ONLY and os.path.exists(WEBUI_DIR):
     next_dir = os.path.join(WEBUI_DIR, "_next")
     if os.path.exists(next_dir):
         app.mount("/_next", StaticFiles(directory=next_dir), name="next-static")
-    
+
     # Mount assets directory
     assets_dir = os.path.join(WEBUI_DIR, "assets")
     if os.path.exists(assets_dir):
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
-    
+
     # Mount logos directory
     logos_dir = os.path.join(WEBUI_DIR, "logos")
     if os.path.exists(logos_dir):
