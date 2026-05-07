@@ -28,13 +28,13 @@ const SIZE_OPTIONS = [
   { key: "1792x1024", label: "横图 16:9（1792 × 1024）" },
 ];
 
-// 数量预设：单图 / 一组（4 张矩阵）/ 10 套（多账号分发）/ 20 套
-const COUNT_OPTIONS = [
-  { value: 1,  label: "1 张",  hint: "单图" },
-  { value: 4,  label: "4 张",  hint: "一组矩阵" },
-  { value: 10, label: "10 套", hint: "10 账号分发" },
-  { value: 20, label: "20 套", hint: "大批量" },
-];
+// 套数预设（每套 = 1 个账号要发的内容）
+const SETS_PRESETS = [1, 5, 10, 20];
+// 每套张数预设（小红书 1 篇笔记最多 9 张轮播；抖音通常 1）
+const IMAGES_PER_SET_PRESETS = [1, 3, 6, 9];
+
+// 总张数硬上限：与后端 _MAX_TOTAL 对齐。超过会拒绝。
+const MAX_TOTAL = 60;
 
 const SCENE_OPTIONS = [
   "白底/纯色", "简约渐变背景", "生活场景", "户外自然",
@@ -127,6 +127,10 @@ export default function ProductImagePage() {
   const [prompt, setPrompt] = useState("");
   const [negativePrompt, setNegativePrompt] = useState("");
 
+  // 数量：套数（账号数）× 每套张数（每篇笔记的轮播图数）
+  const [sets, setSets] = useState<number>(1);
+  const [imagesPerSet, setImagesPerSet] = useState<number>(1);
+
   // 恢复：组件挂载时从 localStorage 读回上次状态
   useEffect(() => {
     try {
@@ -143,6 +147,8 @@ export default function ProductImagePage() {
       if (d.prompt)           setPrompt(d.prompt);
       if (d.negativePrompt)   setNegativePrompt(d.negativePrompt);
       if (d.selectedPromptIdx != null) setSelectedPromptIdx(d.selectedPromptIdx);
+      if (typeof d.sets === "number" && d.sets >= 1) setSets(d.sets);
+      if (typeof d.imagesPerSet === "number" && d.imagesPerSet >= 1) setImagesPerSet(d.imagesPerSet);
     } catch {}
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -155,10 +161,12 @@ export default function ProductImagePage() {
       localStorage.setItem(PERSIST_KEY, JSON.stringify({
         subject, selectedScenes, selectedStyle, selectedPlatform,
         promptLanguage, wizardExtras, wizardPrompts, prompt, negativePrompt, selectedPromptIdx,
+        sets, imagesPerSet,
       }));
     } catch {}
   }, [subject, selectedScenes, selectedStyle, selectedPlatform,
-      promptLanguage, wizardExtras, wizardPrompts, prompt, negativePrompt, selectedPromptIdx]);
+      promptLanguage, wizardExtras, wizardPrompts, prompt, negativePrompt, selectedPromptIdx,
+      sets, imagesPerSet]);
 
   const toggleScene = (s: string) =>
     setSelectedScenes((prev) =>
@@ -288,7 +296,10 @@ export default function ProductImagePage() {
   };
 
   // ── 生成 ────────────────────────────────────────────────────────────────
-  const [count, setCount] = useState<number>(1);
+  // 二维数量：派生总张数（封顶 MAX_TOTAL，避免误填超大数字打爆上游）。
+  // 例 10 个账号每个发 6 张轮播 → sets=10, imagesPerSet=6, 共 60 张。
+  const count = Math.min(Math.max(1, sets * imagesPerSet), MAX_TOTAL);
+
   const [genSize, setGenSize] = useState<string>("");
   const [generating, setGenerating] = useState(false);
   const [items, setItems] = useState<GenItem[]>(userCache.items);
@@ -375,10 +386,19 @@ export default function ProductImagePage() {
     }
   };
 
+  // 把全局 idx (0..count-1) 拆成 (套号, 套内序号)
+  // 例 imagesPerSet=6, idx=7 → set 2, image 2 (第 2 套的第 2 张)
+  const itemLabel = (idx: number) => {
+    if (imagesPerSet <= 1) return `${idx + 1}`;
+    const setIdx = Math.floor(idx / imagesPerSet) + 1;
+    const inSetIdx = (idx % imagesPerSet) + 1;
+    return `${setIdx}-${inSetIdx}`;
+  };
+
   const downloadItem = async (item: GenItem, idx: number) => {
     try {
       const ts = new Date().toISOString().replace(/[:.]/g, "-");
-      const filename = `product-image-${ts}-${idx + 1}.png`;
+      const filename = `product-image-${ts}-${itemLabel(idx)}.png`;
       if (item.b64) {
         const bin = atob(item.b64);
         const buf = new Uint8Array(bin.length);
@@ -663,33 +683,98 @@ export default function ProductImagePage() {
                 onValueChange={setNegativePrompt}
                 description="部分模型不支持，会自动拼到 prompt 尾部"
               />
-              <div className="flex flex-col gap-2">
-                <span className="text-sm text-default-700">生成数量</span>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {COUNT_OPTIONS.map((o) => (
-                    <button
-                      key={o.value}
-                      type="button"
-                      onClick={() => setCount(o.value)}
-                      className={`rounded-lg border p-2.5 text-sm transition-colors ${
-                        count === o.value
-                          ? "bg-primary text-white border-primary"
-                          : "border-divider text-default-600 hover:bg-default-100"
-                      }`}
-                    >
-                      <div className="font-medium">{o.label}</div>
-                      <div className={`text-xs mt-0.5 ${
-                        count === o.value ? "text-white/80" : "text-default-400"
-                      }`}>
-                        {o.hint}
-                      </div>
-                    </button>
-                  ))}
+              {/* 数量：套数（账号数）× 每套张数（轮播张数）。总张数 = 套×张 */}
+              <div className="flex flex-col gap-3 rounded-lg border border-divider p-3 bg-default-50/40">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium text-default-700">数量</span>
+                  <span className="text-xs text-default-500">
+                    共 <span className="font-semibold text-primary">{count}</span> 张
+                    <span className="text-default-400"> = {sets} 套 × {imagesPerSet} 张/套</span>
+                  </span>
                 </div>
+
+                {/* 套数 */}
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs text-default-500">套数（账号数）</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {SETS_PRESETS.map((v) => (
+                      <button
+                        key={v}
+                        type="button"
+                        onClick={() => setSets(v)}
+                        className={`px-3 py-1.5 rounded-full text-sm border transition-colors ${
+                          sets === v
+                            ? "bg-primary text-white border-primary"
+                            : "border-divider text-default-600 hover:bg-default-100"
+                        }`}
+                      >
+                        {v}
+                      </button>
+                    ))}
+                    <Input
+                      size="sm"
+                      type="number"
+                      min={1}
+                      max={MAX_TOTAL}
+                      aria-label="自定义套数"
+                      placeholder="自定义"
+                      value={SETS_PRESETS.includes(sets) ? "" : String(sets)}
+                      onValueChange={(v) => {
+                        const n = parseInt(v || "0", 10);
+                        if (!Number.isNaN(n) && n >= 1) setSets(Math.min(n, MAX_TOTAL));
+                      }}
+                      className="w-24"
+                    />
+                  </div>
+                </div>
+
+                {/* 每套张数 */}
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs text-default-500">每套张数（轮播图数）</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {IMAGES_PER_SET_PRESETS.map((v) => (
+                      <button
+                        key={v}
+                        type="button"
+                        onClick={() => setImagesPerSet(v)}
+                        className={`px-3 py-1.5 rounded-full text-sm border transition-colors ${
+                          imagesPerSet === v
+                            ? "bg-secondary text-white border-secondary"
+                            : "border-divider text-default-600 hover:bg-default-100"
+                        }`}
+                      >
+                        {v}
+                      </button>
+                    ))}
+                    <Input
+                      size="sm"
+                      type="number"
+                      min={1}
+                      max={9}
+                      aria-label="自定义每套张数"
+                      placeholder="自定义"
+                      value={IMAGES_PER_SET_PRESETS.includes(imagesPerSet) ? "" : String(imagesPerSet)}
+                      onValueChange={(v) => {
+                        const n = parseInt(v || "0", 10);
+                        // 小红书最多 9 张轮播
+                        if (!Number.isNaN(n) && n >= 1) setImagesPerSet(Math.min(n, 9));
+                      }}
+                      className="w-24"
+                    />
+                  </div>
+                </div>
+
+                {/* 总数提示 */}
                 {count >= 10 && (
                   <p className="text-xs text-default-400 leading-relaxed">
-                    多张顺序生成（每 4 张一批），约需 {Math.ceil(count / 4)} × 30-60 秒。
-                    上传参考图可让 {count} 套图保持商品主体一致，适合多账号分发。
+                    分批顺序生成（每批 4 张），约需 {Math.ceil(count / 4)} × 30-60 秒
+                    （≈ {Math.ceil(count / 4 / 2)}-{Math.ceil(count / 4)} 分钟）。
+                    上传参考图可保持各套商品主体一致。
+                  </p>
+                )}
+                {count >= MAX_TOTAL && sets * imagesPerSet > MAX_TOTAL && (
+                  <p className="text-xs text-warning-600 leading-relaxed">
+                    总数已达上限 {MAX_TOTAL} 张（请求 {sets * imagesPerSet} 张被裁剪）。
                   </p>
                 )}
               </div>
@@ -840,9 +925,12 @@ export default function ProductImagePage() {
           >
             {generating
               ? `生成中… 约 ${Math.ceil(count / 4) * 30}-${Math.ceil(count / 4) * 60} 秒`
-              : refImageB64
-                ? `以参考图生成 ${count} 张`
-                : `生成 ${count} 张图片`}
+              : (() => {
+                  const suffix = imagesPerSet > 1
+                    ? `${count} 张（${sets} 套 × ${imagesPerSet}）`
+                    : `${count} 张`;
+                  return refImageB64 ? `以参考图生成 ${suffix}` : `生成 ${suffix}`;
+                })()}
           </Button>
           {!cfg.has_key && (
             <div className="flex items-start gap-2 text-xs text-warning bg-warning/10 rounded-lg p-2">
@@ -920,9 +1008,9 @@ export default function ProductImagePage() {
                       alt={`generated-${idx + 1}`}
                       className="w-full h-auto aspect-[3/4] object-cover"
                     />
-                    {/* 序号角标，便于用户对应到"第 N 个账号" */}
+                    {/* 序号角标：套数=1 显示 #N；多套时显示 套-张（如 1-1, 2-3） */}
                     <span className="absolute top-1.5 left-1.5 rounded-full bg-black/60 text-white text-[10px] px-1.5 py-0.5">
-                      #{idx + 1}
+                      {imagesPerSet > 1 ? itemLabel(idx) : `#${idx + 1}`}
                     </span>
                     <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-end justify-end p-2 opacity-0 group-hover:opacity-100">
                       <Button

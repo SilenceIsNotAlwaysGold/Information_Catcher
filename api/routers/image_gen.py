@@ -227,8 +227,11 @@ def _normalize_image_items(data: dict) -> List[dict]:
 # 单次上游请求最多生成几张：超过此值后端会拆成多次循环调用。
 # 多数 OpenAI 兼容图像 API 单次最多 4 张，gpt-image-1 仅支持 1 张。
 _MAX_PER_BATCH = 4
-# /generate 一次最多生成的总张数（10 套图最高场景 = 10，留一倍冗余）。
-_MAX_TOTAL = 20
+# /generate 单次请求最多生成的总张数。
+# 套图场景上限 = 10 套账号 × 9 张轮播 = 90，但实际是前端按 4 张/批多次调用，
+# 所以这里只是"单次最大"。设 60 已经足够（覆盖绝大多数自定义组合），
+# 防止误填超大数字一锅端打爆上游。
+_MAX_TOTAL = 60
 
 
 async def _call_generations(
