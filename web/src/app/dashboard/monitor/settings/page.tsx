@@ -65,6 +65,11 @@ type Settings = {
   feishu_app_secret: string;
   feishu_bitable_app_token: string;
   feishu_bitable_table_id: string;
+  feishu_bitable_image_table_id: string;
+  qiniu_access_key: string;
+  qiniu_secret_key: string;
+  qiniu_bucket: string;
+  qiniu_domain: string;
   trending_enabled: string;
   trending_keywords: string;
   trending_min_likes: string;
@@ -93,6 +98,11 @@ const DEFAULTS: Settings = {
   feishu_app_secret: "",
   feishu_bitable_app_token: "",
   feishu_bitable_table_id: "",
+  feishu_bitable_image_table_id: "",
+  qiniu_access_key: "",
+  qiniu_secret_key: "",
+  qiniu_bucket: "",
+  qiniu_domain: "",
   trending_enabled: "0",
   trending_keywords: "",
   trending_min_likes: "1000",
@@ -921,6 +931,50 @@ export default function MonitorSettingsPage() {
             <Input label="App Secret" type="password" placeholder="..."
               value={settings.feishu_app_secret}
               onValueChange={(v) => set("feishu_app_secret", v)} />
+          </div>
+        </CardBody>
+      </Card>
+
+      {/* 商品图历史 → 飞书表 + 七牛云 */}
+      <Card>
+        <CardHeader className="font-semibold">商品图历史 · 七牛云 + 飞书表</CardHeader>
+        <CardBody className="space-y-4">
+          <p className="text-xs text-default-400 leading-relaxed">
+            商品图工具生成的图片会同步上传到七牛云（拿到公网 URL），然后可批量同步到飞书多维表格。
+            飞书 App Token 与上方热门表共用，但 Table ID 必须**新建一个独立 sheet**（首次同步会自动建字段）。
+          </p>
+
+          <div>
+            <p className="text-sm font-medium text-default-700 mb-2">飞书图像表 Table ID</p>
+            <Input
+              label="Image Table ID"
+              placeholder="tbl... （在飞书多维表格新建一张表，URL 末尾的 tbl... 即是）"
+              value={settings.feishu_bitable_image_table_id}
+              onValueChange={(v) => set("feishu_bitable_image_table_id", v)}
+              description="跟上面热门帖子表是同一个 App Token，不同 Table ID。"
+            />
+          </div>
+
+          <div>
+            <p className="text-sm font-medium text-default-700 mb-2">七牛云对象存储</p>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Access Key" placeholder="七牛 AK"
+                value={settings.qiniu_access_key}
+                onValueChange={(v) => set("qiniu_access_key", v)} />
+              <Input label="Secret Key" type="password" placeholder="七牛 SK"
+                value={settings.qiniu_secret_key}
+                onValueChange={(v) => set("qiniu_secret_key", v)} />
+              <Input label="Bucket" placeholder="存储空间名称（例：my-bucket）"
+                value={settings.qiniu_bucket}
+                onValueChange={(v) => set("qiniu_bucket", v)} />
+              <Input label="访问域名" placeholder="https://cdn.example.com"
+                value={settings.qiniu_domain}
+                onValueChange={(v) => set("qiniu_domain", v)}
+                description="bucket 绑定的 CDN 或测试域名，结尾不带 /" />
+            </div>
+            <p className="text-xs text-default-400 mt-2 leading-relaxed">
+              不配七牛云也能用商品图工具，只是图片不会上传，历史记录里没有 URL，也无法同步飞书。
+            </p>
           </div>
         </CardBody>
       </Card>

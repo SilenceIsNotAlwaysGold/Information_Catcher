@@ -10,6 +10,7 @@ import { Chip } from "@nextui-org/chip";
 import {
   Image as ImageIcon, Sparkles, Settings as SettingsIcon, Download,
   Wand2, AlertCircle, Upload, X, ChevronDown, ChevronUp, Check, Link2,
+  History as HistoryIcon, Send, Trash2, ExternalLink,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useMe } from "@/lib/useApi";
@@ -317,6 +318,97 @@ export default function ProductImagePage() {
   const setItemsAndCache = (v: GenItem[]) => { userCache.items = v; setItems(v); };
   const setGenErrorAndCache = (v: string) => { userCache.error = v; setGenError(v); };
 
+  // ── 历史记录 ────────────────────────────────────────────────────────────
+  type HistoryItem = {
+    id: number;
+    user_id?: number | null;
+    prompt: string;
+    size?: string; model?: string;
+    set_idx: number; in_set_idx: number;
+    qiniu_url: string;
+    source_post_url?: string;
+    source_post_title?: string;
+    used_reference?: number;
+    synced_to_bitable?: number;
+    created_at: string;
+  };
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [qiniuConfigured, setQiniuConfigured] = useState(false);
+  const [historySelected, setHistorySelected] = useState<Set<number>>(new Set());
+  const [historySyncing, setHistorySyncing] = useState(false);
+
+  const reloadHistory = async () => {
+    if (!token) return;
+    setHistoryLoading(true);
+    try {
+      const r = await fetch(API("/history?limit=50"), { headers });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && Array.isArray(data?.records)) {
+        setHistory(data.records);
+        setQiniuConfigured(!!data.qiniu_configured);
+      }
+    } catch {} finally {
+      setHistoryLoading(false);
+    }
+  };
+  useEffect(() => { reloadHistory(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [token]);
+
+  const toggleHistorySelected = (id: number) => {
+    setHistorySelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const deleteHistory = async (id: number) => {
+    if (!confirm("确认删除这条历史记录？（七牛云上的图不会被删）")) return;
+    try {
+      const r = await fetch(API(`/history/${id}`), { method: "DELETE", headers });
+      const data = await r.json().catch(() => ({}));
+      if (data?.ok) {
+        toastOk("已删除");
+        setHistory((prev) => prev.filter((h) => h.id !== id));
+        setHistorySelected((prev) => { const n = new Set(prev); n.delete(id); return n; });
+      } else {
+        toastErr("删除失败");
+      }
+    } catch (e: any) { toastErr(`删除异常：${e?.message || e}`); }
+  };
+
+  const syncSelectedToBitable = async () => {
+    const ids = Array.from(historySelected);
+    if (ids.length === 0) { toastErr("请先勾选要同步的记录"); return; }
+    setHistorySyncing(true);
+    try {
+      const r = await fetch(API("/history/sync-bitable"), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ record_ids: ids }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || data?.error) {
+        toastErr(`同步失败：${data?.error || `HTTP ${r.status}`}`);
+        return;
+      }
+      const results: Array<{ id: number; ok: boolean; reason?: string }> = data?.results || [];
+      const okCount = results.filter((x) => x.ok).length;
+      const failCount = results.length - okCount;
+      if (okCount > 0) toastOk(`同步成功 ${okCount} 条${failCount ? `，失败 ${failCount}` : ""}`);
+      if (failCount > 0) {
+        const sample = results.find((x) => !x.ok);
+        if (sample) toastErr(`部分失败：${sample.reason || "未知"}`);
+      }
+      setHistorySelected(new Set());
+      reloadHistory();
+    } catch (e: any) {
+      toastErr(`同步异常：${e?.message || e}`);
+    } finally {
+      setHistorySyncing(false);
+    }
+  };
+
   const canGenerate = !!cfg.has_key && !!cfg.base_url && !!cfg.model && !generating;
 
   // 前端分批：count > 4 时拆成多次请求，每批 4 张，增量追加显示。
@@ -341,6 +433,11 @@ export default function ProductImagePage() {
           negative_prompt: negativePrompt.trim(),
           n: take,
           size: genSize || undefined,
+          // 套图维度：让后端按 set/in-set 编号写入历史记录
+          images_per_set: imagesPerSet,
+          start_index: accumulated.length,
+          // 来源（如果是从作品 URL 加载文案生成的）
+          source_post_url: postUrlInput.trim() || undefined,
         };
         if (refImageB64) body.reference_image_b64 = refImageB64;
 
@@ -381,6 +478,7 @@ export default function ProductImagePage() {
         remaining -= take;
       }
       toastOk(`生成成功（${accumulated.length} 张）`);
+      reloadHistory();
     } catch (e: any) {
       if (accumulated.length > 0) {
         setGenErrorAndCache(`已生成 ${accumulated.length}/${count} 张，中断：${e?.message || e}`);
@@ -1051,6 +1149,145 @@ export default function ProductImagePage() {
           </CardBody>
         </Card>
       </div>
+
+      {/* ── 历史生成记录 ────────────────────────────────────────────────── */}
+      <Card>
+        <CardHeader className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <HistoryIcon size={18} className="text-primary" />
+            <span className="font-semibold">历史生成记录</span>
+            {history.length > 0 && (
+              <Chip size="sm" variant="flat">{history.length} 条</Chip>
+            )}
+            {!qiniuConfigured && (
+              <Chip size="sm" color="warning" variant="flat">
+                七牛云未配置，图片仅保留 Prompt
+              </Chip>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {historySelected.size > 0 && (
+              <Chip size="sm" color="primary" variant="flat">
+                已选 {historySelected.size}
+              </Chip>
+            )}
+            <Button
+              size="sm"
+              color="primary"
+              variant="flat"
+              startContent={<Send size={14} />}
+              onPress={syncSelectedToBitable}
+              isLoading={historySyncing}
+              isDisabled={historySelected.size === 0 || historySyncing}
+            >
+              同步飞书
+            </Button>
+            <Button
+              size="sm"
+              variant="light"
+              onPress={reloadHistory}
+              isLoading={historyLoading}
+            >
+              刷新
+            </Button>
+          </div>
+        </CardHeader>
+        <CardBody>
+          {historyLoading && history.length === 0 ? (
+            <div className="flex items-center justify-center py-10">
+              <Spinner size="sm" />
+            </div>
+          ) : history.length === 0 ? (
+            <EmptyState
+              icon={HistoryIcon}
+              title="还没有生成记录"
+              hint="生成的图片会自动写入历史，配置七牛云后图片会上传并可同步到飞书表格。"
+            />
+          ) : (
+            <div className="space-y-2">
+              {history.map((h) => {
+                const checked = historySelected.has(h.id);
+                return (
+                  <div
+                    key={h.id}
+                    className={`flex items-start gap-3 rounded-lg border p-2.5 transition-colors ${
+                      checked ? "border-primary bg-primary/5" : "border-divider"
+                    }`}
+                  >
+                    {/* 多选 */}
+                    <input
+                      type="checkbox"
+                      className="mt-2 cursor-pointer"
+                      checked={checked}
+                      onChange={() => toggleHistorySelected(h.id)}
+                      aria-label={`选择 #${h.id}`}
+                    />
+                    {/* 缩略图 */}
+                    <div className="shrink-0 w-16 h-16 rounded overflow-hidden bg-default-100 flex items-center justify-center">
+                      {h.qiniu_url ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={h.qiniu_url} alt={`#${h.id}`} className="w-full h-full object-cover" />
+                      ) : (
+                        <ImageIcon size={20} className="text-default-300" />
+                      )}
+                    </div>
+                    {/* prompt + meta */}
+                    <div className="flex-1 min-w-0 space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs text-default-500">
+                          套 {h.set_idx}-{h.in_set_idx}
+                        </span>
+                        {h.size && <span className="text-xs text-default-400">· {h.size}</span>}
+                        {h.used_reference ? (
+                          <Chip size="sm" variant="flat" color="default">参考图</Chip>
+                        ) : null}
+                        {h.synced_to_bitable ? (
+                          <Chip size="sm" variant="flat" color="success" startContent={<Check size={11} />}>
+                            已同步飞书
+                          </Chip>
+                        ) : null}
+                        <span className="text-xs text-default-400 ml-auto">{h.created_at}</span>
+                      </div>
+                      <p className="text-xs text-default-600 line-clamp-2 leading-relaxed">
+                        {h.prompt}
+                      </p>
+                      {h.source_post_title && (
+                        <p className="text-xs text-default-400 truncate">
+                          来源：{h.source_post_title}
+                        </p>
+                      )}
+                    </div>
+                    {/* 操作 */}
+                    <div className="flex items-center gap-1 shrink-0">
+                      {h.qiniu_url && (
+                        <Button
+                          size="sm"
+                          variant="light"
+                          isIconOnly
+                          aria-label="打开 URL"
+                          onPress={() => window.open(h.qiniu_url, "_blank")}
+                        >
+                          <ExternalLink size={14} />
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="light"
+                        color="danger"
+                        isIconOnly
+                        aria-label="删除"
+                        onPress={() => deleteHistory(h.id)}
+                      >
+                        <Trash2 size={14} />
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </CardBody>
+      </Card>
     </div>
   );
 }

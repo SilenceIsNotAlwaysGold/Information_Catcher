@@ -25,6 +25,8 @@ from .auth import get_current_user
 from ..services import monitor_db
 from ..services.platforms import get_platform, detect_platform
 from ..services import monitor_fetcher
+from ..services import qiniu_uploader
+from ..services import feishu_bitable
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +57,22 @@ class GenerateRequest(BaseModel):
     n: Optional[int] = 1
     size: Optional[str] = None
     reference_image_b64: Optional[str] = None  # base64 编码的参考图
+    # 套图维度（用于历史记录编号）。前端分批请求时通过 start_index 累加。
+    images_per_set: Optional[int] = 1
+    start_index: Optional[int] = 0          # 这一批是全局第几张开始（0-indexed）
+    # 来源标记：如果 prompt 是从某个小红书/抖音作品 URL 拉来的
+    source_post_url: Optional[str] = ""
+    source_post_title: Optional[str] = ""
 
 
 class FetchPostCoverRequest(BaseModel):
     """从小红书/抖音 URL 拉取封面图（作为生成参考）。"""
     url: str
+
+
+class SyncImageBitableRequest(BaseModel):
+    """把若干历史记录同步到飞书多维表格的图像专用 sheet。"""
+    record_ids: List[int]
 
 
 # ── Endpoints ───────────────────────────────────────────────────────────────
@@ -365,6 +378,15 @@ async def generate_image(
         batches.append(take)
         remaining -= take
 
+    # 历史记录 + 七牛上传上下文
+    user_id = current_user.get("user_id") if current_user else None
+    images_per_set = max(1, int(req.images_per_set or 1))
+    start_index = max(0, int(req.start_index or 0))
+    used_reference = img_bytes is not None
+    src_url = (req.source_post_url or "").strip()
+    src_title = (req.source_post_title or "").strip()
+    qiniu_ready = await qiniu_uploader.is_configured()
+
     all_images: List[dict] = []
     timeout = httpx.Timeout(180.0, connect=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -389,9 +411,42 @@ async def generate_image(
                         "error": err.get("error"),
                     }
                 return err
+
+            # 每张：上传七牛拿 URL（如配置了）+ 写历史记录。
+            # 上传失败不影响生成结果返回（用户仍能下载 b64），只是没 URL。
+            for offset, img in enumerate(images or []):
+                global_idx = start_index + len(all_images) + offset
+                set_idx = global_idx // images_per_set + 1
+                in_set_idx = global_idx % images_per_set + 1
+
+                qiniu_url = ""
+                if qiniu_ready and img.get("b64"):
+                    url, q_err = await qiniu_uploader.upload_b64(img["b64"], user_id=user_id)
+                    if url:
+                        qiniu_url = url
+                        img["url"] = url  # 把公网 URL 也带回前端，方便预览/复制
+                    elif q_err:
+                        logger.warning(f"[image_gen] qiniu upload failed (set {set_idx}-{in_set_idx}): {q_err}")
+
+                try:
+                    await monitor_db.add_image_history(
+                        user_id=user_id, prompt=prompt,
+                        negative_prompt=neg, size=size, model=model,
+                        set_idx=set_idx, in_set_idx=in_set_idx,
+                        qiniu_url=qiniu_url,
+                        source_post_url=src_url, source_post_title=src_title,
+                        used_reference=used_reference,
+                    )
+                except Exception as e:
+                    logger.warning(f"[image_gen] write history failed: {e}")
+
             all_images.extend(images or [])
 
-    return {"images": all_images, "requested": n}
+    return {
+        "images": all_images,
+        "requested": n,
+        "qiniu_uploaded": qiniu_ready,  # 让前端判断是否要在历史里显示"已同步七牛"
+    }
 
 
 @router.post("/fetch-post-cover", summary="从小红书/抖音作品 URL 拉取封面图作为参考")
@@ -454,3 +509,111 @@ async def fetch_post_cover(
         "platform_label": plat.label,
         "post_id": info["post_id"],
     }
+
+
+# ── 历史记录 ─────────────────────────────────────────────────────────────────
+
+@router.get("/history", summary="商品图生成历史记录")
+async def list_history(
+    limit: int = 100, offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """admin 看全部，普通用户只看自己的。"""
+    user_id = current_user.get("user_id") if current_user else None
+    role = (current_user or {}).get("role") or "user"
+    scope_uid = None if role == "admin" else user_id
+    rows = await monitor_db.list_image_history(
+        user_id=scope_uid,
+        limit=max(1, min(limit, 500)),
+        offset=max(0, offset),
+    )
+    qiniu_ready = await qiniu_uploader.is_configured()
+    return {"records": rows, "qiniu_configured": qiniu_ready}
+
+
+@router.delete("/history/{record_id}", summary="删除历史记录")
+async def delete_history(
+    record_id: int,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    user_id = current_user.get("user_id") if current_user else None
+    role = (current_user or {}).get("role") or "user"
+    # admin 传 None 可删任何，普通用户只能删自己的
+    scope_uid = None if role == "admin" else user_id
+    ok = await monitor_db.delete_image_history(record_id, user_id=scope_uid)
+    return {"ok": ok}
+
+
+@router.post("/history/sync-bitable", summary="把历史记录同步到飞书多维表格")
+async def sync_history_to_bitable(
+    req: SyncImageBitableRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    if not req.record_ids:
+        return {"error": "未选中任何记录", "status": 400}
+
+    settings = await monitor_db.get_all_settings()
+    app_id     = settings.get("feishu_app_id", "")
+    app_secret = settings.get("feishu_app_secret", "")
+    app_token  = settings.get("feishu_bitable_app_token", "")
+    table_id   = settings.get("feishu_bitable_image_table_id", "")
+    if not all([app_id, app_secret, app_token, table_id]):
+        return {
+            "error": "飞书图像表未配置完整（需 app_id / app_secret / app_token / image_table_id）",
+            "status": 400,
+        }
+
+    # 第一次同步时自动创建表头字段
+    try:
+        await feishu_bitable.ensure_fields(
+            app_id, app_secret, app_token, table_id,
+            fields={
+                "Prompt": "text", "图片": "url",
+                "尺寸": "text", "模型": "text",
+                "套号": "number", "套内序号": "number",
+                "来源链接": "url", "来源标题": "text",
+                "生成时间": "text",
+            },
+        )
+    except Exception as e:
+        return {"error": f"准备表格字段失败：{e}", "status": 400}
+
+    user_id = current_user.get("user_id") if current_user else None
+    role = (current_user or {}).get("role") or "user"
+    scope_uid = None if role == "admin" else user_id
+
+    results = []
+    for rid in req.record_ids:
+        rec = await monitor_db.get_image_history(rid)
+        if not rec:
+            results.append({"id": rid, "ok": False, "reason": "记录不存在"})
+            continue
+        # 普通用户不能同步别人的
+        if scope_uid is not None and rec.get("user_id") != scope_uid:
+            results.append({"id": rid, "ok": False, "reason": "无权同步该记录"})
+            continue
+        url = (rec.get("qiniu_url") or "").strip()
+        if not url:
+            results.append({"id": rid, "ok": False, "reason": "图片未上传到七牛（先配七牛再生成）"})
+            continue
+        try:
+            src_url = (rec.get("source_post_url") or "").strip()
+            await feishu_bitable.add_record(
+                app_id, app_secret, app_token, table_id,
+                fields={
+                    "Prompt": rec.get("prompt", ""),
+                    "图片": {"link": url, "text": url},
+                    "尺寸": rec.get("size", ""),
+                    "模型": rec.get("model", ""),
+                    "套号": rec.get("set_idx", 1),
+                    "套内序号": rec.get("in_set_idx", 1),
+                    "来源链接": ({"link": src_url, "text": src_url} if src_url else ""),
+                    "来源标题": rec.get("source_post_title", ""),
+                    "生成时间": rec.get("created_at", ""),
+                },
+            )
+            await monitor_db.mark_image_history_synced(rid)
+            results.append({"id": rid, "ok": True})
+        except Exception as e:
+            results.append({"id": rid, "ok": False, "reason": str(e)})
+    return {"results": results}
