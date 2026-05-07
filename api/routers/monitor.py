@@ -946,6 +946,8 @@ async def qr_login_cancel(session_id: str, _: dict = Depends(get_current_user)):
 _ADMIN_ONLY_SETTING_KEYS = {
     "ai_base_url", "ai_api_key", "ai_model", "ai_rewrite_prompt",
     "feishu_app_id", "feishu_app_secret",
+    "feishu_oauth_redirect_uri", "feishu_bitable_root_folder_token",
+    "feishu_admin_open_id",
     "feishu_bitable_image_table_id",
     "qiniu_access_key", "qiniu_secret_key", "qiniu_bucket", "qiniu_domain",
     "public_url_prefix",
@@ -996,6 +998,8 @@ async def update_settings(
         "daily_report_time",
         "ai_base_url", "ai_api_key", "ai_model", "ai_rewrite_prompt",
         "feishu_app_id", "feishu_app_secret",
+        "feishu_oauth_redirect_uri", "feishu_bitable_root_folder_token",
+        "feishu_admin_open_id",
         "feishu_bitable_app_token", "feishu_bitable_table_id",
         "feishu_bitable_image_table_id",
         "qiniu_access_key", "qiniu_secret_key", "qiniu_bucket", "qiniu_domain",
@@ -1382,32 +1386,41 @@ async def lock_rewrite_variant(
 @router.post("/trending/sync-bitable", summary="把选中的热门帖子同步到飞书多维表格")
 async def sync_trending_to_bitable(
     req: SyncBitableRequest,
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     if not req.note_ids:
         raise HTTPException(status_code=400, detail="未选中任何帖子")
 
-    settings = await db.get_all_settings()
-    bitable_app_id     = settings.get("feishu_app_id", "")
-    bitable_app_secret = settings.get("feishu_app_secret", "")
-    bitable_app_token  = settings.get("feishu_bitable_app_token", "")
-    bitable_table_id   = settings.get("feishu_bitable_table_id", "")
-    if not all([bitable_app_id, bitable_app_secret, bitable_app_token, bitable_table_id]):
-        raise HTTPException(status_code=400, detail="飞书多维表格未配置完整")
-
-    # First make sure all required columns exist in the target Bitable. Any
-    # missing field is created automatically with the right type.
-    try:
-        await feishu_bitable.ensure_fields(
-            bitable_app_id, bitable_app_secret, bitable_app_token, bitable_table_id,
-            fields={
-                "关键词": "text",  "标题": "text",  "原文": "text",  "改写文案": "text",
-                "点赞数": "number", "收藏数": "number",
-                "帖子链接": "url",  "作者": "text",
-            },
+    # 优先写用户专属表（OAuth 绑定后自动建），缺失时 fallback 到全局表
+    from ..services.feishu import bitable as feishu_bitable_v2
+    target = await feishu_bitable_v2.resolve_target(current_user, kind="trending")
+    if target["source"] == "none":
+        raise HTTPException(
+            status_code=400,
+            detail="未找到飞书热门表。请先「绑定飞书」让系统自动建表，"
+                   "或让管理员配置 feishu_bitable_app_token + feishu_bitable_table_id 作为兜底。",
         )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"准备表格字段失败: {e}")
+    bitable_app_token = target["app_token"]
+    bitable_table_id = target["table_id"]
+
+    # 全局表第一次同步时自动建字段；用户专属表 provisioning 时已建好。
+    if target["source"] == "global":
+        settings = await db.get_all_settings()
+        bitable_app_id     = settings.get("feishu_app_id", "")
+        bitable_app_secret = settings.get("feishu_app_secret", "")
+        if not (bitable_app_id and bitable_app_secret):
+            raise HTTPException(status_code=400, detail="飞书 app_id / app_secret 未配置")
+        try:
+            await feishu_bitable.ensure_fields(
+                bitable_app_id, bitable_app_secret, bitable_app_token, bitable_table_id,
+                fields={
+                    "关键词": "text",  "标题": "text",  "原文": "text",  "改写文案": "text",
+                    "点赞数": "number", "收藏数": "number",
+                    "帖子链接": "url",  "作者": "text",
+                },
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"准备表格字段失败: {e}")
 
     results = []
     for nid in req.note_ids:
@@ -1424,8 +1437,7 @@ async def sync_trending_to_bitable(
             continue
         try:
             note_url = p.get("note_url", "")
-            await feishu_bitable.add_record(
-                bitable_app_id, bitable_app_secret,
+            await feishu_bitable_v2.add_record(
                 bitable_app_token, bitable_table_id,
                 fields={
                     "关键词": p.get("keyword", ""),
@@ -1434,7 +1446,6 @@ async def sync_trending_to_bitable(
                     "改写文案": rewritten,
                     "点赞数": p.get("liked_count", 0),
                     "收藏数": p.get("collected_count", 0),
-                    # Feishu URL field expects {"link": "...", "text": "..."}
                     "帖子链接": {"link": note_url, "text": note_url} if note_url else "",
                     "作者": p.get("author", ""),
                 },
@@ -1443,6 +1454,6 @@ async def sync_trending_to_bitable(
             results.append({"note_id": nid, "ok": True})
         except Exception as e:
             results.append({"note_id": nid, "ok": False, "reason": str(e)})
-    return {"results": results}
+    return {"results": results, "target": target["source"]}
 
 

@@ -21,6 +21,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
 import { PromptTemplatesCard } from "@/components/PromptTemplatesCard";
 import { MonitorGroupsCard } from "@/components/MonitorGroupsCard";
+import { FeishuBindingCard } from "@/components/FeishuBindingCard";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 
@@ -63,6 +64,9 @@ type Settings = {
   ai_rewrite_prompt: string;
   feishu_app_id: string;
   feishu_app_secret: string;
+  feishu_oauth_redirect_uri: string;
+  feishu_bitable_root_folder_token: string;
+  feishu_admin_open_id: string;
   feishu_bitable_app_token: string;
   feishu_bitable_table_id: string;
   feishu_bitable_image_table_id: string;
@@ -97,6 +101,9 @@ const DEFAULTS: Settings = {
   ai_rewrite_prompt: "你是小红书爆款文案创作者，请将以下内容改写为更吸引人的小红书风格文案，保持原意但语气更活泼、更有共鸣感，适当加入emoji。原文：\n\n{content}",
   feishu_app_id: "",
   feishu_app_secret: "",
+  feishu_oauth_redirect_uri: "",
+  feishu_bitable_root_folder_token: "",
+  feishu_admin_open_id: "",
   feishu_bitable_app_token: "",
   feishu_bitable_table_id: "",
   feishu_bitable_image_table_id: "",
@@ -420,6 +427,9 @@ export default function MonitorSettingsPage() {
         ai_model: settings.ai_model,
         feishu_app_id: settings.feishu_app_id,
         feishu_app_secret: settings.feishu_app_secret,
+        feishu_oauth_redirect_uri: settings.feishu_oauth_redirect_uri,
+        feishu_bitable_root_folder_token: settings.feishu_bitable_root_folder_token,
+        feishu_admin_open_id: settings.feishu_admin_open_id,
         trending_account_ids: settings.trending_account_ids,
       });
     }
@@ -653,9 +663,12 @@ export default function MonitorSettingsPage() {
   // ── 全局 tab（个人设置）：webhook、告警阈值、飞书多维表格、热门、Prompt ─
   const renderGlobalPanel = () => (
     <div className="space-y-6">
-      {/* Push Channels */}
+      {/* 飞书 OAuth 绑定（推荐，自动建群 + 多维表格） */}
+      <FeishuBindingCard />
+
+      {/* Push Channels（兜底 webhook，未绑定飞书时使用） */}
       <Card>
-        <CardHeader className="font-semibold">推送渠道</CardHeader>
+        <CardHeader className="font-semibold">推送渠道（兜底）</CardHeader>
         <CardBody className="space-y-4">
           <Input
             label="企业微信 Webhook URL"
@@ -920,12 +933,15 @@ export default function MonitorSettingsPage() {
         </CardBody>
       </Card>
 
-      {/* Feishu App credentials */}
+      {/* Feishu App credentials + OAuth 自动绑定 */}
       <Card>
-        <CardHeader className="font-semibold">飞书应用凭据</CardHeader>
+        <CardHeader className="font-semibold">飞书应用凭据 & OAuth</CardHeader>
         <CardBody className="space-y-4">
-          <p className="text-xs text-default-400">
-            飞书应用 App ID / Secret 供全平台用户同步多维表格时使用。
+          <p className="text-xs text-default-400 leading-relaxed">
+            飞书企业自建应用的 App ID / Secret，外加 OAuth 回调地址。配置后用户可在「设置」页一键扫码绑定，
+            系统自动为每位用户建群 + 多维表格，无需手动配 webhook。
+            <br />
+            必须在飞书开放平台开通：<code>im:chat / im:message:send_as_bot / bitable:app / drive:drive / contact:user.id:readonly</code>。
           </p>
           <div className="grid grid-cols-2 gap-3">
             <Input label="App ID" placeholder="cli_..." value={settings.feishu_app_id}
@@ -934,6 +950,28 @@ export default function MonitorSettingsPage() {
               value={settings.feishu_app_secret}
               onValueChange={(v) => set("feishu_app_secret", v)} />
           </div>
+          <Input
+            label="OAuth 回调地址"
+            placeholder="https://你的域名/api/feishu/oauth/callback"
+            value={settings.feishu_oauth_redirect_uri}
+            onValueChange={(v) => set("feishu_oauth_redirect_uri", v)}
+            description="必须与飞书开放平台「重定向 URL」白名单完全一致（含协议、端口）。"
+          />
+          <Input
+            label="多维表格根文件夹 Token"
+            placeholder="fldcn... （飞书云空间随便建一个文件夹，URL 末尾的 fldcn... 即是）"
+            value={settings.feishu_bitable_root_folder_token}
+            onValueChange={(v) => set("feishu_bitable_root_folder_token", v)}
+            description="所有用户的专属多维表格都会建在该文件夹下，方便统一管理和分享。"
+          />
+          <Input
+            label="Admin open_id（自动同步，只读）"
+            placeholder="ou_xxxxx （admin 完成绑定后自动写入，普通用户建群时会拉 admin 进群）"
+            value={settings.feishu_admin_open_id}
+            onValueChange={(v) => set("feishu_admin_open_id", v)}
+            description="admin 用户首次「绑定飞书」成功后，open_id 会自动缓存到这里。手动改写仅用于异常恢复。"
+            isReadOnly={false}
+          />
         </CardBody>
       </Card>
 

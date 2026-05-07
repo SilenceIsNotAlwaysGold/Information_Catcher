@@ -99,6 +99,20 @@ def init_user_db():
     _ensure_column(cursor, "users", "mp_auth_appmsg_token", "TEXT DEFAULT ''")
     _ensure_column(cursor, "users", "mp_auth_at",           "TEXT")
 
+    # 飞书 OAuth 自动绑定（每个用户独立的群 + 多维表格）
+    # access_token 约 2h 过期，refresh_token 约 30 天；30 天内静默 refresh，超期需重新 OAuth
+    _ensure_column(cursor, "users", "feishu_open_id",                   "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "feishu_user_access_token",         "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "feishu_refresh_token",             "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "feishu_token_expires_at",          "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "feishu_chat_id",                   "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "feishu_bitable_app_token",         "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "feishu_bitable_image_table_id",    "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "feishu_bitable_trending_table_id", "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "feishu_bound_at",                  "TEXT DEFAULT ''")
+    # 飞书显示名（绑定时从 user_info 拉一次缓存，前端展示用）
+    _ensure_column(cursor, "users", "feishu_name",                      "TEXT DEFAULT ''")
+
     # email 唯一索引（NULL 允许多个）
     cursor.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email "
@@ -275,7 +289,17 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "       COALESCE(mp_auth_key,'')          AS mp_auth_key, "
         "       COALESCE(mp_auth_pass_ticket,'')  AS mp_auth_pass_ticket, "
         "       COALESCE(mp_auth_appmsg_token,'') AS mp_auth_appmsg_token, "
-        "       mp_auth_at "
+        "       mp_auth_at, "
+        "       COALESCE(feishu_open_id,'')                   AS feishu_open_id, "
+        "       COALESCE(feishu_user_access_token,'')         AS feishu_user_access_token, "
+        "       COALESCE(feishu_refresh_token,'')             AS feishu_refresh_token, "
+        "       COALESCE(feishu_token_expires_at,'')          AS feishu_token_expires_at, "
+        "       COALESCE(feishu_chat_id,'')                   AS feishu_chat_id, "
+        "       COALESCE(feishu_bitable_app_token,'')         AS feishu_bitable_app_token, "
+        "       COALESCE(feishu_bitable_image_table_id,'')    AS feishu_bitable_image_table_id, "
+        "       COALESCE(feishu_bitable_trending_table_id,'') AS feishu_bitable_trending_table_id, "
+        "       COALESCE(feishu_bound_at,'')                  AS feishu_bound_at, "
+        "       COALESCE(feishu_name,'')                      AS feishu_name "
         "FROM users WHERE id = ?",
         (user_id,)
     )
@@ -299,6 +323,16 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "mp_auth_pass_ticket":  row["mp_auth_pass_ticket"] or "",
         "mp_auth_appmsg_token": row["mp_auth_appmsg_token"] or "",
         "mp_auth_at": row["mp_auth_at"],
+        "feishu_open_id":                   row["feishu_open_id"] or "",
+        "feishu_user_access_token":         row["feishu_user_access_token"] or "",
+        "feishu_refresh_token":             row["feishu_refresh_token"] or "",
+        "feishu_token_expires_at":          row["feishu_token_expires_at"] or "",
+        "feishu_chat_id":                   row["feishu_chat_id"] or "",
+        "feishu_bitable_app_token":         row["feishu_bitable_app_token"] or "",
+        "feishu_bitable_image_table_id":    row["feishu_bitable_image_table_id"] or "",
+        "feishu_bitable_trending_table_id": row["feishu_bitable_trending_table_id"] or "",
+        "feishu_bound_at":                  row["feishu_bound_at"] or "",
+        "feishu_name":                      row["feishu_name"] or "",
     }
 
 
@@ -383,6 +417,62 @@ def update_user_admin(user_id: int, **fields) -> bool:
     conn.commit()
     conn.close()
     return True
+
+
+# ── 飞书 OAuth 绑定 ─────────────────────────────────────────────────────────
+
+# 允许 update_user_feishu 写入的字段白名单。chat_id / bitable_* 是 provisioning
+# 阶段才会回填的字段，OAuth 回调阶段不会传。
+_FEISHU_FIELDS = {
+    "feishu_open_id",
+    "feishu_user_access_token",
+    "feishu_refresh_token",
+    "feishu_token_expires_at",
+    "feishu_chat_id",
+    "feishu_bitable_app_token",
+    "feishu_bitable_image_table_id",
+    "feishu_bitable_trending_table_id",
+    "feishu_bound_at",
+    "feishu_name",
+}
+
+
+def update_user_feishu(user_id: int, **fields) -> bool:
+    """更新某个用户的飞书绑定字段（OAuth 回调 / provisioning / 解绑共用）。
+
+    传 None 不更新该字段；传空字符串则清空。
+    """
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in _FEISHU_FIELDS and v is not None:
+            sets.append(f"{k}=?")
+            vals.append(v)
+    if not sets:
+        return False
+    vals.append(user_id)
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    cur.execute(f"UPDATE users SET {','.join(sets)} WHERE id=?", vals)
+    conn.commit()
+    conn.close()
+    return True
+
+
+def clear_user_feishu(user_id: int) -> None:
+    """解绑飞书：清掉所有 feishu_* 字段（webhook_url 不动，作为兜底保留）。"""
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET "
+        "feishu_open_id='', feishu_user_access_token='', feishu_refresh_token='', "
+        "feishu_token_expires_at='', feishu_chat_id='', "
+        "feishu_bitable_app_token='', feishu_bitable_image_table_id='', "
+        "feishu_bitable_trending_table_id='', feishu_bound_at='', feishu_name='' "
+        "WHERE id=?",
+        (user_id,),
+    )
+    conn.commit()
+    conn.close()
 
 
 def create_user(username: str, password: str) -> Optional[dict]:

@@ -147,6 +147,9 @@ class UpdateSettingsRequest(BaseModel):
     ai_rewrite_prompt: Optional[str] = None
     feishu_app_id: Optional[str] = None
     feishu_app_secret: Optional[str] = None
+    feishu_oauth_redirect_uri: Optional[str] = None
+    feishu_bitable_root_folder_token: Optional[str] = None
+    feishu_admin_open_id: Optional[str] = None
     feishu_bitable_app_token: Optional[str] = None
     feishu_bitable_table_id: Optional[str] = None
     feishu_bitable_image_table_id: Optional[str] = None
