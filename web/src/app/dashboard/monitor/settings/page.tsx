@@ -67,6 +67,7 @@ type Settings = {
   feishu_oauth_redirect_uri: string;
   feishu_bitable_root_folder_token: string;
   feishu_admin_open_id: string;
+  feishu_invite_url: string;
   feishu_bitable_app_token: string;
   feishu_bitable_table_id: string;
   feishu_bitable_image_table_id: string;
@@ -104,6 +105,7 @@ const DEFAULTS: Settings = {
   feishu_oauth_redirect_uri: "",
   feishu_bitable_root_folder_token: "",
   feishu_admin_open_id: "",
+  feishu_invite_url: "",
   feishu_bitable_app_token: "",
   feishu_bitable_table_id: "",
   feishu_bitable_image_table_id: "",
@@ -430,6 +432,7 @@ export default function MonitorSettingsPage() {
         feishu_oauth_redirect_uri: settings.feishu_oauth_redirect_uri,
         feishu_bitable_root_folder_token: settings.feishu_bitable_root_folder_token,
         feishu_admin_open_id: settings.feishu_admin_open_id,
+        feishu_invite_url: settings.feishu_invite_url,
         trending_account_ids: settings.trending_account_ids,
       });
     }
@@ -971,6 +974,13 @@ export default function MonitorSettingsPage() {
             onValueChange={(v) => set("feishu_admin_open_id", v)}
             description="admin 用户首次「绑定飞书」成功后，open_id 会自动缓存到这里。手动改写仅用于异常恢复。"
             isReadOnly={false}
+          />
+          <Input
+            label="企业邀请链接"
+            placeholder="https://applink.feishu.cn/..."
+            value={settings.feishu_invite_url}
+            onValueChange={(v) => set("feishu_invite_url", v)}
+            description="飞书后台 → 通讯录 → 邀请成员 → 复制「长效邀请链接」。前端会渲染成二维码引导外部用户先扫码加入企业再授权。不填则不显示二维码。"
           />
         </CardBody>
       </Card>

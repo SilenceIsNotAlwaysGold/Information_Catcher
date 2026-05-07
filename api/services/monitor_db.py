@@ -88,6 +88,9 @@ INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_bitable_image_table_id', 
 INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_oauth_redirect_uri', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_bitable_root_folder_token', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_admin_open_id', '');
+-- 飞书企业邀请链接：自建应用只允许应用所属企业的成员授权，外部用户需先扫码
+-- 加入企业。admin 在飞书后台 → 通讯录管理 → 邀请成员 复制长效邀请链接到这里。
+INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_invite_url', '');
 -- 七牛云对象存储：用于商品图上传，得到公网 URL 后才能往飞书写
 INSERT OR IGNORE INTO monitor_settings VALUES ('qiniu_access_key', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('qiniu_secret_key', '');
@@ -439,6 +442,58 @@ async def _migrate_monitor_posts_unique(db):
     """)
 
 
+async def _migrate_trending_posts_unique(db):
+    """trending_posts.note_id 全局 UNIQUE → (note_id, user_id) 复合 UNIQUE。
+
+    跟 monitor_posts 同款：SQLite 不能原地改列级 UNIQUE，重建一次。
+    """
+    row = await (await db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='trending_posts'"
+    )).fetchone()
+    if not row:
+        return
+    sql_text = (row[0] or "")
+    if "note_id TEXT NOT NULL UNIQUE" not in sql_text:
+        # 已经迁移过
+        return
+    cols = await _table_columns(db, "trending_posts")
+    cols_csv = ", ".join(cols)
+    await db.executescript(f"""
+        DROP TABLE IF EXISTS trending_posts_new;
+        CREATE TABLE trending_posts_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            note_id TEXT NOT NULL,
+            title TEXT,
+            desc_text TEXT,
+            note_url TEXT,
+            xsec_token TEXT DEFAULT '',
+            liked_count INTEGER DEFAULT 0,
+            collected_count INTEGER DEFAULT 0,
+            comment_count INTEGER DEFAULT 0,
+            keyword TEXT,
+            author TEXT,
+            rewritten_text TEXT,
+            rewrite_status TEXT DEFAULT 'pending',
+            found_at TEXT DEFAULT (datetime('now', 'localtime')),
+            synced_to_bitable INTEGER DEFAULT 0,
+            cover_url TEXT DEFAULT '',
+            images TEXT DEFAULT '',
+            video_url TEXT DEFAULT '',
+            note_type TEXT DEFAULT 'normal',
+            platform TEXT NOT NULL DEFAULT 'xhs',
+            user_id INTEGER
+        );
+        INSERT INTO trending_posts_new ({cols_csv})
+        SELECT {cols_csv} FROM trending_posts;
+        DROP TABLE trending_posts;
+        ALTER TABLE trending_posts_new RENAME TO trending_posts;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_trending_note_user
+            ON trending_posts(note_id, COALESCE(user_id, 0));
+        CREATE INDEX IF NOT EXISTS idx_trending_user_found
+            ON trending_posts(user_id, found_at DESC);
+    """)
+
+
 async def _migrate_own_messages_schema(db):
     """Drop the old UNIQUE(session_id,last_message) constraint and add account_id.
 
@@ -521,6 +576,12 @@ async def _migrate(db):
     await db.execute(
         "UPDATE trending_posts SET platform='xhs' WHERE platform IS NULL OR platform=''"
     )
+    # 2026-05 多租户：trending 改为 per-user
+    # 1) 加 user_id 列；老数据全部归 admin (id=1)
+    await _ensure_column(db, "trending_posts", "user_id", "INTEGER")
+    await db.execute("UPDATE trending_posts SET user_id=1 WHERE user_id IS NULL")
+    # 2) 把 note_id 全局 UNIQUE 改为 (note_id, user_id) 复合 UNIQUE
+    await _migrate_trending_posts_unique(db)
 
     # 商品图历史：异步上传字段（老 deployments 上没有这些列）
     await _ensure_column(db, "image_gen_history", "local_url", "TEXT DEFAULT ''")
@@ -1479,13 +1540,20 @@ async def add_or_update_trending_post(
     comment_count: int, keyword: str, author: str,
     cover_url: str = "", images: str = "", video_url: str = "", note_type: str = "normal",
     platform: str = "xhs",
+    user_id: Optional[int] = None,
 ) -> bool:
-    """Insert new trending post. Returns True if it was newly inserted."""
+    """Insert/upsert trending post for the given user. Returns True if newly inserted.
+
+    多租户：同一个 note 可能在不同用户下各有一条独立记录（按 (note_id, user_id) 唯一）。
+    user_id=None 仅旧代码兼容 — 新调用方（scheduler）必须传 user_id。
+    """
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT id FROM trending_posts WHERE note_id=?", (note_id,))
+        cur = await db.execute(
+            "SELECT id FROM trending_posts WHERE note_id=? AND COALESCE(user_id,0)=?",
+            (note_id, user_id or 0),
+        )
         exists = await cur.fetchone()
         if exists:
-            # Backfill text + media fields when the existing row had them empty.
             await db.execute(
                 """UPDATE trending_posts
                    SET liked_count=?, collected_count=?, comment_count=?,
@@ -1497,21 +1565,22 @@ async def add_or_update_trending_post(
                        video_url= CASE WHEN video_url IS NULL OR video_url = '' THEN ? ELSE video_url END,
                        note_type= CASE WHEN note_type IS NULL OR note_type = '' THEN ? ELSE note_type END,
                        platform = CASE WHEN platform  IS NULL OR platform  = '' THEN ? ELSE platform  END
-                   WHERE note_id=?""",
+                   WHERE note_id=? AND COALESCE(user_id,0)=?""",
                 (liked_count, collected_count, comment_count,
                  title, author, desc_text,
-                 cover_url, images, video_url, note_type, platform, note_id),
+                 cover_url, images, video_url, note_type, platform,
+                 note_id, user_id or 0),
             )
             await db.commit()
             return False
         await db.execute(
             """INSERT INTO trending_posts
                (note_id,title,desc_text,note_url,xsec_token,liked_count,collected_count,comment_count,
-                keyword,author,cover_url,images,video_url,note_type,platform)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                keyword,author,cover_url,images,video_url,note_type,platform,user_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (note_id, title, desc_text, note_url, xsec_token,
              liked_count, collected_count, comment_count, keyword, author,
-             cover_url, images, video_url, note_type, platform),
+             cover_url, images, video_url, note_type, platform, user_id),
         )
         await db.commit()
         return True
@@ -1519,28 +1588,37 @@ async def add_or_update_trending_post(
 
 async def get_trending_posts(
     limit: int = 50, platform: Optional[str] = None,
+    user_id: Optional[int] = None,
 ) -> List[Dict]:
+    """user_id=None 时不过滤（admin 可看所有用户的；scheduler 内部也无过滤需要时用）。"""
+    sql = "SELECT * FROM trending_posts"
+    where, params = [], []
+    if platform:
+        where.append("platform=?")
+        params.append(platform)
+    if user_id is not None:
+        where.append("user_id=?")
+        params.append(user_id)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY found_at DESC LIMIT ?"
+    params.append(limit)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        if platform:
-            async with db.execute(
-                "SELECT * FROM trending_posts WHERE platform=? ORDER BY found_at DESC LIMIT ?",
-                (platform, limit),
-            ) as cur:
-                return [dict(r) for r in await cur.fetchall()]
-        async with db.execute(
-            "SELECT * FROM trending_posts ORDER BY found_at DESC LIMIT ?", (limit,)
-        ) as cur:
+        async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
 
-async def update_trending_desc(note_id: str, desc_text: str) -> None:
-    """Backfill desc_text after fetching the note detail page."""
+async def update_trending_desc(
+    note_id: str, desc_text: str, user_id: Optional[int] = None,
+) -> None:
+    sql = "UPDATE trending_posts SET desc_text=? WHERE note_id=?"
+    params: list = [desc_text, note_id]
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE trending_posts SET desc_text=? WHERE note_id=?",
-            (desc_text, note_id),
-        )
+        await db.execute(sql, params)
         await db.commit()
 
 
@@ -1550,12 +1628,9 @@ async def update_trending_media(
     images_json: str = "",
     video_url: str = "",
     note_type: str = "",
+    user_id: Optional[int] = None,
 ) -> None:
-    """Only overwrite fields that come in non-empty (preserve existing data).
-
-    Fallback: if no explicit cover_url but images_json has at least one URL,
-    use images[0] as the cover.
-    """
+    """Only overwrite fields that come in non-empty (preserve existing data)."""
     if not cover_url and images_json:
         try:
             import json as _json
@@ -1564,58 +1639,76 @@ async def update_trending_media(
                 cover_url = arr[0]
         except Exception:
             pass
+    sets, vals = [], []
+    if cover_url:
+        sets.append("cover_url=?"); vals.append(cover_url)
+    if images_json:
+        sets.append("images=?"); vals.append(images_json)
+    if video_url:
+        sets.append("video_url=?"); vals.append(video_url)
+    if note_type:
+        sets.append("note_type=?"); vals.append(note_type)
+    if not sets:
+        return
+    sql = f"UPDATE trending_posts SET {','.join(sets)} WHERE note_id=?"
+    vals.append(note_id)
+    if user_id is not None:
+        sql += " AND user_id=?"
+        vals.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
-        sets, vals = [], []
-        if cover_url:
-            sets.append("cover_url=?"); vals.append(cover_url)
-        if images_json:
-            sets.append("images=?"); vals.append(images_json)
-        if video_url:
-            sets.append("video_url=?"); vals.append(video_url)
-        if note_type:
-            sets.append("note_type=?"); vals.append(note_type)
-        if not sets:
-            return
-        vals.append(note_id)
-        await db.execute(
-            f"UPDATE trending_posts SET {','.join(sets)} WHERE note_id=?", vals
-        )
+        await db.execute(sql, vals)
         await db.commit()
 
 
-async def update_trending_rewrite(note_id: str, rewritten_text: str, status: str = "done"):
+async def update_trending_rewrite(
+    note_id: str, rewritten_text: str, status: str = "done",
+    user_id: Optional[int] = None,
+):
+    sql = "UPDATE trending_posts SET rewritten_text=?,rewrite_status=? WHERE note_id=?"
+    params: list = [rewritten_text, status, note_id]
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE trending_posts SET rewritten_text=?,rewrite_status=? WHERE note_id=?",
-            (rewritten_text, status, note_id),
-        )
+        await db.execute(sql, params)
         await db.commit()
 
 
-async def get_trending_post(note_id: str) -> Optional[Dict]:
+async def get_trending_post(
+    note_id: str, user_id: Optional[int] = None,
+) -> Optional[Dict]:
+    sql = "SELECT * FROM trending_posts WHERE note_id=?"
+    params: list = [note_id]
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM trending_posts WHERE note_id=?", (note_id,)
-        ) as cur:
+        async with db.execute(sql, params) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
 
 
-async def mark_trending_synced(note_id: str):
+async def mark_trending_synced(note_id: str, user_id: Optional[int] = None):
+    sql = "UPDATE trending_posts SET synced_to_bitable=1 WHERE note_id=?"
+    params: list = [note_id]
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE trending_posts SET synced_to_bitable=1 WHERE note_id=?", (note_id,)
-        )
+        await db.execute(sql, params)
         await db.commit()
 
 
-async def get_unsynced_trending_posts() -> List[Dict]:
+async def get_unsynced_trending_posts(user_id: Optional[int] = None) -> List[Dict]:
+    sql = "SELECT * FROM trending_posts WHERE synced_to_bitable=0 AND rewrite_status='done'"
+    params: list = []
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM trending_posts WHERE synced_to_bitable=0 AND rewrite_status='done'"
-        ) as cur:
+        async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
 
@@ -1646,12 +1739,20 @@ async def list_groups(user_id: Optional[int] = None) -> List[Dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
-async def get_group(group_id: int) -> Optional[Dict]:
+async def get_group(group_id: int, user_id: Optional[int] = None) -> Optional[Dict]:
+    """读单个分组。
+
+    user_id=None（admin 模式）：直接读，不校验归属。
+    user_id 传值：仅当 group 是内置的（is_builtin=1）或属于该 user 才返回。
+    """
+    sql = f"SELECT {_GROUP_COLUMNS} FROM monitor_groups WHERE id=?"
+    params: list = [group_id]
+    if user_id is not None:
+        sql += " AND (is_builtin=1 OR user_id=?)"
+        params.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            f"SELECT {_GROUP_COLUMNS} FROM monitor_groups WHERE id=?", (group_id,)
-        ) as cur:
+        async with db.execute(sql, params) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
 
@@ -1665,8 +1766,12 @@ async def create_group(name: str, user_id: Optional[int] = None) -> int:
         return cur.lastrowid
 
 
-async def update_group(group_id: int, **fields) -> None:
-    """Update any subset of group fields."""
+async def update_group(group_id: int, user_id: Optional[int] = None, **fields) -> bool:
+    """Update any subset of group fields. 返回是否实际改了行。
+
+    user_id=None（admin 模式）：直接改。
+    user_id 传值：仅当 group 是内置的或属于该 user 才改；否则返回 False（无权限）。
+    """
     allowed = {
         "name", "feishu_webhook_url", "wecom_webhook_url",
         "likes_alert_enabled", "likes_threshold",
@@ -1680,24 +1785,40 @@ async def update_group(group_id: int, **fields) -> None:
         if k in allowed and v is not None:
             sets.append(f"{k}=?"); vals.append(v)
     if not sets:
-        return
+        return False
+    sql = f"UPDATE monitor_groups SET {','.join(sets)} WHERE id=?"
     vals.append(group_id)
+    if user_id is not None:
+        sql += " AND (is_builtin=1 OR user_id=?)"
+        vals.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            f"UPDATE monitor_groups SET {','.join(sets)} WHERE id=?", vals
-        )
+        cur = await db.execute(sql, vals)
         await db.commit()
+        return (cur.rowcount or 0) > 0
 
 
-async def delete_group(group_id: int, fallback_group_id: Optional[int] = None) -> None:
-    """Delete a non-builtin group. Posts are reassigned to fallback (or NULL)."""
+async def delete_group(
+    group_id: int,
+    fallback_group_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+) -> None:
+    """Delete a non-builtin group. Posts are reassigned to fallback (or NULL).
+
+    user_id=None（admin）：可删任意非内置分组。
+    user_id 传值：仅能删自己的分组；删别人的抛 PermissionError。
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "SELECT is_builtin FROM monitor_groups WHERE id=?", (group_id,)
+            "SELECT is_builtin, user_id FROM monitor_groups WHERE id=?", (group_id,)
         )
         row = await cur.fetchone()
-        if row and row[0]:
+        if not row:
+            raise ValueError("分组不存在")
+        if row[0]:
             raise ValueError("内置分组不能删除")
+        owner = row[1]
+        if user_id is not None and owner != user_id:
+            raise PermissionError("无权删除该分组")
         await db.execute(
             "UPDATE monitor_posts SET group_id=? WHERE group_id=?",
             (fallback_group_id, group_id),
@@ -1722,12 +1843,20 @@ async def list_prompts(user_id: Optional[int] = None) -> List[Dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
-async def get_prompt(prompt_id: int) -> Optional[Dict]:
+async def get_prompt(prompt_id: int, user_id: Optional[int] = None) -> Optional[Dict]:
+    """读单个 prompt。
+
+    user_id=None（admin）：直接读。
+    user_id 传值：仅当 prompt 是内置全局（user_id=NULL）或属于该 user 才返回。
+    """
+    sql = "SELECT * FROM rewrite_prompts WHERE id=?"
+    params: list = [prompt_id]
+    if user_id is not None:
+        sql += " AND (user_id IS NULL OR user_id=?)"
+        params.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM rewrite_prompts WHERE id=?", (prompt_id,)
-        ) as cur:
+        async with db.execute(sql, params) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
 
@@ -1759,7 +1888,17 @@ async def create_prompt(name: str, content: str, user_id: Optional[int] = None) 
         return cur.lastrowid
 
 
-async def update_prompt(prompt_id: int, name: Optional[str] = None, content: Optional[str] = None) -> bool:
+async def update_prompt(
+    prompt_id: int,
+    name: Optional[str] = None,
+    content: Optional[str] = None,
+    user_id: Optional[int] = None,
+) -> bool:
+    """改 prompt 名/内容。
+
+    user_id=None（admin）：可改任意 prompt（含内置）。
+    user_id 传值：仅能改自己的 prompt（不能改内置全局）。返回是否实际改了。
+    """
     fields, values = [], []
     if name is not None:
         fields.append("name=?"); values.append(name)
@@ -1767,35 +1906,62 @@ async def update_prompt(prompt_id: int, name: Optional[str] = None, content: Opt
         fields.append("content=?"); values.append(content)
     if not fields:
         return False
+    sql = f"UPDATE rewrite_prompts SET {','.join(fields)} WHERE id=?"
     values.append(prompt_id)
+    if user_id is not None:
+        sql += " AND user_id=?"  # 不能改内置（user_id IS NULL），仅自己的
+        values.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(f"UPDATE rewrite_prompts SET {','.join(fields)} WHERE id=?", values)
+        cur = await db.execute(sql, values)
         await db.commit()
-    return True
+        return (cur.rowcount or 0) > 0
 
 
-async def delete_prompt(prompt_id: int) -> None:
+async def delete_prompt(prompt_id: int, user_id: Optional[int] = None) -> bool:
+    """删 prompt。普通用户只能删自己的（不能删内置全局）。返回是否实际删了。"""
+    sql = "DELETE FROM rewrite_prompts WHERE id=?"
+    params: list = [prompt_id]
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM rewrite_prompts WHERE id=?", (prompt_id,))
+        cur = await db.execute(sql, params)
         await db.commit()
+        return (cur.rowcount or 0) > 0
 
 
-async def set_default_prompt(prompt_id: int) -> None:
+async def set_default_prompt(prompt_id: int, user_id: Optional[int] = None) -> bool:
+    """把指定 prompt 标记为默认。
+
+    is_default 当前是表级全局唯一（admin 设置的影响所有用户）。
+    user_id 传值时校验该 prompt 是内置或属于该 user，避免越权设别人的。
+    """
+    if user_id is not None:
+        # 校验归属
+        target = await get_prompt(prompt_id, user_id=user_id)
+        if not target:
+            return False
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE rewrite_prompts SET is_default=0")
-        await db.execute("UPDATE rewrite_prompts SET is_default=1 WHERE id=?", (prompt_id,))
+        cur = await db.execute(
+            "UPDATE rewrite_prompts SET is_default=1 WHERE id=?", (prompt_id,)
+        )
         await db.commit()
+        return (cur.rowcount or 0) > 0
 
 
 # ── Trending pending posts ───────────────────────────────────────────────────
 
-async def get_pending_trending_posts() -> List[Dict]:
+async def get_pending_trending_posts(user_id: Optional[int] = None) -> List[Dict]:
     """Trending posts that still need AI rewriting (status pending / failed / skipped)."""
+    sql = "SELECT * FROM trending_posts WHERE rewrite_status IN ('pending','failed','skipped')"
+    params: list = []
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM trending_posts WHERE rewrite_status IN ('pending','failed','skipped')"
-        ) as cur:
+        async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
 

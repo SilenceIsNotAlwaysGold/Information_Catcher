@@ -15,7 +15,8 @@ import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
 import { Chip } from "@nextui-org/chip";
 import { Spinner } from "@nextui-org/spinner";
-import { LinkIcon, AlertCircle, CheckCircle2, Unlink, ExternalLink, RefreshCw } from "lucide-react";
+import { LinkIcon, AlertCircle, CheckCircle2, Unlink, ExternalLink, RefreshCw, QrCode } from "lucide-react";
+import { QRCodeCanvas } from "qrcode.react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
 
@@ -30,6 +31,7 @@ type Status = {
   bound_at: string;
   webhook_url: string;
   oauth_configured: boolean;
+  invite_url?: string;
 };
 
 const API = (p: string) => `/api/feishu${p}`;
@@ -159,6 +161,50 @@ export function FeishuBindingCard() {
               绑定飞书后，告警会通过应用机器人推送到你的专属群（自动拉你 + admin 进群），
               热门内容 / 商品图历史会自动写入你的专属多维表格。
             </p>
+
+            {/* 自建应用：只允许应用所属企业的成员授权。外部用户需先扫码加入企业 */}
+            {status.invite_url && (
+              <div className="rounded-lg border border-warning/30 bg-warning/5 p-4 space-y-3">
+                <div className="flex items-center gap-2 text-sm text-warning-700">
+                  <AlertCircle size={15} className="shrink-0" />
+                  <span className="font-medium">第一次绑定？需先加入企业</span>
+                </div>
+                <p className="text-xs text-default-600 leading-relaxed">
+                  本平台用的是飞书自建应用，只允许应用所属企业的成员授权。
+                  如果你授权时看到「你没有应用使用权限」，扫下方二维码加入企业，
+                  通过后再点「绑定飞书」即可。已是企业成员的可直接跳过。
+                </p>
+                <div className="flex flex-col items-center gap-2 sm:flex-row sm:items-start">
+                  <div className="bg-white p-3 rounded-md border border-default-200">
+                    <QRCodeCanvas
+                      value={status.invite_url}
+                      size={140}
+                      level="M"
+                      includeMargin={false}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-2 text-xs text-default-500">
+                    <div className="flex items-center gap-1.5">
+                      <QrCode size={12} className="shrink-0" />
+                      <span>飞书 App 扫码 → 申请加入</span>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="light"
+                      as="a"
+                      href={status.invite_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      startContent={<ExternalLink size={13} />}
+                      className="self-start"
+                    >
+                      或在浏览器打开邀请链接
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div>
               <Button
                 color="primary"

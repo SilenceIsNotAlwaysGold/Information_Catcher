@@ -185,6 +185,9 @@ async def status(current_user: dict = Depends(get_current_user)) -> dict:
         "webhook_url": current_user.get("feishu_webhook_url", ""),
         # 让前端能判断是否已配 OAuth 配置（authorize 才不会 400）
         "oauth_configured": bool((await monitor_db.get_setting("feishu_oauth_redirect_uri", "")).strip()),
+        # 企业邀请链接：自建应用只允许本企业成员授权，外部用户需先扫码加入。
+        # 前端在未绑定时把这个链接渲染成二维码引导用户扫码加入企业。
+        "invite_url": (await monitor_db.get_setting("feishu_invite_url", "")).strip(),
     }
 
 

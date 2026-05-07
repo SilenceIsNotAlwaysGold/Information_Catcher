@@ -947,7 +947,7 @@ _ADMIN_ONLY_SETTING_KEYS = {
     "ai_base_url", "ai_api_key", "ai_model", "ai_rewrite_prompt",
     "feishu_app_id", "feishu_app_secret",
     "feishu_oauth_redirect_uri", "feishu_bitable_root_folder_token",
-    "feishu_admin_open_id",
+    "feishu_admin_open_id", "feishu_invite_url",
     "feishu_bitable_image_table_id",
     "qiniu_access_key", "qiniu_secret_key", "qiniu_bucket", "qiniu_domain",
     "public_url_prefix",
@@ -974,6 +974,10 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     me = auth_service.get_user_by_id(current_user["id"]) or {}
     base["feishu_webhook_url"] = me.get("feishu_webhook_url", "") or ""
     base["webhook_url"] = me.get("wecom_webhook_url", "") or ""
+    # trending 三件套：从 users 表读，覆盖全局值（每用户独立的关键词 / 开关 / 阈值）
+    base["trending_keywords"] = me.get("trending_keywords", "") or ""
+    base["trending_enabled"] = "1" if me.get("trending_enabled") else "0"
+    base["trending_min_likes"] = str(me.get("trending_min_likes") or 1000)
     return base
 
 
@@ -994,6 +998,17 @@ async def update_settings(
             wecom_webhook_url=req.webhook_url,
         )
 
+    # 2026-05 多租户：trending 配置（keywords / enabled / min_likes）改为 per-user，
+    # 不再写到全局 monitor_settings；trending_account_ids 仍然全局（admin 配共享池）。
+    if (req.trending_keywords is not None or req.trending_enabled is not None
+            or req.trending_min_likes is not None):
+        auth_service.update_user_trending(
+            current_user["id"],
+            keywords=req.trending_keywords,
+            enabled=req.trending_enabled,
+            min_likes=req.trending_min_likes,
+        )
+
     simple_fields = [
         "daily_report_time",
         "ai_base_url", "ai_api_key", "ai_model", "ai_rewrite_prompt",
@@ -1004,7 +1019,7 @@ async def update_settings(
         "feishu_bitable_image_table_id",
         "qiniu_access_key", "qiniu_secret_key", "qiniu_bucket", "qiniu_domain",
         "public_url_prefix",
-        "trending_keywords", "trending_account_ids",
+        "trending_account_ids",  # 仅这个还在全局 settings（admin 配的共享池账号）
         "newrank_api_key", "newrank_api_base",
     ]
     for key in simple_fields:
@@ -1016,8 +1031,9 @@ async def update_settings(
 
     bool_fields = [
         "daily_report_enabled", "likes_alert_enabled", "collects_alert_enabled",
-        "comments_alert_enabled", "ai_rewrite_enabled", "trending_enabled",
+        "comments_alert_enabled", "ai_rewrite_enabled",
         "comments_fetch_enabled",
+        # trending_enabled 已经在上面 update_user_trending 里写了，不再走全局 settings
     ]
     for key in bool_fields:
         if key in _ADMIN_ONLY_SETTING_KEYS and not is_admin:
@@ -1027,7 +1043,8 @@ async def update_settings(
             await db.set_setting(key, bool_val(val))
 
     int_fields = [
-        "likes_threshold", "collects_threshold", "comments_threshold", "trending_min_likes",
+        "likes_threshold", "collects_threshold", "comments_threshold",
+        # trending_min_likes 已经在上面 update_user_trending 里写了
     ]
     for key in int_fields:
         if key in _ADMIN_ONLY_SETTING_KEYS and not is_admin:
@@ -1095,14 +1112,17 @@ async def create_group(req: CreateGroupRequest, current_user: dict = Depends(get
 
 @router.patch("/groups/{group_id}", summary="更新分组")
 async def update_group(
-    group_id: int, req: UpdateGroupRequest, _: dict = Depends(get_current_user)
+    group_id: int, req: UpdateGroupRequest,
+    current_user: dict = Depends(get_current_user),
 ):
     payload = req.model_dump(exclude_none=True)
     # 把 bool 转成 0/1 存数据库
     for k in ("likes_alert_enabled", "collects_alert_enabled", "comments_alert_enabled"):
         if k in payload and isinstance(payload[k], bool):
             payload[k] = 1 if payload[k] else 0
-    await db.update_group(group_id, **payload)
+    ok = await db.update_group(group_id, user_id=_scope_uid(current_user), **payload)
+    if not ok:
+        raise HTTPException(status_code=403, detail="无权修改该分组（不是你创建的，且不是内置分组）")
     return {"ok": True}
 
 
@@ -1110,12 +1130,16 @@ async def update_group(
 async def delete_group(
     group_id: int,
     fallback: Optional[int] = None,
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
-        await db.delete_group(group_id, fallback_group_id=fallback)
+        await db.delete_group(
+            group_id, fallback_group_id=fallback, user_id=_scope_uid(current_user)
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     return {"ok": True}
 
 
@@ -1133,19 +1157,30 @@ async def update_post_group(
 async def list_trending(
     limit: int = 50,
     platform: Optional[str] = None,
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
-    return {"posts": await db.get_trending_posts(limit, platform=platform)}
+    return {"posts": await db.get_trending_posts(
+        limit, platform=platform, user_id=_scope_uid(current_user),
+    )}
 
 
-@router.post("/trending/check", summary="立即触发热门抓取")
+@router.post("/trending/check", summary="立即触发热门抓取（仅触发当前用户的关键词）")
 async def manual_trending_check(
     background_tasks: BackgroundTasks,
     platform: Optional[str] = None,
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
-    background_tasks.add_task(sched.run_trending_monitor, platform=platform)
-    return {"ok": True, "message": "热门抓取任务已触发", "platform": platform or "all"}
+    # 普通用户：只跑自己的；admin：传 user_id=None 触发所有用户
+    target_uid = _scope_uid(current_user)
+    background_tasks.add_task(
+        sched.run_trending_monitor, platform=platform, user_id=target_uid,
+    )
+    return {
+        "ok": True,
+        "message": "热门抓取任务已触发",
+        "platform": platform or "all",
+        "scope": "self" if target_uid is not None else "all_users",
+    }
 
 
 # ── Rewrite Prompts (manage saved prompt templates) ──────────────────────────
@@ -1164,42 +1199,62 @@ async def create_prompt(req: CreatePromptRequest, current_user: dict = Depends(g
 
 
 @router.patch("/prompts/{prompt_id}", summary="更新 prompt")
-async def update_prompt_route(prompt_id: int, req: UpdatePromptRequest, _: dict = Depends(get_current_user)):
-    await db.update_prompt(prompt_id, name=req.name, content=req.content)
+async def update_prompt_route(
+    prompt_id: int, req: UpdatePromptRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    ok = await db.update_prompt(
+        prompt_id, name=req.name, content=req.content,
+        user_id=_scope_uid(current_user),
+    )
+    if not ok:
+        raise HTTPException(status_code=403, detail="无权修改该 prompt（不是你创建的）")
     return {"ok": True}
 
 
 @router.delete("/prompts/{prompt_id}", summary="删除 prompt")
-async def delete_prompt_route(prompt_id: int, _: dict = Depends(get_current_user)):
-    await db.delete_prompt(prompt_id)
+async def delete_prompt_route(
+    prompt_id: int, current_user: dict = Depends(get_current_user),
+):
+    ok = await db.delete_prompt(prompt_id, user_id=_scope_uid(current_user))
+    if not ok:
+        raise HTTPException(status_code=403, detail="无权删除该 prompt（不是你创建的）")
     return {"ok": True}
 
 
 @router.post("/prompts/{prompt_id}/set-default", summary="设为默认 prompt")
-async def set_default_prompt_route(prompt_id: int, _: dict = Depends(get_current_user)):
-    await db.set_default_prompt(prompt_id)
+async def set_default_prompt_route(
+    prompt_id: int, current_user: dict = Depends(get_current_user),
+):
+    ok = await db.set_default_prompt(prompt_id, user_id=_scope_uid(current_user))
+    if not ok:
+        raise HTTPException(status_code=403, detail="无权将该 prompt 设为默认")
     return {"ok": True}
 
 
 # ── Manual rewrite + Bitable sync ────────────────────────────────────────────
 
-@router.post("/trending/backfill-media", summary="批量补全所有热门帖子的封面/图集/视频")
+@router.post("/trending/backfill-media", summary="批量补全热门帖子的封面/图集/视频")
 async def backfill_trending_media(
     background_tasks: BackgroundTasks,
     only_missing: bool = True,
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
-    """对所有 trending_posts 批量调用 detail page 抓图。后台跑。"""
+    """对当前用户范围的 trending_posts 批量补封面/视频。admin 处理全部，普通用户仅自己的。
+
+    会消耗大量账号请求（每条一次详情页抓取），限速 3 并发 + 抖动。
+    """
+    scope_uid = _scope_uid(current_user)
+
     async def _job():
         import json as _json
         import asyncio
-        # Pick the first usable account once.
         account = None
         for acc in await db.get_accounts(include_secrets=True):
             if acc.get("is_active") and acc.get("cookie") and acc.get("cookie_status") != "expired":
                 account = acc
                 break
-        all_posts = await db.get_trending_posts(limit=500)
+        all_posts = await db.get_trending_posts(limit=500, user_id=scope_uid)
         if only_missing:
             targets = [p for p in all_posts if not (p.get("cover_url") or p.get("images"))]
         else:
@@ -1222,9 +1277,12 @@ async def backfill_trending_media(
                             images_json=_json.dumps(metrics.get("images") or [], ensure_ascii=False) if metrics.get("images") else "",
                             video_url=metrics.get("video_url") or "",
                             note_type=metrics.get("note_type") or "",
+                            user_id=p.get("user_id"),
                         )
                         if metrics.get("desc") and not p.get("desc_text"):
-                            await db.update_trending_desc(p["note_id"], metrics["desc"])
+                            await db.update_trending_desc(
+                                p["note_id"], metrics["desc"], user_id=p.get("user_id"),
+                            )
                         ok_count += 1
                     else:
                         fail_count += 1
@@ -1241,14 +1299,15 @@ async def backfill_trending_media(
 @router.post("/trending/posts/{note_id}/fetch-content", summary="抓取热门帖子的正文")
 async def fetch_trending_content(
     note_id: str,
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """The XHS search API only returns titles. Hit the note detail page to grab
     the real body text and backfill `desc_text`. Costs one extra request per call,
     so it's exposed as an explicit user action (not run on every trending fetch)."""
-    post = await db.get_trending_post(note_id)
+    scope_uid = _scope_uid(current_user)
+    post = await db.get_trending_post(note_id, user_id=scope_uid)
     if not post:
-        raise HTTPException(status_code=404, detail="帖子不存在")
+        raise HTTPException(status_code=404, detail="帖子不存在或无权访问")
 
     # Try with the first usable account's cookie (note pages are now mostly
     # login-walled). Fall back to anonymous if no usable account.
@@ -1281,7 +1340,7 @@ async def fetch_trending_content(
     note_type = metrics.get("note_type") or "normal"
 
     if desc:
-        await db.update_trending_desc(note_id, desc)
+        await db.update_trending_desc(note_id, desc, user_id=scope_uid)
     # Persist media too — they may not have come from search.
     import json as _json
     await db.update_trending_media(
@@ -1290,6 +1349,7 @@ async def fetch_trending_content(
         images_json=_json.dumps(images, ensure_ascii=False) if images else "",
         video_url=video_url,
         note_type=note_type,
+        user_id=scope_uid,
     )
     return {
         "ok": True,
@@ -1308,17 +1368,12 @@ async def rewrite_trending_post(
     note_id: str,
     req: RewriteTrendingRequest,
     variants: int = 1,
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
-    """variants=1 → 维持现有行为；variants>1 → 并行生成 N 个不同温度的变体。
-
-    返回：
-      {"ok": True, "rewritten": str, "variants": [str, ...]}
-      rewritten 永远是 variants[0]，写入 trending_posts.rewritten_text 用于飞书入库。
-    """
-    post = await db.get_trending_post(note_id)
+    scope_uid = _scope_uid(current_user)
+    post = await db.get_trending_post(note_id, user_id=scope_uid)
     if not post:
-        raise HTTPException(status_code=404, detail="帖子不存在")
+        raise HTTPException(status_code=404, detail="帖子不存在或无权访问")
 
     text = (post.get("desc_text") or post.get("title") or "").strip()
     if not text:
@@ -1328,9 +1383,9 @@ async def rewrite_trending_post(
     if req.prompt_text and req.prompt_text.strip():
         prompt_template = req.prompt_text
     elif req.prompt_id is not None:
-        p = await db.get_prompt(req.prompt_id)
+        p = await db.get_prompt(req.prompt_id, user_id=scope_uid)
         if not p:
-            raise HTTPException(status_code=404, detail="prompt 不存在")
+            raise HTTPException(status_code=404, detail="prompt 不存在或无权访问")
         prompt_template = p["content"]
     else:
         p = await db.get_default_prompt()
@@ -1360,10 +1415,10 @@ async def rewrite_trending_post(
                 raise RuntimeError("所有变体都失败")
             rewritten = variants_list[0]
     except Exception as e:
-        await db.update_trending_rewrite(note_id, "", "failed")
+        await db.update_trending_rewrite(note_id, "", "failed", user_id=scope_uid)
         raise HTTPException(status_code=500, detail=f"AI 改写失败: {e}")
 
-    await db.update_trending_rewrite(note_id, rewritten, "done")
+    await db.update_trending_rewrite(note_id, rewritten, "done", user_id=scope_uid)
     return {"ok": True, "rewritten": rewritten, "variants": variants_list}
 
 
@@ -1371,15 +1426,16 @@ async def rewrite_trending_post(
 async def lock_rewrite_variant(
     note_id: str,
     req: LockVariantRequest,
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """运营从多变体里挑一个，把它替换 trending_posts.rewritten_text。"""
     if not req.variant or not req.variant.strip():
         raise HTTPException(status_code=400, detail="variant 不能为空")
-    post = await db.get_trending_post(note_id)
+    scope_uid = _scope_uid(current_user)
+    post = await db.get_trending_post(note_id, user_id=scope_uid)
     if not post:
-        raise HTTPException(status_code=404, detail="帖子不存在")
-    await db.update_trending_rewrite(note_id, req.variant.strip(), "done")
+        raise HTTPException(status_code=404, detail="帖子不存在或无权访问")
+    await db.update_trending_rewrite(note_id, req.variant.strip(), "done", user_id=scope_uid)
     return {"ok": True}
 
 
@@ -1422,16 +1478,15 @@ async def sync_trending_to_bitable(
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"准备表格字段失败: {e}")
 
+    scope_uid = _scope_uid(current_user)
     results = []
     for nid in req.note_ids:
-        p = await db.get_trending_post(nid)
+        p = await db.get_trending_post(nid, user_id=scope_uid)
         if not p:
-            results.append({"note_id": nid, "ok": False, "reason": "帖子不存在"})
+            results.append({"note_id": nid, "ok": False, "reason": "帖子不存在或无权访问"})
             continue
         text = (p.get("desc_text") or p.get("title") or "").strip()
         rewritten = (p.get("rewritten_text") or "").strip()
-        # Skip posts whose title is empty — older rows captured before the field
-        # path was fixed end up with title='' and would write a blank row.
         if not (p.get("title") or "").strip():
             results.append({"note_id": nid, "ok": False, "reason": "标题为空（旧数据），已跳过"})
             continue
@@ -1450,7 +1505,7 @@ async def sync_trending_to_bitable(
                     "作者": p.get("author", ""),
                 },
             )
-            await db.mark_trending_synced(nid)
+            await db.mark_trending_synced(nid, user_id=scope_uid)
             results.append({"note_id": nid, "ok": True})
         except Exception as e:
             results.append({"note_id": nid, "ok": False, "reason": str(e)})
