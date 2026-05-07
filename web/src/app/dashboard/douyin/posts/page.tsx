@@ -38,6 +38,7 @@ type Post = {
   platform: string;
   tags?: string;
   author?: string;
+  owner_username?: string;
 };
 
 type Live = {

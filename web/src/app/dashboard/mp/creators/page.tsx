@@ -15,6 +15,7 @@ type Post = {
   author?: string | null;
   checked_at?: string | null;
   copyright_stat?: string | null;
+  platform?: string;
 };
 
 export default function MpCreatorsPage() {

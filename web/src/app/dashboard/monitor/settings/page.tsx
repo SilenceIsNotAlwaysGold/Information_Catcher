@@ -38,6 +38,7 @@ type Account = {
   fp_browser_type: string;
   fp_profile_id: string;
   fp_api_url: string;
+  platform?: string;
   cookie_status?: string; // valid | expired | unknown
   cookie_checked_at?: string | null;
   cookie_last_check?: string | null;
@@ -99,7 +100,7 @@ const DEFAULTS: Settings = {
   comments_fetch_enabled: "0",
 };
 
-const emptyAccountForm = { name: "", proxy_url: "" };
+const emptyAccountForm = { name: "", proxy_url: "", platform: "xhs" };
 const emptyEditForm = { name: "", cookie: "", proxy_url: "" };
 
 type PlatformKey = "xhs" | "douyin" | "mp";
@@ -143,8 +144,6 @@ export default function MonitorSettingsPage() {
   const isAdmin = user?.role === "admin";
 
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
-  // 平台覆盖：保存从后端读到的所有 {platform}.{key} 键值对（字符串："1"/"0" or 数字字符串）
-  // 未出现在此 map 的 key === "沿用全局"
   const [platformOverrides, setPlatformOverrides] = useState<Record<string, string>>({});
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(true);
@@ -167,7 +166,7 @@ export default function MonitorSettingsPage() {
   const [qrStatus, setQrStatus] = useState<string>("idle"); // idle|loading|waiting|success|failed|expired|cancelled
   const [qrError, setQrError] = useState<string>("");
   const qrPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const qrActiveRef = useRef(false); // guards against modal-close during loading
+  const qrActiveRef = useRef(false);
 
   const stopQrPoll = () => {
     if (qrPollRef.current) {
@@ -177,7 +176,7 @@ export default function MonitorSettingsPage() {
   };
 
   const startQrLogin = async () => {
-    stopQrPoll(); // defensive: clear any stale poll
+    stopQrPoll();
     qrActiveRef.current = true;
     setQrSessionId(null);
     setQrError("");
@@ -191,6 +190,7 @@ export default function MonitorSettingsPage() {
         body: JSON.stringify({
           name: accountForm.name,
           proxy_url: accountForm.proxy_url,
+          platform: accountForm.platform || "xhs",
         }),
       });
       if (!resp.ok) {
@@ -199,7 +199,6 @@ export default function MonitorSettingsPage() {
       }
       const data = await resp.json();
 
-      // If user closed the modal while loading, cancel the session we just started
       if (!qrActiveRef.current) {
         fetch(API(`/accounts/qr-login/${data.session_id}/cancel`), {
           method: "POST", headers,
@@ -266,7 +265,6 @@ export default function MonitorSettingsPage() {
   const toggleBool = (key: keyof Settings) =>
     set(key, settings[key] === "1" ? "0" : "1");
 
-  // ── Webhook 测试按钮 ────────────────────────────────────────────────────
   const [testingWebhook, setTestingWebhook] = useState<{ wecom?: boolean; feishu?: boolean }>({});
   const testWebhook = async (channel: "wecom" | "feishu", url: string) => {
     if (!url) return;
@@ -290,8 +288,7 @@ export default function MonitorSettingsPage() {
     }
   };
 
-  // ── 平台覆盖：一组操作 helpers ───────────────────────────────────────────
-  // 是否有任何平台级覆盖（任意一个 enable 或 threshold 已设值）
+  // ── 平台覆盖 helpers ─────────────────────────────────────────────────────
   const hasPlatformOverride = (platform: PlatformKey) =>
     METRIC_DEFS[platform].some(({ key }) => {
       const { enableKey, threshKey } = metricToFields(key);
@@ -301,7 +298,6 @@ export default function MonitorSettingsPage() {
         || (ovThresh != null && ovThresh !== "");
     });
 
-  // 读单项：优先 platform 覆盖，否则 fallback 到全局 settings
   const platformBool = (platform: PlatformKey, key: keyof Settings): boolean => {
     const ov = platformOverrides[`${platform}.${key}`];
     if (ov != null && ov !== "") return ov === "1";
@@ -313,7 +309,6 @@ export default function MonitorSettingsPage() {
     return settings[key] || "";
   };
 
-  // 写单项（只更新本地 state，保存时下发）
   const setPlatformOverride = (platform: PlatformKey, key: keyof Settings, val: string) => {
     setPlatformOverrides((m) => ({ ...m, [`${platform}.${key}`]: val }));
   };
@@ -322,10 +317,8 @@ export default function MonitorSettingsPage() {
     setPlatformOverride(platform, key, cur ? "0" : "1");
   };
 
-  // "沿用全局"切换：clear 所有该平台的覆盖键（保存时会发空串让后端 DELETE）
   const setPlatformInherit = (platform: PlatformKey, inherit: boolean) => {
     if (inherit) {
-      // 显式置空，保存时后端会 DELETE
       setPlatformOverrides((m) => {
         const next = { ...m };
         for (const { key } of METRIC_DEFS[platform]) {
@@ -336,7 +329,6 @@ export default function MonitorSettingsPage() {
         return next;
       });
     } else {
-      // 关闭"沿用全局" → 用全局当前值预填该平台
       setPlatformOverrides((m) => {
         const next = { ...m };
         for (const { key } of METRIC_DEFS[platform]) {
@@ -365,7 +357,6 @@ export default function MonitorSettingsPage() {
         has_key: !!imgCfg.has_key,
         api_key_input: "",
       }));
-      // 拆分：dotted key（"xhs.likes_threshold"）→ platformOverrides；其余 → settings
       const baseSettings: Record<string, string> = {};
       const overrides: Record<string, string> = {};
       for (const [k, v] of Object.entries(s as Record<string, string>)) {
@@ -385,13 +376,11 @@ export default function MonitorSettingsPage() {
 
   useEffect(() => { load(); }, [token]);
 
-  // CheckboxGroup helpers — store csv in settings, expose array to UI
   const idsCsvToArr = (csv: string): string[] =>
     csv ? csv.split(",").map((s) => s.trim()).filter(Boolean) : [];
   const idsArrToCsv = (arr: string[]): string => arr.join(",");
 
   const saveSettings = async () => {
-    // 用户级字段：所有用户都能保存
     const payload: Record<string, any> = {
       webhook_url: settings.webhook_url,
       feishu_webhook_url: settings.feishu_webhook_url,
@@ -409,7 +398,6 @@ export default function MonitorSettingsPage() {
       trending_min_likes: parseInt(settings.trending_min_likes),
       comments_fetch_enabled: bool("comments_fetch_enabled"),
     };
-    // admin only：仅 admin 才把这些字段加入 payload
     if (isAdmin) {
       Object.assign(payload, {
         check_interval_minutes: parseInt(settings.check_interval_minutes),
@@ -423,10 +411,7 @@ export default function MonitorSettingsPage() {
         trending_account_ids: settings.trending_account_ids,
       });
     }
-    // 平台覆盖：dotted keys 直接放进 payload，由后端做白名单 + DELETE/UPSERT
     for (const [k, v] of Object.entries(platformOverrides)) {
-      // 空串 → 后端 DELETE（沿用全局）
-      // bool 字段保留 "1"/"0"；threshold 字段转 number 让后端的 int 校验通过
       if (v === "" || v == null) {
         payload[k] = "";
         continue;
@@ -435,7 +420,6 @@ export default function MonitorSettingsPage() {
         const n = parseInt(v);
         payload[k] = Number.isFinite(n) ? n : "";
       } else {
-        // alert_enabled：发 boolean，后端 bool_val 转 "1"/"0"
         payload[k] = v === "1";
       }
     }
@@ -464,7 +448,6 @@ export default function MonitorSettingsPage() {
   const saveEdit = async () => {
     if (editingId == null) return;
     setSavingEdit(true);
-    // Omit cookie from patch when blank so the server keeps the existing value.
     const { cookie, ...rest } = editForm;
     const body: Record<string, string> = { ...rest };
     if (cookie.trim()) body.cookie = cookie;
@@ -499,7 +482,6 @@ export default function MonitorSettingsPage() {
   const checkAll = async () => {
     setCheckingAll(true);
     await fetch(API("/accounts/check-cookies"), { method: "POST", headers });
-    // health check is async; refresh a few times to pick up incremental results
     for (let i = 0; i < 6; i++) {
       await new Promise((r) => setTimeout(r, 5000));
       await load();
@@ -525,11 +507,80 @@ export default function MonitorSettingsPage() {
     );
   };
 
-  // ── 渲染：单个平台 tab 内容（阈值 + 沿用全局） ──────────────────────────
+  // ── 账号操作行（复用于系统面板和平台面板） ────────────────────────────────
+  const renderAccountActions = (a: Account) => (
+    <div className="flex gap-1">
+      <Tooltip content="检查 Cookie">
+        <Button isIconOnly size="sm" variant="light"
+          isLoading={checkingId === a.id}
+          onPress={() => checkOne(a.id)}>
+          <RefreshCw size={15} />
+        </Button>
+      </Tooltip>
+      <Button isIconOnly size="sm" variant="light" onPress={() => openEdit(a)}>
+        <Pencil size={15} />
+      </Button>
+      <Button isIconOnly size="sm" variant="light" color="danger"
+        onPress={() => deleteAccount(a.id)}>
+        <Trash2 size={15} />
+      </Button>
+    </div>
+  );
+
+  // ── 平台 tab 内容：账号（admin）+ 告警阈值 ──────────────────────────────
   const renderPlatformPanel = (platform: PlatformKey) => {
     const inherit = !hasPlatformOverride(platform);
+    const platformAccounts = accounts.filter((a) => (a.platform || "xhs") === platform);
     return (
       <div className="space-y-6">
+        {/* Admin: per-platform accounts */}
+        {isAdmin && (
+          <Card>
+            <CardHeader className="font-semibold flex items-center justify-between">
+              <span>{PLATFORM_LABELS[platform]} · 账号</span>
+              {platformAccounts.length > 0 && (
+                <Button size="sm" variant="flat"
+                  startContent={<ShieldCheck size={14} />}
+                  isLoading={checkingAll}
+                  onPress={checkAll}>
+                  检查全部 Cookie
+                </Button>
+              )}
+            </CardHeader>
+            <CardBody className="space-y-3">
+              {accountsLoading ? (
+                <TableSkeleton rows={2} cols={4} />
+              ) : platformAccounts.length > 0 ? (
+                <Table aria-label={`${platform}-accounts`} removeWrapper>
+                  <TableHeader>
+                    <TableColumn>账号</TableColumn>
+                    <TableColumn>状态</TableColumn>
+                    <TableColumn>代理</TableColumn>
+                    <TableColumn>操作</TableColumn>
+                  </TableHeader>
+                  <TableBody>
+                    {platformAccounts.map((a) => (
+                      <TableRow key={a.id}>
+                        <TableCell><Chip size="sm" variant="flat">{a.name}</Chip></TableCell>
+                        <TableCell>{cookieStatusChip(a)}</TableCell>
+                        <TableCell>{renderAccountBadges(a) ?? <span className="text-xs text-default-400">—</span>}</TableCell>
+                        <TableCell>{renderAccountActions(a)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              ) : (
+                <EmptyState
+                  icon={Server}
+                  title={`暂无 ${PLATFORM_LABELS[platform]} 账号`}
+                  hint={platform === "xhs" ? "请在「系统配置」标签中通过扫码登录添加账号。" : "请在「系统配置」标签中添加账号。"}
+                />
+              )}
+            </CardBody>
+          </Card>
+        )}
+
+        {/* Alert thresholds */}
         <Card>
           <CardHeader className="font-semibold flex justify-between items-center">
             <span>{PLATFORM_LABELS[platform]} · 告警阈值</span>
@@ -587,7 +638,7 @@ export default function MonitorSettingsPage() {
     );
   };
 
-  // ── 渲染：全局 tab（webhook、AI、daily report、外部数据源等） ────────────
+  // ── 全局 tab（个人设置）：webhook、告警阈值、飞书多维表格、热门、Prompt ─
   const renderGlobalPanel = () => (
     <div className="space-y-6">
       {/* Push Channels */}
@@ -632,24 +683,13 @@ export default function MonitorSettingsPage() {
               </Button>
             }
           />
-          {isAdmin ? (
-            <Input
-              label="检测间隔"
-              type="number"
-              value={settings.check_interval_minutes}
-              onValueChange={(v) => set("check_interval_minutes", v)}
-              endContent={<span className="text-default-400 text-sm">分钟</span>}
-            />
-          ) : (
-            <p className="text-xs text-default-400">检测间隔由管理员统一配置（默认 30 分钟）</p>
-          )}
         </CardBody>
       </Card>
 
       {/* Monitor Groups */}
       <MonitorGroupsCard token={token} />
 
-      {/* Alert Rules：全局阈值，作为各平台 tab 未单独配置时的兜底 */}
+      {/* Alert Rules */}
       <Card>
         <CardHeader className="font-semibold">全局告警阈值（兜底）</CardHeader>
         <CardBody className="space-y-5">
@@ -690,21 +730,6 @@ export default function MonitorSettingsPage() {
         </CardBody>
       </Card>
 
-      {/* Daily Report：仅 admin 可配置 */}
-      {isAdmin && (
-        <Card>
-          <CardHeader className="font-semibold">每日日报</CardHeader>
-          <CardBody className="space-y-4">
-            <div className="flex items-center justify-between">
-              <span className="text-sm">启用每日日报</span>
-              <Switch isSelected={bool("daily_report_enabled")} onValueChange={() => toggleBool("daily_report_enabled")} color="primary" />
-            </div>
-            <Input label="日报发送时间" type="time" value={settings.daily_report_time}
-              onValueChange={(v) => set("daily_report_time", v)} />
-          </CardBody>
-        </Card>
-      )}
-
       {/* Trending Monitor */}
       <Card>
         <CardHeader className="font-semibold">热门内容监控</CardHeader>
@@ -731,23 +756,6 @@ export default function MonitorSettingsPage() {
                 onValueChange={(v) => set("trending_min_likes", v)}
                 endContent={<span className="text-default-400 text-xs">赞</span>}
               />
-              {isAdmin && accounts.length > 0 && (
-                <div className="space-y-2">
-                  <div>
-                    <p className="text-sm font-medium">参与搜索的账号（不选=自动从共享池里挑）</p>
-                    <p className="text-xs text-default-400">仅管理员可配置。多选时按关键词轮询账号。</p>
-                  </div>
-                  <CheckboxGroup
-                    orientation="horizontal"
-                    value={idsCsvToArr(settings.trending_account_ids)}
-                    onValueChange={(arr) => set("trending_account_ids", idsArrToCsv(arr))}
-                  >
-                    {accounts.map((a) => (
-                      <Checkbox key={a.id} value={String(a.id)}>{a.name}</Checkbox>
-                    ))}
-                  </CheckboxGroup>
-                </div>
-              )}
               {!isAdmin && (
                 <p className="text-xs text-default-400">
                   搜索使用平台共享账号池，不消耗你自己的账号。
@@ -758,31 +766,93 @@ export default function MonitorSettingsPage() {
         </CardBody>
       </Card>
 
-      {/* AI Config — 仅 admin 可见。普通用户不需要配置 API Key，平台已统一提供 */}
-      {isAdmin && (
-        <Card>
-          <CardHeader className="font-semibold">AI 配置（仅管理员可见）</CardHeader>
-          <CardBody className="space-y-4">
-            <p className="text-xs text-default-400">
-              这里的 API Key 给全平台所有用户共用。普通用户在「热门内容」页直接点改写即可。
-            </p>
-            <Input label="API Base URL（OpenAI 格式）"
-              placeholder="https://api.openai.com/v1"
-              value={settings.ai_base_url}
-              onValueChange={(v) => set("ai_base_url", v)} />
-            <Input label="API Key" type="password"
-              placeholder="sk-..."
-              value={settings.ai_api_key}
-              onValueChange={(v) => set("ai_api_key", v)} />
-            <Input label="模型名称"
-              placeholder="gpt-4o-mini"
-              value={settings.ai_model}
-              onValueChange={(v) => set("ai_model", v)} />
-          </CardBody>
-        </Card>
-      )}
+      {/* Feishu Bitable */}
+      <Card>
+        <CardHeader className="font-semibold">飞书多维表格同步</CardHeader>
+        <CardBody className="space-y-4">
+          <p className="text-xs text-default-400">
+            AI 改写完成后自动同步到飞书多维表格。飞书应用凭据由管理员在「系统配置」中统一配置。
+          </p>
+          <Input label="Bitable App Token" placeholder="从多维表格 URL 中获取"
+            value={settings.feishu_bitable_app_token}
+            onValueChange={(v) => set("feishu_bitable_app_token", v)} />
+          <Input label="Table ID" placeholder="tbl..."
+            value={settings.feishu_bitable_table_id}
+            onValueChange={(v) => set("feishu_bitable_table_id", v)} />
+        </CardBody>
+      </Card>
 
-      {/* 商品图 API 配置 */}
+      {/* Monitor advanced */}
+      <Card>
+        <CardHeader className="font-semibold">监控高级设置</CardHeader>
+        <CardBody className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">抓取帖子评论内容</p>
+              <p className="text-xs text-default-400">监控帖子时，推送具体评论文本（需 Playwright，较慢）</p>
+            </div>
+            <Switch isSelected={bool("comments_fetch_enabled")} onValueChange={() => toggleBool("comments_fetch_enabled")} color="primary" />
+          </div>
+        </CardBody>
+      </Card>
+
+      {/* Prompt Templates */}
+      <PromptTemplatesCard token={token} />
+
+      <Button color="primary" startContent={<Save size={16} />} onPress={saveSettings}>
+        {saved ? "已保存 ✓" : "保存设置"}
+      </Button>
+    </div>
+  );
+
+  // ── 系统配置 tab（仅管理员）：AI、检测间隔、账号管理、商品图 API ──────────
+  const renderSystemPanel = () => (
+    <div className="space-y-6">
+      {/* System monitor config */}
+      <Card>
+        <CardHeader className="font-semibold">系统监控配置</CardHeader>
+        <CardBody className="space-y-4">
+          <Input
+            label="检测间隔"
+            type="number"
+            value={settings.check_interval_minutes}
+            onValueChange={(v) => set("check_interval_minutes", v)}
+            endContent={<span className="text-default-400 text-sm">分钟</span>}
+          />
+          <div className="flex items-center justify-between">
+            <span className="text-sm">启用每日日报</span>
+            <Switch isSelected={bool("daily_report_enabled")} onValueChange={() => toggleBool("daily_report_enabled")} color="primary" />
+          </div>
+          {bool("daily_report_enabled") && (
+            <Input label="日报发送时间" type="time" value={settings.daily_report_time}
+              onValueChange={(v) => set("daily_report_time", v)} />
+          )}
+        </CardBody>
+      </Card>
+
+      {/* AI Config */}
+      <Card>
+        <CardHeader className="font-semibold">AI 配置</CardHeader>
+        <CardBody className="space-y-4">
+          <p className="text-xs text-default-400">
+            这里的 API Key 给全平台所有用户共用。普通用户在「热门内容」页直接点改写即可。
+          </p>
+          <Input label="API Base URL（OpenAI 格式）"
+            placeholder="https://api.openai.com/v1"
+            value={settings.ai_base_url}
+            onValueChange={(v) => set("ai_base_url", v)} />
+          <Input label="API Key" type="password"
+            placeholder="sk-..."
+            value={settings.ai_api_key}
+            onValueChange={(v) => set("ai_api_key", v)} />
+          <Input label="模型名称"
+            placeholder="gpt-4o-mini"
+            value={settings.ai_model}
+            onValueChange={(v) => set("ai_model", v)} />
+        </CardBody>
+      </Card>
+
+      {/* Image API Config */}
       <Card>
         <CardHeader className="font-semibold flex items-center justify-between">
           <span>商品图 API 配置</span>
@@ -838,66 +908,45 @@ export default function MonitorSettingsPage() {
         </CardBody>
       </Card>
 
-      {/* Prompt Templates */}
-      <PromptTemplatesCard token={token} />
-
-
-      {/* Feishu Bitable — App ID/Secret 仅 admin；表格地址普通用户也能配置（属于自己的目的地） */}
+      {/* Feishu App credentials */}
       <Card>
-        <CardHeader className="font-semibold">飞书多维表格同步</CardHeader>
+        <CardHeader className="font-semibold">飞书应用凭据</CardHeader>
         <CardBody className="space-y-4">
           <p className="text-xs text-default-400">
-            AI 改写完成后自动同步到飞书多维表格。
-            {!isAdmin && " 飞书应用 App ID/Secret 由管理员统一配置；你只需要填目标表格地址。"}
+            飞书应用 App ID / Secret 供全平台用户同步多维表格时使用。
           </p>
-          {isAdmin && (
-            <div className="grid grid-cols-2 gap-3">
-              <Input label="App ID（管理员）" placeholder="cli_..." value={settings.feishu_app_id}
-                onValueChange={(v) => set("feishu_app_id", v)} />
-              <Input label="App Secret（管理员）" type="password" placeholder="..."
-                value={settings.feishu_app_secret}
-                onValueChange={(v) => set("feishu_app_secret", v)} />
-            </div>
-          )}
-          <Input label="Bitable App Token" placeholder="从多维表格 URL 中获取"
-            value={settings.feishu_bitable_app_token}
-            onValueChange={(v) => set("feishu_bitable_app_token", v)} />
-          <Input label="Table ID" placeholder="tbl..."
-            value={settings.feishu_bitable_table_id}
-            onValueChange={(v) => set("feishu_bitable_table_id", v)} />
-        </CardBody>
-      </Card>
-
-      {/* Monitor advanced settings */}
-      <Card>
-        <CardHeader className="font-semibold">监控高级设置</CardHeader>
-        <CardBody className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium">抓取帖子评论内容</p>
-              <p className="text-xs text-default-400">监控帖子时，推送具体评论文本（需 Playwright，较慢）</p>
-            </div>
-            <Switch isSelected={bool("comments_fetch_enabled")} onValueChange={() => toggleBool("comments_fetch_enabled")} color="primary" />
+          <div className="grid grid-cols-2 gap-3">
+            <Input label="App ID" placeholder="cli_..." value={settings.feishu_app_id}
+              onValueChange={(v) => set("feishu_app_id", v)} />
+            <Input label="App Secret" type="password" placeholder="..."
+              value={settings.feishu_app_secret}
+              onValueChange={(v) => set("feishu_app_secret", v)} />
           </div>
         </CardBody>
       </Card>
 
-      <Button color="primary" startContent={<Save size={16} />} onPress={saveSettings}>
-        {saved ? "已保存 ✓" : "保存设置"}
-      </Button>
-
-      {!isAdmin && (
+      {/* Trending account IDs — admin only */}
+      {bool("trending_enabled") && accounts.length > 0 && (
         <Card>
-          <CardBody className="text-center text-sm text-default-500 py-6">
-            🔐 平台已为你配置好搜索账号和 AI 改写所需的 API Key，无需自行管理。
+          <CardHeader className="font-semibold">热门抓取账号池</CardHeader>
+          <CardBody className="space-y-3">
+            <p className="text-sm text-default-500">
+              参与热门搜索的账号（不选 = 自动从共享池里挑）。多选时按关键词轮询账号。
+            </p>
+            <CheckboxGroup
+              orientation="horizontal"
+              value={idsCsvToArr(settings.trending_account_ids)}
+              onValueChange={(arr) => set("trending_account_ids", idsArrToCsv(arr))}
+            >
+              {accounts.map((a) => (
+                <Checkbox key={a.id} value={String(a.id)}>{a.name}</Checkbox>
+              ))}
+            </CheckboxGroup>
           </CardBody>
         </Card>
       )}
 
-      {isAdmin && <Divider />}
-
-      {/* Account Management — 仅 admin 才需要看到 cookie 录入面板 */}
-      {isAdmin && (
+      {/* Account Management */}
       <Card>
         <CardHeader className="font-semibold">账号管理</CardHeader>
         <CardBody className="space-y-4">
@@ -921,41 +970,23 @@ export default function MonitorSettingsPage() {
               <Table aria-label="accounts" removeWrapper>
                 <TableHeader>
                   <TableColumn>账号</TableColumn>
+                  <TableColumn>平台</TableColumn>
                   <TableColumn>状态</TableColumn>
                   <TableColumn>代理</TableColumn>
-                  <TableColumn>最后检测</TableColumn>
                   <TableColumn>操作</TableColumn>
                 </TableHeader>
                 <TableBody>
                   {accounts.map((a) => (
                     <TableRow key={a.id}>
                       <TableCell><Chip size="sm" variant="flat">{a.name}</Chip></TableCell>
+                      <TableCell>
+                        <Chip size="sm" variant="flat" color="secondary">
+                          {PLATFORM_LABELS[(a.platform || "xhs") as PlatformKey] || a.platform || "xhs"}
+                        </Chip>
+                      </TableCell>
                       <TableCell>{cookieStatusChip(a)}</TableCell>
                       <TableCell>{renderAccountBadges(a) ?? <span className="text-xs text-default-400">—</span>}</TableCell>
-                      <TableCell>
-                        <span className="text-xs text-default-400">
-                          {a.cookie_checked_at ? a.cookie_checked_at.slice(0, 16) : "—"}
-                        </span>
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex gap-1">
-                          <Tooltip content="检查 Cookie">
-                            <Button isIconOnly size="sm" variant="light"
-                              isLoading={checkingId === a.id}
-                              onPress={() => checkOne(a.id)}>
-                              <RefreshCw size={15} />
-                            </Button>
-                          </Tooltip>
-                          <Button isIconOnly size="sm" variant="light"
-                            onPress={() => openEdit(a)}>
-                            <Pencil size={15} />
-                          </Button>
-                          <Button isIconOnly size="sm" variant="light" color="danger"
-                            onPress={() => deleteAccount(a.id)}>
-                            <Trash2 size={15} />
-                          </Button>
-                        </div>
-                      </TableCell>
+                      <TableCell>{renderAccountActions(a)}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -972,13 +1003,34 @@ export default function MonitorSettingsPage() {
           <Divider />
 
           <div className="space-y-3">
-            <p className="text-sm text-default-500">填写账号名称后点击「扫码登录」，用小红书 App 扫码即可自动保存账号。</p>
-            <Input
-              label="账号名称"
-              placeholder="例：账号A"
-              value={accountForm.name}
-              onValueChange={(v) => setAccountForm((f) => ({ ...f, name: v }))}
-            />
+            <p className="text-sm text-default-500">填写账号信息后，小红书可扫码登录；其他平台手动填写 Cookie 后通过编辑功能保存。</p>
+            <div className="grid grid-cols-2 gap-3">
+              <Input
+                label="账号名称"
+                placeholder="例：账号A"
+                value={accountForm.name}
+                onValueChange={(v) => setAccountForm((f) => ({ ...f, name: v }))}
+              />
+              <div className="flex flex-col gap-1.5">
+                <span className="text-sm text-default-700">平台</span>
+                <div className="flex gap-2">
+                  {(["xhs", "douyin", "mp"] as PlatformKey[]).map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => setAccountForm((f) => ({ ...f, platform: p }))}
+                      className={`px-3 py-1.5 rounded-md text-sm border transition-colors ${
+                        accountForm.platform === p
+                          ? "bg-primary text-white border-primary"
+                          : "border-divider text-default-600 hover:bg-default-100"
+                      }`}
+                    >
+                      {PLATFORM_LABELS[p]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
             <Input
               label="代理 URL（可选，仅用于监控）"
               placeholder="http://user:pass@host:port 或 socks5://host:port"
@@ -990,15 +1042,23 @@ export default function MonitorSettingsPage() {
               color="primary"
               startContent={<QrCode size={16} />}
               onPress={startQrLogin}
-              isDisabled={!accountForm.name}
+              isDisabled={!accountForm.name || accountForm.platform !== "xhs"}
               className="w-full"
             >
-              扫码登录
+              扫码登录（小红书）
             </Button>
+            {accountForm.platform !== "xhs" && accountForm.name && (
+              <p className="text-xs text-default-400 text-center">
+                {PLATFORM_LABELS[accountForm.platform as PlatformKey]} 账号请先点「扫码登录」创建记录，再通过编辑按钮手动粘贴 Cookie。
+              </p>
+            )}
           </div>
         </CardBody>
       </Card>
-      )}
+
+      <Button color="primary" startContent={<Save size={16} />} onPress={saveSettings}>
+        {saved ? "已保存 ✓" : "保存系统配置"}
+      </Button>
     </div>
   );
 
@@ -1019,6 +1079,11 @@ export default function MonitorSettingsPage() {
         <Tab key="mp" title={PLATFORM_LABELS.mp}>
           {renderPlatformPanel("mp")}
         </Tab>
+        {isAdmin && (
+          <Tab key="system" title="系统配置">
+            {renderSystemPanel()}
+          </Tab>
+        )}
       </Tabs>
 
       {/* Edit Account Modal */}

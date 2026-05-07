@@ -45,6 +45,7 @@ type Post = {
   copyright_stat?: string | null;
   source_url?: string | null;
   author?: string | null;  // 公众号名 / 抖音博主名
+  owner_username?: string;
 };
 
 function CopyrightChip({ stat }: { stat?: string | null }) {

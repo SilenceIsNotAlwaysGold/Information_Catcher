@@ -66,8 +66,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   return (
     <div className="flex min-h-screen bg-[#f9fafb]">
       <Sidebar mobileOpen={mobileOpen} onMobileClose={() => setMobileOpen(false)} />
-      {/* main area offset for sidebar width：移动端 0，md 16，lg 56 */}
-      <main className="flex-1 ml-0 md:ml-16 lg:ml-56 min-h-screen overflow-y-auto">
+      {/* main area offset for sidebar width：移动端 0，md 16，lg 64 */}
+      <main className="flex-1 ml-0 md:ml-16 lg:ml-64 min-h-screen overflow-y-auto">
         {/* 移动端 topbar：汉堡 + 当前页面标题 + 搜索图标；≥md 隐藏 */}
         <header className="md:hidden sticky top-0 z-30 h-14 flex items-center gap-3 px-4 bg-content1 border-b border-divider">
           <button

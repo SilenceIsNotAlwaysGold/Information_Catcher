@@ -44,6 +44,7 @@ type Post = {
   last_fetch_at?: string | null;
   fail_count?: number;
   platform?: string; // "xhs" / "douyin" / "mp"，老数据为 "xhs"
+  owner_username?: string;
 };
 
 type Alert = {
