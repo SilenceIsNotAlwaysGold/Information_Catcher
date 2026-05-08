@@ -15,6 +15,7 @@ from ..schemas.monitor import (
     RewriteCrossPlatformRequest,
     LockVariantRequest,
     SyncBitableRequest,
+    BatchDeletePostsRequest,
     CreateGroupRequest,
     UpdateGroupRequest,
     AddCreatorRequest,
@@ -53,6 +54,10 @@ async def add_posts(
     background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user),
 ):
+    # 强制选分组：避免帖子落入「未分组」无法在普通用户视图分组 tab 中显示
+    if req.group_id is None:
+        raise HTTPException(status_code=400, detail="必须选择一个分组")
+
     # 配额检查（admin 不限）
     if (current_user.get("role") or "user") != "admin":
         from ..services import auth_service
@@ -128,9 +133,37 @@ async def list_posts(
 
 
 @router.delete("/posts/{note_id}", summary="删除监控帖子")
-async def delete_post(note_id: str, current_user: dict = Depends(get_current_user)):
-    await db.delete_post(note_id, user_id=_scope_uid(current_user))
+async def delete_post(
+    note_id: str,
+    owner_user_id: Optional[int] = None,  # admin 删别人帖子时显式传
+    current_user: dict = Depends(get_current_user),
+):
+    is_admin = (current_user.get("role") or "user") == "admin"
+    # 普通用户：只能删自己的（user_id 强制为自己）
+    # admin：可删任意人的；如果传了 owner_user_id 则精准命中，未传则按 note_id 删（所有 user_id 下）
+    uid = owner_user_id if is_admin else _scope_uid(current_user)
+    await db.delete_post(note_id, user_id=uid)
     return {"ok": True}
+
+
+@router.post("/posts/batch-delete", summary="批量删除监控帖子")
+async def batch_delete_posts(
+    req: BatchDeletePostsRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """note_ids 数组按 _scope_uid 规则删除（普通用户只能删自己的，admin 全权）。"""
+    if not req.note_ids:
+        return {"ok": True, "deleted": 0}
+    is_admin = (current_user.get("role") or "user") == "admin"
+    uid = None if is_admin else _scope_uid(current_user)
+    deleted = 0
+    for nid in req.note_ids:
+        try:
+            await db.delete_post(nid, user_id=uid)
+            deleted += 1
+        except Exception:
+            pass
+    return {"ok": True, "deleted": deleted}
 
 
 @router.get("/posts/{note_id}/video", summary="获取帖子视频直链（抖音支持去水印）")
@@ -909,7 +942,7 @@ async def check_all_cookies(
 @router.post("/accounts/qr-login/start", summary="启动扫码登录")
 async def qr_login_start(
     req: QRLoginStartRequest,
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     platform = (req.platform or "xhs").lower()
     if platform != "xhs":
@@ -918,8 +951,11 @@ async def qr_login_start(
             status_code=501,
             detail=f"{platform} 扫码登录开发中，请用「手动录入 Cookie」入口",
         )
+    payload = req.model_dump()
+    # 把当前用户塞进 template，登录成功保存账号时 user_id 才有值（多租户隔离）
+    payload["user_id"] = current_user["id"]
     try:
-        data = await qr_login.start_session(req.model_dump())
+        data = await qr_login.start_session(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return data
@@ -947,7 +983,7 @@ _ADMIN_ONLY_SETTING_KEYS = {
     "ai_base_url", "ai_api_key", "ai_model", "ai_rewrite_prompt",
     "feishu_app_id", "feishu_app_secret",
     "feishu_oauth_redirect_uri", "feishu_bitable_root_folder_token",
-    "feishu_admin_open_id", "feishu_invite_url",
+    "feishu_admin_open_id", "feishu_invite_url", "feishu_invite_code",
     "feishu_bitable_image_table_id",
     "qiniu_access_key", "qiniu_secret_key", "qiniu_bucket", "qiniu_domain",
     "public_url_prefix",
@@ -1014,7 +1050,7 @@ async def update_settings(
         "ai_base_url", "ai_api_key", "ai_model", "ai_rewrite_prompt",
         "feishu_app_id", "feishu_app_secret",
         "feishu_oauth_redirect_uri", "feishu_bitable_root_folder_token",
-        "feishu_admin_open_id",
+        "feishu_admin_open_id", "feishu_invite_url", "feishu_invite_code",
         "feishu_bitable_app_token", "feishu_bitable_table_id",
         "feishu_bitable_image_table_id",
         "qiniu_access_key", "qiniu_secret_key", "qiniu_bucket", "qiniu_domain",

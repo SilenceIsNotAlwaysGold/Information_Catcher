@@ -100,7 +100,6 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
       // 把 null/空 都转成显式 null（让后端用全局值）
       const body: Record<string, any> = { name: form.name.trim() };
       const passthrough: (keyof Form)[] = [
-        "feishu_webhook_url", "wecom_webhook_url",
         "message_prefix", "template_likes", "template_collects", "template_comments",
         "alert_rules",
       ];
@@ -209,8 +208,6 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1 text-xs">
-                        {g.feishu_webhook_url && <Chip size="sm" color="primary" variant="flat">飞书</Chip>}
-                        {g.wecom_webhook_url && <Chip size="sm" color="primary" variant="flat">企微</Chip>}
                         {(g.likes_threshold || g.collects_threshold || g.comments_threshold) && (
                           <Chip size="sm" color="warning" variant="flat">自定义阈值</Chip>
                         )}
@@ -257,19 +254,6 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
             />
 
             <Accordion variant="bordered">
-              <AccordionItem key="webhook" title="独立 Webhook（留空 = 用全局）" classNames={{ title: "text-sm" }}>
-                <div className="space-y-3 pt-2">
-                  <Input label="飞书 Webhook URL"
-                    placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
-                    value={form.feishu_webhook_url || ""}
-                    onValueChange={(v) => set("feishu_webhook_url", v)} />
-                  <Input label="企微 Webhook URL"
-                    placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
-                    value={form.wecom_webhook_url || ""}
-                    onValueChange={(v) => set("wecom_webhook_url", v)} />
-                </div>
-              </AccordionItem>
-
               <AccordionItem key="thresholds" title="独立告警阈值（留空 = 用全局）" classNames={{ title: "text-sm" }}>
                 <div className="space-y-3 pt-2">
                   {[

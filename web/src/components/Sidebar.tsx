@@ -1,11 +1,11 @@
 "use client";
 
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   LayoutDashboard, Upload, Settings, LogOut, TrendingUp,
   ShieldCheck, Music2, Newspaper, ChevronDown, ChevronRight,
-  FileText, Users, Moon, Sun, X,
+  FileText, Users, Moon, Sun, X, Sparkles, Link2, SlidersHorizontal, Server,
   Image as ImageIcon,
 } from "lucide-react";
 import { Button } from "@nextui-org/button";
@@ -72,12 +72,16 @@ const baseNavItems: NavItem[] = [
 
   { key: "import",      href: "/dashboard/import",                icon: <Upload size={20} />,    label: "数据导入",   module: "common" },
   { key: "tools-image", href: "/dashboard/tools/product-image",   icon: <ImageIcon size={20} />, label: "商品图工具", module: "common" },
-  { key: "settings",    href: "/dashboard/monitor/settings",      icon: <Settings size={20} />,  label: "设置",       module: "common" },
+  { key: "settings",    href: "/dashboard/profile",               icon: <Settings size={20} />,  label: "个人设置",   module: "common" },
 ];
 
-const adminNavItem: NavItem = {
-  key: "admin", href: "/dashboard/admin", icon: <ShieldCheck size={20} />, label: "管理员控制台", module: "common",
-};
+const adminNavItems: NavItem[] = [
+  { key: "admin",          href: "/dashboard/admin",                                   icon: <ShieldCheck size={20} />,        label: "管理员控制台", module: "common" },
+  { key: "admin-ai",       href: "/dashboard/admin/ai",                                icon: <Sparkles size={20} />,           label: "AI 模型",      module: "common" },
+  { key: "admin-feishu",   href: "/dashboard/admin/feishu",                            icon: <Link2 size={20} />,              label: "飞书应用",     module: "common" },
+  { key: "admin-system",   href: "/dashboard/admin/system",                            icon: <SlidersHorizontal size={20} />,  label: "系统配置",     module: "common" },
+  { key: "admin-accounts", href: "/dashboard/admin/accounts",                          icon: <Server size={20} />,             label: "账号管理",     module: "common" },
+];
 
 const COLLAPSE_KEY = "sidebar.collapsed.modules";
 
@@ -90,12 +94,14 @@ export type SidebarProps = {
 
 export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps = {}) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const tabQuery = searchParams?.get("tab") || "";
   const { t } = useI18n();
   const { logout, user } = useAuth();
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
-  const navItems = user?.role === "admin" ? [...baseNavItems, adminNavItem] : baseNavItems;
+  const navItems = user?.role === "admin" ? [...baseNavItems, ...adminNavItems] : baseNavItems;
 
   // 折叠状态：{ [module]: true } 表示折叠
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -116,14 +122,36 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps = {}
   };
 
   // 最长前缀匹配 active：精确匹配 href 或 href + "/"
+  // 对带 ?tab=xxx 的入口（如「账号管理」）：当前 path 命中且 query 也匹配才算 active
   const candidates = navItems
-    .filter((it) => it.href === "/dashboard"
-      ? pathname === "/dashboard" || pathname === "/dashboard/"
-      : pathname === it.href
-        || pathname === it.href.replace(/\/$/, "")
-        || pathname.startsWith(it.href))
+    .filter((it) => {
+      const [hrefPath, hrefQs] = it.href.split("?");
+      const pathMatch = hrefPath === "/dashboard"
+        ? pathname === "/dashboard" || pathname === "/dashboard/"
+        : pathname === hrefPath
+          || pathname === hrefPath.replace(/\/$/, "")
+          || pathname.startsWith(hrefPath + "/");
+      if (!pathMatch) return false;
+      if (!hrefQs) {
+        // 无 query 的入口在 path 命中且当前页没有 tab 参数（或 tab 不属于其他入口）时 active
+        // 简化：如果有同 path 但带 query 的兄弟入口正在生效，让它优先
+        return true;
+      }
+      // 带 query 的入口：query 必须完全匹配
+      const want = new URLSearchParams(hrefQs).get("tab") || "";
+      return want === tabQuery;
+    })
     .sort((a, b) => b.href.length - a.href.length);
-  const activeKey = candidates[0]?.key;
+  // 同 path 但有的带 query 有的不带：当 tab 命中时优先选带 query 的
+  const activeKey = (() => {
+    if (tabQuery) {
+      const withQuery = candidates.find((c) => c.href.includes("?tab="));
+      if (withQuery) return withQuery.key;
+    }
+    // 无 query 时排除带 query 的兄弟入口（避免误高亮）
+    const noQuery = candidates.filter((c) => !c.href.includes("?"));
+    return (noQuery[0] || candidates[0])?.key;
+  })();
 
   // 按 module 分桶但保留原序
   const blocks: { module: ModuleId; items: NavItem[] }[] = [];

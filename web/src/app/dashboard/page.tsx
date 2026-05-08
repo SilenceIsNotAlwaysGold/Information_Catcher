@@ -24,6 +24,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { UpdateNoticeBanner } from "@/components/UpdateNoticeBanner";
 import { CardSkeleton } from "@/components/CardSkeleton";
 import { EmptyState } from "@/components/EmptyState";
+import { OnboardingCard } from "@/components/OnboardingCard";
 import { toastOk, toastErr } from "@/lib/toast";
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -217,7 +218,7 @@ export default function DashboardPage() {
       icon: <ShieldCheck size={18} />,
       color: "text-success",
       hint: quota.accounts.expired > 0 ? `${quota.accounts.expired} 个已过期` : undefined,
-      href: "/dashboard/monitor/settings",
+      href: "/dashboard/admin/accounts",
     },
     {
       label: "订阅创作者",
@@ -260,6 +261,9 @@ export default function DashboardPage() {
           立即检测
         </Button>
       </div>
+
+      {/* Onboarding（三步未全部完成时显示） */}
+      <OnboardingCard token={token} postsTotal={postsTotal} />
 
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

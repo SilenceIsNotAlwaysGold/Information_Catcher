@@ -10,14 +10,26 @@ import { Chip } from "@nextui-org/chip";
 import {
   Image as ImageIcon, Sparkles, Settings as SettingsIcon, Download,
   Wand2, AlertCircle, Upload, X, ChevronDown, ChevronUp, Check, Link2,
-  History as HistoryIcon, Send, Trash2, ExternalLink,
+  History as HistoryIcon, Send, Trash2, ExternalLink, Copy,
 } from "lucide-react";
+import {
+  Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
+} from "@nextui-org/modal";
 import { useAuth } from "@/contexts/AuthContext";
 import { useMe } from "@/lib/useApi";
 import { toastOk, toastErr } from "@/lib/toast";
 import { EmptyState } from "@/components/EmptyState";
+import { ImageApiConfigButton } from "@/components/ImageApiConfigButton";
 
 const API = (path: string) => `/api/monitor/image${path}`;
+
+// 把七牛 / 本地存储 URL 包成代理 URL，避免 HTTPS 页面下 mixed content 拦截
+const proxyUrl = (raw: string | undefined | null): string => {
+  if (!raw) return "";
+  // 已是相对路径 / data URI / blob 不动
+  if (!raw.startsWith("http://") && !raw.startsWith("https://")) return raw;
+  return `/api/monitor/image/proxy?url=${encodeURIComponent(raw)}`;
+};
 
 const SIZE_OPTIONS = [
   { key: "864x1152",  label: "小红书 3:4（864 × 1152）" },
@@ -131,6 +143,8 @@ export default function ProductImagePage() {
   // 数量：套数（账号数）× 每套张数（每篇笔记的轮播图数）
   const [sets, setSets] = useState<number>(1);
   const [imagesPerSet, setImagesPerSet] = useState<number>(1);
+  // 同时生成配套文案（标题 + 正文）：默认开，AI 基于当前 prompt + 平台调性写一份
+  const [captionEnabled, setCaptionEnabled] = useState<boolean>(true);
 
   // 恢复：组件挂载时从 localStorage 读回上次状态
   useEffect(() => {
@@ -150,6 +164,7 @@ export default function ProductImagePage() {
       if (d.selectedPromptIdx != null) setSelectedPromptIdx(d.selectedPromptIdx);
       if (typeof d.sets === "number" && d.sets >= 1) setSets(d.sets);
       if (typeof d.imagesPerSet === "number" && d.imagesPerSet >= 1) setImagesPerSet(d.imagesPerSet);
+      if (typeof d.captionEnabled === "boolean") setCaptionEnabled(d.captionEnabled);
     } catch {}
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -162,7 +177,7 @@ export default function ProductImagePage() {
       localStorage.setItem(PERSIST_KEY, JSON.stringify({
         subject, selectedScenes, selectedStyle, selectedPlatform,
         promptLanguage, wizardExtras, wizardPrompts, prompt, negativePrompt, selectedPromptIdx,
-        sets, imagesPerSet,
+        sets, imagesPerSet, captionEnabled,
       }));
     } catch {}
   }, [subject, selectedScenes, selectedStyle, selectedPlatform,
@@ -330,6 +345,8 @@ export default function ProductImagePage() {
     upload_status?: "pending" | "uploaded" | "failed" | "skipped";
     upload_retries?: number;
     upload_last_error?: string;
+    generated_title?: string;
+    generated_body?: string;
     source_post_url?: string;
     source_post_title?: string;
     used_reference?: number;
@@ -341,6 +358,25 @@ export default function ProductImagePage() {
   const [qiniuConfigured, setQiniuConfigured] = useState(false);
   const [historySelected, setHistorySelected] = useState<Set<number>>(new Set());
   const [historySyncing, setHistorySyncing] = useState(false);
+
+  // 大图预览
+  const [previewImage, setPreviewImage] = useState<{ url: string; title?: string } | null>(null);
+  const downloadPreview = async () => {
+    if (!previewImage) return;
+    try {
+      const res = await fetch(proxyUrl(previewImage.url));
+      const blob = await res.blob();
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = u;
+      const fname = previewImage.url.split("/").pop()?.split("?")[0] || `image-${Date.now()}.png`;
+      a.download = fname;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(u), 1000);
+    } catch (e: any) {
+      toastErr(`下载失败：${e?.message || e}`);
+    }
+  };
 
   const reloadHistory = async () => {
     if (!token) return;
@@ -450,20 +486,31 @@ export default function ProductImagePage() {
 
     const accumulated: GenItem[] = [];
     let remaining = count;
+    // 配套文案：首批让后端 AI 生成一份，后续批次回传复用
+    let captionTitle = "";
+    let captionBody = "";
 
     try {
       while (remaining > 0) {
         const take = Math.min(remaining, BATCH_SIZE);
+        const isFirstBatch = accumulated.length === 0;
+        // 平台映射：UI "小红书"/"抖音"/"公众号" → 后端 xhs/douyin/mp
+        const platMap: Record<string, string> = { 小红书: "xhs", 抖音: "douyin", 公众号: "mp" };
+        const targetPlatform = platMap[selectedPlatform] || "xhs";
+
         const body: Record<string, any> = {
           prompt: prompt.trim(),
           negative_prompt: negativePrompt.trim(),
           n: take,
           size: genSize || undefined,
-          // 套图维度：让后端按 set/in-set 编号写入历史记录
           images_per_set: imagesPerSet,
           start_index: accumulated.length,
-          // 来源（如果是从作品 URL 加载文案生成的）
           source_post_url: postUrlInput.trim() || undefined,
+          // 配套文案：勾选时启用；首批让后端生成，后续批次复用
+          auto_rewrite: captionEnabled,
+          target_platform: targetPlatform,
+          forced_title: isFirstBatch ? "" : captionTitle,
+          forced_body: isFirstBatch ? "" : captionBody,
         };
         if (refImageB64) body.reference_image_b64 = refImageB64;
 
@@ -498,12 +545,24 @@ export default function ProductImagePage() {
           return;
         }
 
+        // 首批：拿到 AI 生成的 caption，后续批次回传复用
+        if (isFirstBatch && captionEnabled) {
+          if (data?.generated_title || data?.generated_body) {
+            captionTitle = data.generated_title || "";
+            captionBody = data.generated_body || "";
+          } else if (data?.caption_error) {
+            // AI 失败不阻塞生图，只提示
+            toastErr(`配套文案生成失败：${data.caption_error}（图正常生成）`);
+          }
+        }
+
         accumulated.push(...batchImgs);
         // 立刻刷新到 UI，让用户能看到进度
         setItemsAndCache([...accumulated]);
         remaining -= take;
       }
-      toastOk(`生成成功（${accumulated.length} 张）`);
+      const captionMsg = captionEnabled && captionTitle ? "（含配套文案）" : "";
+      toastOk(`生成成功（${accumulated.length} 张）${captionMsg}`);
       reloadHistory();
     } catch (e: any) {
       if (accumulated.length > 0) {
@@ -560,7 +619,7 @@ export default function ProductImagePage() {
   };
 
   const itemSrc = (item: GenItem) =>
-    item.b64 ? `data:image/png;base64,${item.b64}` : (item.url || "");
+    item.b64 ? `data:image/png;base64,${item.b64}` : proxyUrl(item.url || "");
 
   return (
     <div className="max-w-5xl mx-auto space-y-6 p-4 md:p-6">
@@ -599,16 +658,7 @@ export default function ProductImagePage() {
             )}
           </div>
           {isAdmin && (
-            <Chip
-              as="a"
-              href="/dashboard/monitor/settings"
-              size="sm"
-              variant="flat"
-              color={cfg.has_key ? "default" : "warning"}
-              className="cursor-pointer shrink-0"
-            >
-              {cfg.has_key ? "修改配置" : "去设置（管理员）"}
-            </Chip>
+            <ImageApiConfigButton hasKey={cfg.has_key} onSaved={loadConfig} />
           )}
         </CardBody>
       </Card>
@@ -941,6 +991,25 @@ export default function ProductImagePage() {
                     总数已达上限 {MAX_TOTAL} 张（请求 {sets * imagesPerSet} 张被裁剪）。
                   </p>
                 )}
+
+                {/* 配套文案：同一批所有图共用一份（首批 AI 生成，后续复用） */}
+                <div className="flex items-start gap-2 pt-2 border-t border-divider">
+                  <input
+                    id="caption-enabled"
+                    type="checkbox"
+                    className="mt-1 cursor-pointer"
+                    checked={captionEnabled}
+                    onChange={(e) => setCaptionEnabled(e.target.checked)}
+                  />
+                  <label htmlFor="caption-enabled" className="cursor-pointer flex-1">
+                    <div className="text-sm text-default-700">同时生成配套文案</div>
+                    <div className="text-xs text-default-400 leading-relaxed mt-0.5">
+                      AI 基于当前 Prompt + 目标平台调性写一份「标题 + 正文」，
+                      所有图共用，可在历史卡片复制 / 同步到飞书。
+                      平台：<span className="text-primary">{selectedPlatform}</span>（在向导里改）
+                    </div>
+                  </label>
+                </div>
               </div>
 
               {/* 尺寸：用按钮组突出小红书 3:4 / 抖音 9:16 两个常用预设 */}
@@ -1248,15 +1317,20 @@ export default function ProductImagePage() {
                       onChange={() => toggleHistorySelected(h.id)}
                       aria-label={`选择 #${h.id}`}
                     />
-                    {/* 缩略图 */}
-                    <div className="shrink-0 w-16 h-16 rounded overflow-hidden bg-default-100 flex items-center justify-center">
+                    {/* 缩略图 - 点击弹大图预览 */}
+                    <button
+                      type="button"
+                      onClick={() => h.qiniu_url && setPreviewImage({ url: h.qiniu_url, title: `#${h.id}` })}
+                      className="shrink-0 w-16 h-16 rounded overflow-hidden bg-default-100 flex items-center justify-center cursor-zoom-in hover:ring-2 hover:ring-primary transition-all"
+                      title="点击查看大图"
+                    >
                       {h.qiniu_url ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={h.qiniu_url} alt={`#${h.id}`} className="w-full h-full object-cover" />
+                        <img src={proxyUrl(h.qiniu_url)} alt={`#${h.id}`} className="w-full h-full object-cover" />
                       ) : (
                         <ImageIcon size={20} className="text-default-300" />
                       )}
-                    </div>
+                    </button>
                     {/* prompt + meta */}
                     <div className="flex-1 min-w-0 space-y-1">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -1288,6 +1362,43 @@ export default function ProductImagePage() {
                       <p className="text-xs text-default-600 line-clamp-2 leading-relaxed">
                         {h.prompt}
                       </p>
+                      {/* AI 生成的配套文案：标题置顶，正文 hover 看全部，按钮一键复制 */}
+                      {(h.generated_title || h.generated_body) && (
+                        <div className="flex items-start gap-1.5 rounded bg-secondary/5 border border-secondary/20 px-2 py-1.5">
+                          <span className="text-xs shrink-0 text-secondary-600">📝</span>
+                          <div
+                            className="flex-1 min-w-0 cursor-help"
+                            title={[h.generated_title, h.generated_body].filter(Boolean).join("\n\n")}
+                          >
+                            {h.generated_title && (
+                              <div className="text-xs font-medium text-default-700 truncate">
+                                {h.generated_title}
+                              </div>
+                            )}
+                            {h.generated_body && (
+                              <div className="text-[11px] text-default-500 line-clamp-2 leading-snug mt-0.5">
+                                {h.generated_body}
+                              </div>
+                            )}
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="light"
+                            isIconOnly
+                            aria-label="复制文案"
+                            className="shrink-0 h-6 w-6 min-w-6"
+                            onPress={async () => {
+                              const txt = [h.generated_title, h.generated_body].filter(Boolean).join("\n\n");
+                              try {
+                                await navigator.clipboard.writeText(txt);
+                                toastOk("文案已复制");
+                              } catch { toastErr("复制失败"); }
+                            }}
+                          >
+                            <Copy size={11} />
+                          </Button>
+                        </div>
+                      )}
                       {h.source_post_title && (
                         <p className="text-xs text-default-400 truncate">
                           来源：{h.source_post_title}
@@ -1312,10 +1423,10 @@ export default function ProductImagePage() {
                           size="sm"
                           variant="light"
                           isIconOnly
-                          aria-label="打开 URL"
-                          onPress={() => window.open(h.qiniu_url, "_blank")}
+                          aria-label="预览大图"
+                          onPress={() => setPreviewImage({ url: h.qiniu_url, title: `#${h.id}` })}
                         >
-                          <ExternalLink size={14} />
+                          <ImageIcon size={14} />
                         </Button>
                       )}
                       <Button
@@ -1336,6 +1447,52 @@ export default function ProductImagePage() {
           )}
         </CardBody>
       </Card>
+
+      {/* 大图预览 modal */}
+      <Modal
+        isOpen={!!previewImage}
+        onClose={() => setPreviewImage(null)}
+        size="3xl"
+        scrollBehavior="inside"
+      >
+        <ModalContent>
+          <ModalHeader className="flex items-center gap-2">
+            <ImageIcon size={18} />
+            图片预览 {previewImage?.title && <span className="text-default-400 text-sm">{previewImage.title}</span>}
+          </ModalHeader>
+          <ModalBody className="flex items-center justify-center bg-default-50 p-4">
+            {previewImage && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={proxyUrl(previewImage.url)}
+                alt="preview"
+                className="max-w-full max-h-[70vh] object-contain rounded"
+              />
+            )}
+          </ModalBody>
+          <ModalFooter className="flex justify-between items-center">
+            <code className="text-xs text-default-400 truncate flex-1 mr-3">{previewImage?.url}</code>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="flat"
+                startContent={<ExternalLink size={14} />}
+                onPress={() => previewImage && navigator.clipboard.writeText(previewImage.url).then(() => toastOk("URL 已复制"))}
+              >
+                复制 URL
+              </Button>
+              <Button
+                size="sm"
+                color="primary"
+                startContent={<Download size={14} />}
+                onPress={downloadPreview}
+              >
+                下载原图
+              </Button>
+            </div>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
     </div>
   );
 }

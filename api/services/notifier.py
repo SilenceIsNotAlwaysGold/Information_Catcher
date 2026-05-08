@@ -73,19 +73,18 @@ async def _push(
 ):
     """统一推送。
 
-    飞书路径优先级：feishu_chat_id（应用机器人）→ feishu_url（webhook 兜底）。
-    两者只走其一，避免双重通知。chat_id 发送失败时自动回落 webhook。
+    飞书侧支持双通道：
+      - 应用机器人 chat_id（OAuth 绑定后，富卡片，可 @人）— 优先
+      - 群机器人 webhook URL（兼容未绑定的老用户/群组级配置）— 兜底
+    两者择优：如配了 chat_id 就走 chat，否则回退 webhook；都没配则跳过。
     """
     tasks = []
     if wecom_url:
         tasks.append(send_wecom(wecom_url, f"## {title}\n{md_content}"))
-
-    feishu_sent = False
     if feishu_chat_id:
-        feishu_sent = await send_feishu_chat(feishu_chat_id, title, md_content, template)
-    if not feishu_sent and feishu_url:
+        tasks.append(send_feishu_chat(feishu_chat_id, title, md_content, template))
+    elif feishu_url:
         tasks.append(send_feishu(feishu_url, title, md_content, template))
-
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 

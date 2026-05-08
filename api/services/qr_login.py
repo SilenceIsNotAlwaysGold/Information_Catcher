@@ -124,19 +124,30 @@ async def start_session(account_template: Dict) -> Dict:
     """Launch browser, surface the QR, start watcher. Returns session_id+qr."""
     _reap_old()
 
-    # QR login is an interactive local operation (the user physically scans with
-    # their phone), so the browser should use the machine's direct connection —
-    # no proxy.  The proxy_url from the template is stored on the saved account
-    # and used later by the background monitoring service.
+    # 扫码时浏览器同样走用户配置的代理：
+    # 部署在云服务器（数据中心 IP）上时，XHS 风控可能拒绝下发登录态 cookie，
+    # 表现为：用户手机点了「确认登录」，但服务器侧浏览器一直拿不到 web_session。
+    # 配置代理后浏览器伪装成普通家庭/移动 IP，能绕过这层风控。
+    # 注：proxy_forwarder 用 account.id 做 forwarder 的 key；这里给个负数临时 id
+    # 跟真账号 id 区分，结束时清理。socks5+auth 代理会被 gost 转成本地 http。
+    fake_aid = -int(time.time() * 1000)
     proto_account = {
+        "id": fake_aid,
         "cookie": "",
-        "proxy_url": "",
+        "proxy_url": account_template.get("proxy_url", "") or "",
         "user_agent": account_template.get("user_agent", "") or "",
         "viewport": account_template.get("viewport", "") or "",
         "timezone": account_template.get("timezone", "") or "Asia/Shanghai",
         "locale": account_template.get("locale", "") or "zh-CN",
         "fp_browser_type": "builtin",
     }
+
+    # 主动启转发（socks5+auth → 本地 http），launch 时 effective_proxy_url 会拿到
+    from . import proxy_forwarder
+    try:
+        await proxy_forwarder.ensure_forwarder(proto_account)
+    except Exception as e:
+        logger.warning(f"[qr_login] proxy forwarder start failed: {e}")
 
     pw, browser, context = await launch_builtin_session(proto_account)
     page = await context.new_page()
@@ -175,6 +186,7 @@ async def start_session(account_template: Dict) -> Dict:
         "_page": page,
         "_no_logged": no_logged,
         "_task": None,
+        "_fake_aid": fake_aid,  # 用于关闭浏览器时清理 gost forwarder
         "closed_at": None,
     }
     _sessions[session_id] = session
@@ -192,6 +204,7 @@ async def _watch(session_id: str):
     )
     last_cookie_names: set = set()
     last_url: str = ""
+    last_web_session: str = ""
     poll_count = 0
     try:
         start = time.time()
@@ -230,19 +243,25 @@ async def _watch(session_id: str):
             last_cookie_names = cookie_names
             last_url = cur_url
 
-            # Login success heuristic: web_session changed, OR the page URL
-            # navigated away from the home/login page after a scan.
+            # 小红书扫码登录的成功信号：web_session cookie 的值发生变化。
+            # 2026-05 起 XHS 不再给访客下发 web_session，只有用户点确认登录后才下发；
+            # 极少数情况会先给访客一个 web_session，登录后再替换。两种情况都覆盖：
+            # 只要当前 web_session 是非空且不等于初始 baseline，就判 success。
             web_session = ""
             for c in cookies:
                 if c.get("name") == "web_session":
                     web_session = c.get("value", "") or ""
                     break
 
+            # web_session 值变化日志（便于排查）
+            if web_session != last_web_session:
+                logger.info(
+                    f"[qr_login] {session_id} web_session changed: "
+                    f"{last_web_session!r} → {web_session!r}"
+                )
+                last_web_session = web_session
+
             success = bool(web_session) and web_session != session["_no_logged"]
-            if not success and "web_session" in new_cookies:
-                # Cookie just appeared this poll — count as success even if it
-                # equals the (empty) baseline by some race.
-                success = True
 
             if success:
                 try:
@@ -265,7 +284,9 @@ async def _watch(session_id: str):
                 logger.info(
                     f"[qr_login] {session_id} still waiting "
                     f"(poll #{poll_count}, web_session={web_session!r}, "
-                    f"cookie_count={len(cookie_names)})"
+                    f"cookie_count={len(cookie_names)}, "
+                    f"cookies={sorted(cookie_names)}, "
+                    f"url={cur_url!r})"
                 )
             await asyncio.sleep(_POLL_INTERVAL)
     finally:
@@ -286,6 +307,9 @@ async def _save_account(session: Dict, cookie_str: str) -> int:
         fp_browser_type="builtin",
         fp_profile_id="",
         fp_api_url="",
+        # 多租户：账号归属当前用户。template 由 router 注入 user_id
+        user_id=tmpl.get("user_id"),
+        platform=(tmpl.get("platform") or "xhs"),
     )
 
 
@@ -299,6 +323,14 @@ async def _close_browser(session: Dict):
             await close_session(pw, browser)
         except Exception as e:
             logger.debug(f"[qr_login] close error: {e}")
+    # 清理 gost forwarder（用 fake_aid 启起来的）
+    fake_aid = session.pop("_fake_aid", None)
+    if fake_aid is not None:
+        try:
+            from . import proxy_forwarder
+            await proxy_forwarder.drop_forwarder(fake_aid)
+        except Exception as e:
+            logger.debug(f"[qr_login] drop forwarder error: {e}")
     session["closed_at"] = time.time()
 
 

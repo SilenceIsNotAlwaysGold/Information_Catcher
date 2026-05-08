@@ -10,6 +10,7 @@ import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
 } from "@nextui-org/table";
 import { Chip } from "@nextui-org/chip";
+import { Checkbox } from "@nextui-org/checkbox";
 import { useDisclosure } from "@nextui-org/modal";
 import { Tabs, Tab } from "@nextui-org/tabs";
 import { Tooltip } from "@nextui-org/tooltip";
@@ -18,6 +19,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
+import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
 import { toastOk, toastErr } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { useAccounts, useGroups, usePosts, useAlerts, useMe, mutatePosts, mutateAlerts } from "@/lib/useApi";
@@ -44,6 +46,7 @@ type Post = {
   last_fetch_at?: string | null;
   fail_count?: number;
   platform?: string; // "xhs" / "douyin" / "mp"，老数据为 "xhs"
+  user_id?: number | null;
   owner_username?: string;
 };
 
@@ -79,6 +82,24 @@ export default function XhsPostsPage() {
   const [addResults, setAddResults] = useState<{ link: string; ok: boolean; reason?: string }[]>([]);
   const [search, setSearch] = useState("");
 
+  // 多选状态：key 用 `${user_id || 0}__${note_id}` 区分不同租户的同 id
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const postKey = (p: Post) => `${p.user_id || 0}__${p.note_id}`;
+  const toggleKey = (k: string) => setSelectedKeys((prev) => {
+    const next = new Set(prev);
+    if (next.has(k)) next.delete(k); else next.add(k);
+    return next;
+  });
+  const togglePageAll = (rows: Post[]) => setSelectedKeys((prev) => {
+    const allKeys = rows.map(postKey);
+    const allOn = allKeys.length > 0 && allKeys.every((k) => prev.has(k));
+    const next = new Set(prev);
+    for (const k of allKeys) {
+      if (allOn) next.delete(k); else next.add(k);
+    }
+    return next;
+  });
+
   const { isOpen, onOpen, onClose } = useDisclosure();
 
   const handleAdd = async () => {
@@ -105,8 +126,29 @@ export default function XhsPostsPage() {
     }
   };
 
-  const handleDelete = async (note_id: string) => {
-    await fetch(API(`/posts/${note_id}`), { method: "DELETE", headers });
+  const handleDelete = async (note_id: string, owner_user_id?: number | null) => {
+    const qs = owner_user_id ? `?owner_user_id=${owner_user_id}` : "";
+    await fetch(API(`/posts/${note_id}${qs}`), { method: "DELETE", headers });
+    await mutatePosts();
+  };
+
+  const handleBatchDelete = async () => {
+    if (selectedKeys.size === 0) return;
+    const ok = await confirmDialog({
+      title: "批量删除",
+      content: `确认删除选中的 ${selectedKeys.size} 条帖子？`,
+      confirmText: "删除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
+    // selectedKeys 形如 "user_id__note_id"，提取 note_id
+    const noteIds = Array.from(selectedKeys).map((k) => k.split("__").slice(1).join("__"));
+    await fetch(API("/posts/batch-delete"), {
+      method: "POST", headers,
+      body: JSON.stringify({ note_ids: noteIds }),
+    });
+    setSelectedKeys(new Set());
     await mutatePosts();
   };
 
@@ -206,6 +248,15 @@ export default function XhsPostsPage() {
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold">监控帖子（共 {filteredPosts.length} 条）</h2>
         <div className="flex gap-2">
+          {selectedKeys.size > 0 && (
+            <Button
+              size="sm" color="danger" variant="flat"
+              startContent={<Trash2 size={14} />}
+              onPress={handleBatchDelete}
+            >
+              删除选中 ({selectedKeys.size})
+            </Button>
+          )}
           <Input
             size="sm" variant="bordered"
             startContent={<Search size={14} />}
@@ -230,10 +281,7 @@ export default function XhsPostsPage() {
               </Button>
             </Tooltip>
           )}
-          <Button size="sm" variant="flat" as={Link} href="/dashboard/monitor/settings"
-            startContent={<Settings size={16} />}>
-            设置
-          </Button>
+          <MonitorGroupsButton token={token} />
           <Button size="sm" color="primary" startContent={<Plus size={16} />} onPress={onOpen}>
             添加小红书帖子
           </Button>
@@ -264,6 +312,16 @@ export default function XhsPostsPage() {
           <CardBody className="p-0">
             <Table aria-label="all-posts-admin" removeWrapper>
               <TableHeader>
+                <TableColumn className="w-12">
+                  <Checkbox
+                    isSelected={filteredPosts.length > 0 && filteredPosts.every((p) => selectedKeys.has(postKey(p)))}
+                    isIndeterminate={
+                      filteredPosts.some((p) => selectedKeys.has(postKey(p))) &&
+                      !filteredPosts.every((p) => selectedKeys.has(postKey(p)))
+                    }
+                    onValueChange={() => togglePageAll(filteredPosts)}
+                  />
+                </TableColumn>
                 <TableColumn>标题 / ID</TableColumn>
                 <TableColumn>所属用户</TableColumn>
                 <TableColumn>状态</TableColumn>
@@ -275,7 +333,13 @@ export default function XhsPostsPage() {
               </TableHeader>
               <TableBody emptyContent={<EmptyState icon={FileText} title="暂无帖子" hint="还没有任何用户添加帖子。" />}>
                 {filteredPosts.map((p) => (
-                  <TableRow key={p.note_id}>
+                  <TableRow key={postKey(p)}>
+                    <TableCell>
+                      <Checkbox
+                        isSelected={selectedKeys.has(postKey(p))}
+                        onValueChange={() => toggleKey(postKey(p))}
+                      />
+                    </TableCell>
                     <TableCell>
                       <div className="flex flex-col">
                         <a href={p.note_url} target="_blank" rel="noreferrer"
@@ -307,7 +371,7 @@ export default function XhsPostsPage() {
                         </Tooltip>
                         <Tooltip content="删除" color="danger">
                           <Button isIconOnly size="sm" variant="light" color="danger"
-                            onPress={() => handleDelete(p.note_id)}>
+                            onPress={() => handleDelete(p.note_id, p.user_id)}>
                             <Trash2 size={15} />
                           </Button>
                         </Tooltip>
@@ -321,6 +385,77 @@ export default function XhsPostsPage() {
         </Card>
       ) : (
       <Tabs>
+        {(() => {
+          const ungrouped = filteredPosts.filter((p) => !p.group_id);
+          return ungrouped.length > 0 ? (
+            <Tab key="g-none" title={`未分组 (${ungrouped.length})`}>
+              <Card>
+                <CardBody className="p-0">
+                  <Table aria-label="group-none" removeWrapper>
+                    <TableHeader>
+                      <TableColumn className="w-12">
+                        <Checkbox
+                          isSelected={ungrouped.length > 0 && ungrouped.every((p) => selectedKeys.has(postKey(p)))}
+                          isIndeterminate={
+                            ungrouped.some((p) => selectedKeys.has(postKey(p))) &&
+                            !ungrouped.every((p) => selectedKeys.has(postKey(p)))
+                          }
+                          onValueChange={() => togglePageAll(ungrouped)}
+                        />
+                      </TableColumn>
+                      <TableColumn>标题 / ID</TableColumn>
+                      <TableColumn>状态</TableColumn>
+                      <TableColumn>点赞</TableColumn>
+                      <TableColumn>收藏</TableColumn>
+                      <TableColumn>评论</TableColumn>
+                      <TableColumn>账号</TableColumn>
+                      <TableColumn>最后检测</TableColumn>
+                      <TableColumn>操作</TableColumn>
+                    </TableHeader>
+                    <TableBody emptyContent={<EmptyState icon={Inbox} title="暂无未分组帖子" hint="" />}>
+                      {ungrouped.map((p) => (
+                        <TableRow key={postKey(p)}>
+                          <TableCell>
+                            <Checkbox
+                              isSelected={selectedKeys.has(postKey(p))}
+                              onValueChange={() => toggleKey(postKey(p))}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-col">
+                              <a href={p.note_url} target="_blank" rel="noreferrer"
+                                className="text-primary text-sm truncate max-w-xs hover:underline">
+                                {p.title || p.note_id}
+                              </a>
+                              <span className="text-xs text-default-400">{p.note_id}</span>
+                            </div>
+                          </TableCell>
+                          <TableCell>{fetchStatusChip(p)}</TableCell>
+                          <TableCell><span className="font-medium">{p.liked_count ?? "—"}</span></TableCell>
+                          <TableCell>{p.collected_count ?? "—"}</TableCell>
+                          <TableCell>{p.comment_count ?? "—"}</TableCell>
+                          <TableCell>
+                            <span className="text-xs text-default-500">{p.account_name || "—"}</span>
+                          </TableCell>
+                          <TableCell>
+                            <span className="text-xs text-default-400">
+                              {p.checked_at ? p.checked_at.slice(0, 16) : "待检测"}
+                            </span>
+                          </TableCell>
+                          <TableCell>
+                            <Button isIconOnly size="sm" variant="light" color="danger" onPress={() => handleDelete(p.note_id)}>
+                              <Trash2 size={14} />
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </CardBody>
+              </Card>
+            </Tab>
+          ) : null;
+        })()}
         {groups.map((g) => {
           const groupPosts = filteredPosts.filter((p) => p.group_id === g.id);
           return (
@@ -332,6 +467,16 @@ export default function XhsPostsPage() {
               <CardBody className="p-0">
                 <Table aria-label={`group-${g.id}`} removeWrapper>
                   <TableHeader>
+                    <TableColumn className="w-12">
+                      <Checkbox
+                        isSelected={groupPosts.length > 0 && groupPosts.every((p) => selectedKeys.has(postKey(p)))}
+                        isIndeterminate={
+                          groupPosts.some((p) => selectedKeys.has(postKey(p))) &&
+                          !groupPosts.every((p) => selectedKeys.has(postKey(p)))
+                        }
+                        onValueChange={() => togglePageAll(groupPosts)}
+                      />
+                    </TableColumn>
                     <TableColumn>标题 / ID</TableColumn>
                     <TableColumn>状态</TableColumn>
                     <TableColumn>点赞</TableColumn>
@@ -346,7 +491,13 @@ export default function XhsPostsPage() {
                       hint={search ? "尝试清除搜索条件，或为该分组添加帖子。" : "在添加帖子时选择该分组，即可入组。"} />
                   }>
                     {groupPosts.map((p) => (
-                        <TableRow key={p.note_id}>
+                        <TableRow key={postKey(p)}>
+                          <TableCell>
+                            <Checkbox
+                              isSelected={selectedKeys.has(postKey(p))}
+                              onValueChange={() => toggleKey(postKey(p))}
+                            />
+                          </TableCell>
                           <TableCell>
                             <div className="flex flex-col">
                               <a href={p.note_url} target="_blank" rel="noreferrer"

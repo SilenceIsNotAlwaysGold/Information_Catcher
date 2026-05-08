@@ -779,7 +779,7 @@ async def _resolve_trending_accounts(settings: dict) -> list:
     return accounts
 
 
-async def run_trending_monitor(platform: Optional[str] = None):
+async def run_trending_monitor(platform: Optional[str] = None, user_id: Optional[int] = None):
     """Periodic job: only fetch trending posts by keyword and store them.
 
     AI rewrite + Bitable sync are now exposed as manual user actions via the API
@@ -788,17 +788,19 @@ async def run_trending_monitor(platform: Optional[str] = None):
     platform: 可选过滤，传入则只跑指定平台账号（用于前端按平台手动触发）。
     """
     settings = await db.get_all_settings()
-    if settings.get("trending_enabled", "0") != "1":
-        return
 
-    keywords_raw = settings.get("trending_keywords", "")
-    if not keywords_raw.strip():
+    # 多租户：遍历所有 trending_enabled=1 的用户，分别用各自的 keywords / min_likes
+    # 抓取（共享账号池 + 共享 admin 配置的 trending_account_ids）。
+    from . import auth_service
+    if user_id is not None:
+        u = auth_service.get_user_by_id(user_id) or {}
+        if not u or not u.get("trending_enabled"):
+            return
+        targets = [u]
+    else:
+        targets = auth_service.list_users_with_trending()
+    if not targets:
         return
-
-    keywords = [k.strip() for k in keywords_raw.replace("，", ",").split(",") if k.strip()]
-    min_likes = int(settings.get("trending_min_likes", "1000") or "1000")
-    wecom_url  = settings.get("webhook_url", "")
-    feishu_url = settings.get("feishu_webhook_url", "")
 
     accounts = await _resolve_trending_accounts(settings)
     if platform:
@@ -810,63 +812,74 @@ async def run_trending_monitor(platform: Optional[str] = None):
         )
         return
 
-    # Auto-fetch the body text after search? Search API only returns titles, so
-    # we hit each note's detail page to get desc_text. Costs N extra requests
-    # per keyword — controlled with a setting so it can be turned off if the
-    # account starts hitting risk control.
     enrich = settings.get("trending_enrich_desc", "1") == "1"
     enrich_concurrency = int(settings.get("trending_enrich_concurrency", "3") or "3")
 
-    # 按账号 platform 路由（xhs 用 XHS 搜索，douyin 用抖音搜索）
-    for idx, keyword in enumerate(keywords):
-        account = accounts[idx % len(accounts)]
-        acc_platform = (account.get("platform") or "xhs").lower()
-        plat = platform_registry.get_platform(acc_platform)
-        if not plat:
-            logger.warning(f"[trending] unknown platform '{acc_platform}' for account {account.get('id')}, skipping")
+    for tu in targets:
+        uid = tu["id"]
+        keywords_raw = (tu.get("trending_keywords") or "").strip()
+        if not keywords_raw:
             continue
-        import time as _t
-        _t0 = _t.perf_counter()
-        try:
-            posts = await plat.search_trending(keyword, account, min_likes)
-            _ms = int((_t.perf_counter() - _t0) * 1000)
-            await db.log_fetch(
-                platform=acc_platform, task_type="trending",
-                status="ok" if posts else "error",
-                latency_ms=_ms,
-                account_id=account.get("id") if account else None,
-                note=f"keyword={keyword} found={len(posts) if posts else 0}",
-            )
-            if account.get("is_shared"):
-                await db.mark_account_used(account["id"])
+        keywords = [k.strip() for k in keywords_raw.replace("，", ",").split(",") if k.strip()]
+        min_likes = int(tu.get("trending_min_likes") or 1000)
 
-            # Step 1: backfill desc by hitting each note page (concurrent + capped).
-            # 走匿名通道（app_share + 无 cookie），不消耗账号。
-            if enrich and posts:
-                await _enrich_trending_descriptions(posts, enrich_concurrency)
+        # 该用户的推送渠道（chat_id 优先，webhook 兜底）
+        full_user = auth_service.get_user_by_id(uid) or {}
+        wecom_url  = full_user.get("wecom_webhook_url", "") or ""
+        feishu_url = full_user.get("feishu_webhook_url", "") or ""
+        chat_id    = full_user.get("feishu_chat_id", "") or ""
 
-            new_posts = []
-            for p in posts:
-                import json as _json
-                images_json = _json.dumps(p.get("images") or [], ensure_ascii=False)
-                is_new = await db.add_or_update_trending_post(
-                    note_id=p["note_id"], title=p["title"], desc_text=p["desc_text"],
-                    note_url=p["note_url"], xsec_token=p["xsec_token"],
-                    liked_count=p["liked_count"], collected_count=p["collected_count"],
-                    comment_count=p["comment_count"], keyword=keyword, author=p["author"],
-                    cover_url=p.get("cover_url", "") or "",
-                    images=images_json,
-                    video_url=p.get("video_url", "") or "",
-                    note_type=p.get("note_type", "normal") or "normal",
-                    platform=acc_platform,
+        for idx, keyword in enumerate(keywords):
+            account = accounts[idx % len(accounts)]
+            acc_platform = (account.get("platform") or "xhs").lower()
+            plat = platform_registry.get_platform(acc_platform)
+            if not plat:
+                logger.warning(f"[trending] unknown platform '{acc_platform}' for account {account.get('id')}, skipping")
+                continue
+            import time as _t
+            _t0 = _t.perf_counter()
+            try:
+                posts = await plat.search_trending(keyword, account, min_likes)
+                _ms = int((_t.perf_counter() - _t0) * 1000)
+                await db.log_fetch(
+                    platform=acc_platform, task_type="trending",
+                    status="ok" if posts else "error",
+                    latency_ms=_ms,
+                    account_id=account.get("id") if account else None,
+                    note=f"user={uid} keyword={keyword} found={len(posts) if posts else 0}",
                 )
-                if is_new:
-                    new_posts.append(p)
+                if account.get("is_shared"):
+                    await db.mark_account_used(account["id"])
 
-            if new_posts and (wecom_url or feishu_url):
-                await notifier.notify_trending(wecom_url, feishu_url, keyword, new_posts)
-        except Exception as e:
-            logger.error(f"[trending] error for keyword '{keyword}': {e}")
+                if enrich and posts:
+                    await _enrich_trending_descriptions(posts, enrich_concurrency)
+
+                new_posts = []
+                for p in posts:
+                    import json as _json
+                    images_json = _json.dumps(p.get("images") or [], ensure_ascii=False)
+                    is_new = await db.add_or_update_trending_post(
+                        note_id=p["note_id"], title=p["title"], desc_text=p["desc_text"],
+                        note_url=p["note_url"], xsec_token=p["xsec_token"],
+                        liked_count=p["liked_count"], collected_count=p["collected_count"],
+                        comment_count=p["comment_count"], keyword=keyword, author=p["author"],
+                        cover_url=p.get("cover_url", "") or "",
+                        images=images_json,
+                        video_url=p.get("video_url", "") or "",
+                        note_type=p.get("note_type", "normal") or "normal",
+                        platform=acc_platform,
+                        user_id=uid,
+                    )
+                    if is_new:
+                        new_posts.append(p)
+
+                if new_posts and (wecom_url or feishu_url or chat_id):
+                    await notifier.notify_trending(
+                        wecom_url, feishu_url, keyword, new_posts,
+                        feishu_chat_id=chat_id,
+                    )
+            except Exception as e:
+                logger.error(f"[trending] user={uid} keyword='{keyword}' error: {e}")
 
 
 async def _enrich_trending_descriptions(posts: list, concurrency: int = 3):

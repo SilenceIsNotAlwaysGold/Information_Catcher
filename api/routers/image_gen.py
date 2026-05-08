@@ -66,6 +66,13 @@ class GenerateRequest(BaseModel):
     # 来源标记：如果 prompt 是从某个小红书/抖音作品 URL 拉来的
     source_post_url: Optional[str] = ""
     source_post_title: Optional[str] = ""
+    # 同时生成配套文案（标题 + 正文）：勾选时 AI 基于 prompt + 平台调性写一篇笔记，
+    # 同一批次的所有图共用一份文案，省 AI 成本
+    auto_rewrite: Optional[bool] = False
+    target_platform: Optional[str] = "xhs"  # xhs / douyin / mp
+    # 多批次共享文案：前端首批拿到 title/body 后，后续批次回传过来直接复用，避免每批都调 AI
+    forced_title: Optional[str] = ""
+    forced_body: Optional[str] = ""
 
 
 class FetchPostCoverRequest(BaseModel):
@@ -81,6 +88,49 @@ class SyncImageBitableRequest(BaseModel):
 # ── Endpoints ───────────────────────────────────────────────────────────────
 
 DEFAULT_SIZE = "1024x1024"
+
+
+@router.get("/proxy", summary="代理拉取图片（解决 mixed content）")
+async def proxy_image(url: str):
+    """前端在 HTTPS 页面里加载 HTTP 七牛图会被浏览器拦截，统一走这个代理。
+
+    白名单：仅允许七牛域名（*.clouddn.com / *.qiniucdn.com / 配置的 qiniu_domain）
+    + 本地存储 public_url_prefix。其他来源拒绝。
+    """
+    from urllib.parse import urlparse
+    from fastapi.responses import StreamingResponse, Response
+
+    if not url:
+        raise HTTPException(status_code=400, detail="缺少 url 参数")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="非法 URL")
+
+    # 白名单校验
+    qiniu_domain = (await monitor_db.get_setting("qiniu_domain", "")).strip()
+    qiniu_host = urlparse(qiniu_domain if qiniu_domain.startswith(("http://", "https://"))
+                          else f"http://{qiniu_domain}").netloc
+    public_prefix = (await monitor_db.get_setting("public_url_prefix", "")).strip()
+    public_host = urlparse(public_prefix).netloc if public_prefix else ""
+    allowed_hosts = {qiniu_host, public_host} - {""}
+    # 七牛默认域后缀也放行
+    suffix_ok = parsed.netloc.endswith((".clouddn.com", ".qiniucdn.com", ".qbox.me"))
+    if not (parsed.netloc in allowed_hosts or suffix_ok):
+        raise HTTPException(status_code=403, detail=f"域名 {parsed.netloc} 不在白名单")
+
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cli:
+            r = await cli.get(url)
+            if r.status_code >= 400:
+                raise HTTPException(status_code=r.status_code, detail="上游返回错误")
+            content_type = r.headers.get("content-type", "image/png")
+            return Response(
+                content=r.content,
+                media_type=content_type,
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"代理失败：{e}")
 
 
 @router.get("/config", summary="读取图像 API 配置")
@@ -341,6 +391,98 @@ async def _call_edits(
     return images, None
 
 
+_CAPTION_PLATFORM_BRIEFS = {
+    "xhs": (
+        "你为小红书写笔记。要求：\n"
+        "- 标题 18 字内，带数字 / 钩子句 / 反问，吸引点击\n"
+        "- 正文 200-300 字，3-5 段，每段开头 emoji，关键词加粗（用 **）\n"
+        "- 结尾给 3-5 个话题标签 #xxx#，与图片调性相关\n"
+    ),
+    "douyin": (
+        "你为抖音视频写口播脚本（图文版也按这个调性）。要求：\n"
+        "- 标题 12 字内，开头 3 秒抓眼球（数字 / 反差 / 提问）\n"
+        "- 正文 100-200 字，按口播节奏分行，每行 15-25 字\n"
+        "- 结尾留钩子（点关注 / 问问题）\n"
+    ),
+    "mp": (
+        "你为微信公众号写文章导言（图文版）。要求：\n"
+        "- 标题 25 字内，正式、信息量足\n"
+        "- 正文 300-500 字，分段叙述，论据/观点为主，少用 emoji\n"
+        "- 结尾给 1-2 句行动呼吁\n"
+    ),
+}
+
+
+async def _generate_caption(
+    image_prompt: str,
+    platform: str = "xhs",
+    source_title: str = "",
+) -> tuple[str, str, str]:
+    """让 AI 基于图片场景描述写一篇配套笔记（标题 + 正文）。
+
+    返回 (title, body, error)；error 非空表示失败，前两个返回 ""。
+    """
+    ai_base_url = (await monitor_db.get_setting("ai_base_url", "")).strip()
+    ai_api_key = (await monitor_db.get_setting("ai_api_key", "")).strip()
+    ai_model = (await monitor_db.get_setting("ai_model", "gpt-4o-mini")).strip() or "gpt-4o-mini"
+    if not ai_base_url or not ai_api_key:
+        return "", "", "AI 服务未配置（ai_base_url / ai_api_key）"
+
+    brief = _CAPTION_PLATFORM_BRIEFS.get(platform, _CAPTION_PLATFORM_BRIEFS["xhs"])
+    system_prompt = (
+        "你是专业的内容创作者，根据用户提供的「图片场景描述」生成与图片调性匹配的笔记。\n"
+        + brief
+        + "严格按 JSON 输出，不要任何解释：{\"title\": \"...\", \"body\": \"...\"}"
+    )
+    user_msg = (
+        f"图片场景描述：\n{image_prompt}\n\n"
+        + (f"参考来源标题：{source_title}\n" if source_title else "")
+        + "请生成与图配套的笔记。"
+    )
+
+    url = f"{ai_base_url.rstrip('/')}/chat/completions"
+    payload = {
+        "model": ai_model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": 0.85,
+        "max_tokens": 1000,
+        "response_format": {"type": "json_object"},  # 部分兼容模型支持
+    }
+    headers = {"Authorization": f"Bearer {ai_api_key}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code >= 400:
+                return "", "", f"AI HTTP {resp.status_code}: {resp.text[:200]}"
+            data = resp.json()
+    except httpx.TimeoutException:
+        return "", "", "AI 响应超时（45s）"
+    except Exception as e:
+        return "", "", f"AI 调用异常：{e}"
+
+    content = (
+        data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    )
+    if not content:
+        return "", "", "AI 未返回内容"
+
+    # 尝试 JSON parse；不行就退回到正则提取
+    import json as _json, re as _re
+    try:
+        obj = _json.loads(content)
+        return (obj.get("title") or "").strip(), (obj.get("body") or "").strip(), ""
+    except Exception:
+        m_t = _re.search(r'"title"\s*:\s*"([^"]+)"', content)
+        m_b = _re.search(r'"body"\s*:\s*"([^"]+)"', content, _re.DOTALL)
+        if m_t and m_b:
+            return m_t.group(1), m_b.group(1), ""
+        # 兜底：把整段内容当 body
+        return "", content[:1500], ""
+
+
 @router.post("/generate", summary="调用第三方图像 API 生成图片（支持参考图）")
 async def generate_image(
     req: GenerateRequest,
@@ -382,7 +524,7 @@ async def generate_image(
         remaining -= take
 
     # 历史记录 + 七牛上传上下文
-    user_id = current_user.get("user_id") if current_user else None
+    user_id = current_user.get("id") if current_user else None
     images_per_set = max(1, int(req.images_per_set or 1))
     start_index = max(0, int(req.start_index or 0))
     used_reference = img_bytes is not None
@@ -392,6 +534,21 @@ async def generate_image(
     # 后台 scheduler 异步推到云端，用户立刻能拿到 URL 同步飞书也能用。
     local_ready = await local_storage.is_configured()
     qiniu_ready = await qiniu_uploader.is_configured()
+
+    # AI 配套文案：
+    # - 前端传了 forced_title/body（后续批次复用首批结果）→ 直接用
+    # - 否则首批 + auto_rewrite=true → 调 AI 生成一次
+    # - 其它情况 → 留空
+    gen_title, gen_body, caption_err = "", "", ""
+    if (req.forced_title or "").strip() or (req.forced_body or "").strip():
+        gen_title = (req.forced_title or "").strip()
+        gen_body = (req.forced_body or "").strip()
+    elif req.auto_rewrite:
+        gen_title, gen_body, caption_err = await _generate_caption(
+            prompt, platform=(req.target_platform or "xhs"), source_title=src_title,
+        )
+        if caption_err:
+            logger.warning(f"[image_gen] caption skipped: {caption_err}")
 
     all_images: List[dict] = []
     timeout = httpx.Timeout(180.0, connect=30.0)
@@ -426,21 +583,35 @@ async def generate_image(
                 in_set_idx = global_idx % images_per_set + 1
 
                 local_url = ""
+                qiniu_url_sync = ""
+
+                # 1) 优先写本地，异步 worker 后续推七牛
                 if local_ready and img.get("b64"):
                     lurl, lerr = await local_storage.upload_b64(img["b64"], user_id=user_id)
                     if lurl:
                         local_url = lurl
-                        img["url"] = lurl  # 立即返回给前端
+                        img["url"] = lurl
                     elif lerr:
                         logger.warning(f"[image_gen] local write failed (set {set_idx}-{in_set_idx}): {lerr}")
 
-                # qiniu_url 起初 = local_url（飞书同步先用本地，传到七牛后会被覆盖）
+                # 2) 没本地存储但配了七牛 → 同步直传（fallback）
+                if not local_url and qiniu_ready and img.get("b64"):
+                    qurl, qerr = await qiniu_uploader.upload_b64(img["b64"], user_id=user_id)
+                    if qurl:
+                        qiniu_url_sync = qurl
+                        img["url"] = qurl
+                    elif qerr:
+                        logger.warning(f"[image_gen] qiniu sync upload failed (set {set_idx}-{in_set_idx}): {qerr}")
+
                 # upload_status:
-                #   pending  → 配了七牛，待 worker 异步推
-                #   skipped  → 没配七牛，永远不传（local_url 就是终态）
-                #   failed   → 没本地存储也没七牛，记录无 URL
+                #   pending  → 本地 + 七牛都配，待 worker 异步推
+                #   uploaded → 同步直传七牛已成功
+                #   skipped  → 仅本地，没七牛
+                #   failed   → 都没存储成功
                 if local_url and qiniu_ready:
                     upload_status = "pending"
+                elif qiniu_url_sync:
+                    upload_status = "uploaded"
                 elif local_url:
                     upload_status = "skipped"
                 else:
@@ -452,8 +623,10 @@ async def generate_image(
                         negative_prompt=neg, size=size, model=model,
                         set_idx=set_idx, in_set_idx=in_set_idx,
                         local_url=local_url,
-                        qiniu_url=local_url,  # 起初等于本地，七牛传完后被 worker 覆盖
+                        qiniu_url=qiniu_url_sync or local_url,  # 同步传成功用七牛；否则用本地（worker 会覆盖）
                         upload_status=upload_status,
+                        generated_title=gen_title,
+                        generated_body=gen_body,
                         source_post_url=src_url, source_post_title=src_title,
                         used_reference=used_reference,
                     )
@@ -469,6 +642,10 @@ async def generate_image(
         "qiniu_async_pending": qiniu_ready,  # 是否会异步推七牛
         "storage_backend": "local+async-qiniu" if (local_ready and qiniu_ready) else
                            ("local" if local_ready else "none"),
+        # AI 配套文案（首批生成；前端拿到后续批次回传）
+        "generated_title": gen_title,
+        "generated_body": gen_body,
+        "caption_error": caption_err,
     }
 
 
@@ -542,7 +719,7 @@ async def list_history(
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     """admin 看全部，普通用户只看自己的。"""
-    user_id = current_user.get("user_id") if current_user else None
+    user_id = current_user.get("id") if current_user else None
     role = (current_user or {}).get("role") or "user"
     scope_uid = None if role == "admin" else user_id
     rows = await monitor_db.list_image_history(
@@ -563,7 +740,7 @@ async def delete_history(
     record_id: int,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    user_id = current_user.get("user_id") if current_user else None
+    user_id = current_user.get("id") if current_user else None
     role = (current_user or {}).get("role") or "user"
     # admin 传 None 可删任何，普通用户只能删自己的
     scope_uid = None if role == "admin" else user_id
@@ -580,7 +757,7 @@ async def retry_upload(
     if not rec:
         return {"ok": False, "error": "记录不存在"}
     role = (current_user or {}).get("role") or "user"
-    if role != "admin" and rec.get("user_id") != current_user.get("user_id"):
+    if role != "admin" and rec.get("user_id") != current_user.get("id"):
         return {"ok": False, "error": "无权操作"}
     await monitor_db.reset_image_upload_failed(record_id)
     return {"ok": True}
@@ -631,6 +808,7 @@ async def sync_history_to_bitable(
                     "Prompt": "text", "图片": "url",
                     "尺寸": "text", "模型": "text",
                     "套号": "number", "套内序号": "number",
+                    "标题": "text", "正文": "text",
                     "来源链接": "url", "来源标题": "text",
                     "生成时间": "text",
                 },
@@ -667,6 +845,8 @@ async def sync_history_to_bitable(
                     "模型": rec.get("model", ""),
                     "套号": rec.get("set_idx", 1),
                     "套内序号": rec.get("in_set_idx", 1),
+                    "标题": rec.get("generated_title", ""),
+                    "正文": rec.get("generated_body", ""),
                     "来源链接": ({"link": src_url, "text": src_url} if src_url else ""),
                     "来源标题": rec.get("source_post_title", ""),
                     "生成时间": rec.get("created_at", ""),

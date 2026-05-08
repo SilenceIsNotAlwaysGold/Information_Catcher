@@ -40,7 +40,10 @@ export default function AddPostsModal({
         <ModalBody className="space-y-4">
           <Select
             label="分组"
-            placeholder="选择分组"
+            placeholder="必选：选择一个分组"
+            isRequired
+            isInvalid={!selectedGroupId}
+            errorMessage={!selectedGroupId ? "请选择一个分组（不选无法添加）" : undefined}
             selectedKeys={selectedGroupId ? new Set([selectedGroupId]) : new Set()}
             onSelectionChange={(keys) => setSelectedGroupId(Array.from(keys)[0] as string ?? "")}
           >
@@ -84,7 +87,12 @@ export default function AddPostsModal({
         </ModalBody>
         <ModalFooter>
           <Button variant="flat" onPress={onClose}>取消</Button>
-          <Button color="primary" isLoading={adding} onPress={onSubmit}>
+          <Button
+            color="primary"
+            isLoading={adding}
+            isDisabled={!selectedGroupId || !links.trim()}
+            onPress={onSubmit}
+          >
             解析并添加
           </Button>
         </ModalFooter>

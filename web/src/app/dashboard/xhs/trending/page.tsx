@@ -17,6 +17,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
+import { TrendingSettingsButton } from "@/components/TrendingSettingsButton";
+import { PromptTemplatesButton } from "@/components/PromptTemplatesButton";
 import { toastOk, toastErr } from "@/lib/toast";
 
 const API = (path: string) => `/api/monitor${path}`;
@@ -310,7 +312,9 @@ export default function XhsTrendingPage() {
             选中帖子→改写→同步飞书。改写和同步不再自动跑。
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
+          <TrendingSettingsButton />
+          <PromptTemplatesButton token={token} />
           <Button variant="flat" startContent={<RefreshCw size={15} />}
             onPress={load} isLoading={loading} size="sm">刷新</Button>
           <Button variant="flat" color="secondary" size="sm"

@@ -17,6 +17,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
+import { TrendingSettingsButton } from "@/components/TrendingSettingsButton";
+import { PromptTemplatesButton } from "@/components/PromptTemplatesButton";
 import { toastOk, toastErr } from "@/lib/toast";
 
 const API = (path: string) => `/api/monitor${path}`;
@@ -277,7 +279,9 @@ export default function DouyinTrendingPage() {
             选中视频 → 改写 → 同步飞书。每行支持「视频去水印下载」。
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
+          <TrendingSettingsButton />
+          <PromptTemplatesButton token={token} />
           <Button variant="flat" startContent={<RefreshCw size={15} />}
             onPress={load} isLoading={loading} size="sm">刷新</Button>
           <Button color="primary" startContent={<Sparkles size={15} />}

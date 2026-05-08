@@ -8,14 +8,14 @@
  *  - 未绑定：「绑定飞书」按钮 → 跳转飞书授权页
  *  - 已绑定：显示飞书姓名 / chat_id / bitable token / 解绑按钮
  *
- * 兜底：原 `feishu_webhook_url` 在用户绑定后仍可继续使用，无 chat_id 时会回落到 webhook。
+ * 飞书告警走应用机器人（chat_id），不再支持 webhook 兜底。
  */
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
 import { Chip } from "@nextui-org/chip";
 import { Spinner } from "@nextui-org/spinner";
-import { LinkIcon, AlertCircle, CheckCircle2, Unlink, ExternalLink, RefreshCw, QrCode } from "lucide-react";
+import { LinkIcon, AlertCircle, CheckCircle2, Unlink, ExternalLink, RefreshCw, QrCode, Copy } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
@@ -32,6 +32,7 @@ type Status = {
   webhook_url: string;
   oauth_configured: boolean;
   invite_url?: string;
+  invite_code?: string;
 };
 
 const API = (p: string) => `/api/feishu${p}`;
@@ -98,7 +99,7 @@ export function FeishuBindingCard() {
   };
 
   const handleUnbind = async () => {
-    if (!confirm("解绑后将停止用应用机器人推送，回退到 webhook 兜底。确认解绑？")) return;
+    if (!confirm("解绑后告警将不再推送，飞书侧静默；要重新接收需要再次扫码绑定。确认解绑？")) return;
     setBusy(true);
     try {
       const r = await fetch(API("/unbind"), { method: "POST", headers });
@@ -202,6 +203,33 @@ export function FeishuBindingCard() {
                     </Button>
                   </div>
                 </div>
+
+                {/* 8 位企业邀请码：扫码后飞书 App 跳到「输入企业邀请码」页时手动输入 */}
+                {status.invite_code && (
+                  <div className="flex items-center gap-2 rounded border border-default-200 bg-white px-3 py-2">
+                    <span className="text-xs text-default-500 shrink-0">企业邀请码</span>
+                    <code className="text-sm font-mono font-semibold tracking-wider text-default-800 select-all">
+                      {status.invite_code}
+                    </code>
+                    <Button
+                      size="sm"
+                      variant="flat"
+                      isIconOnly
+                      aria-label="复制邀请码"
+                      className="ml-auto"
+                      onPress={async () => {
+                        try {
+                          await navigator.clipboard.writeText(status.invite_code || "");
+                          toastOk(`已复制邀请码：${status.invite_code}`);
+                        } catch {
+                          toastErr("复制失败，请手动选中复制");
+                        }
+                      }}
+                    >
+                      <Copy size={13} />
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -215,11 +243,6 @@ export function FeishuBindingCard() {
                 绑定飞书（扫码授权）
               </Button>
             </div>
-            {status.webhook_url && (
-              <p className="text-xs text-default-400">
-                当前已配兜底 webhook，未绑定时仍会通过 webhook 推送。
-              </p>
-            )}
           </>
         ) : (
           <>
@@ -241,7 +264,6 @@ export function FeishuBindingCard() {
               <Field label="多维表 app_token" value={status.bitable_app_token || "（待 Phase 3 自动建表）"} mono />
               <Field label="image_table_id" value={status.image_table_id || "—"} mono />
               <Field label="trending_table_id" value={status.trending_table_id || "—"} mono />
-              <Field label="兜底 webhook" value={status.webhook_url || "（未配）"} />
             </div>
 
             <div className="flex gap-2 pt-2 flex-wrap">

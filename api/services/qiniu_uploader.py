@@ -26,11 +26,16 @@ logger = logging.getLogger(__name__)
 
 
 def _build_url(domain: str, key: str) -> str:
+    """拼接七牛对象 URL。
+
+    domain 不带协议时默认用 http://（七牛测试域名 *.clouddn.com 仅支持 http；
+    自有域名要 HTTPS 必须显式写 https://example.com）。
+    """
     domain = (domain or "").strip().rstrip("/")
     if not domain:
         return ""
     if not domain.startswith(("http://", "https://")):
-        domain = f"https://{domain}"
+        domain = f"http://{domain}"
     return f"{domain}/{key}"
 
 

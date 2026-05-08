@@ -71,10 +71,10 @@ async def authorize(current_user: dict = Depends(get_current_user)) -> dict:
 async def callback(request: Request, code: str = "", state: str = "", error: str = ""):
     """飞书回调到这里。成功 / 失败都重定向回前端绑定页，URL 带 query 提示。
 
-    前端在 /dashboard/monitor/settings 上根据 ?feishu=ok|error&msg=... 弹 toast。
+    前端在 /dashboard/profile 上根据 ?feishu=ok|error&msg=... 弹 toast。
     """
     # 前端落地页（绑定卡片在设置页）
-    landing = "/dashboard/monitor/settings"
+    landing = "/dashboard/profile"
 
     if error:
         return RedirectResponse(
@@ -188,6 +188,8 @@ async def status(current_user: dict = Depends(get_current_user)) -> dict:
         # 企业邀请链接：自建应用只允许本企业成员授权，外部用户需先扫码加入。
         # 前端在未绑定时把这个链接渲染成二维码引导用户扫码加入企业。
         "invite_url": (await monitor_db.get_setting("feishu_invite_url", "")).strip(),
+        # 8 位企业邀请码：扫码后飞书 App 跳到「输入企业邀请码」页面时需要手动输入
+        "invite_code": (await monitor_db.get_setting("feishu_invite_code", "")).strip(),
     }
 
 

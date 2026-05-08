@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { usePosts, mutatePosts, useLives, mutateLives, useMe } from "@/lib/useApi";
+import { usePosts, mutatePosts, useLives, mutateLives, useMe, useGroups } from "@/lib/useApi";
 import dynamic from "next/dynamic";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
 import { Chip } from "@nextui-org/chip";
+import { Checkbox } from "@nextui-org/checkbox";
 import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
 } from "@nextui-org/table";
@@ -14,6 +15,7 @@ import { Tooltip } from "@nextui-org/tooltip";
 import { Plus, RefreshCw, Trash2, Download, Radio, FileText } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
+import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 import { toastOk, toastErr } from "@/lib/toast";
@@ -65,7 +67,9 @@ export default function DouyinPostsPage() {
   const isAdmin = me?.role === "admin";
   const { posts: rawPosts, isLoading } = usePosts();
   const posts = (rawPosts as Post[]).filter((p) => p.platform === "douyin");
+  const { groups } = useGroups();
   const [links, setLinks] = useState("");
+  const [selectedGroupId, setSelectedGroupId] = useState<string>("");
   const [adding, setAdding] = useState(false);
   const [checking, setChecking] = useState(false);
   const [results, setResults] = useState<{ link: string; ok: boolean; reason?: string }[]>([]);
@@ -73,12 +77,16 @@ export default function DouyinPostsPage() {
 
   const handleAdd = async () => {
     const items = links.split("\n").map((s) => s.trim()).filter(Boolean);
-    if (!items.length) return;
+    if (!items.length || !selectedGroupId) return;
     setAdding(true);
     setResults([]);
     try {
       const r = await fetch(API("/posts"), {
-        method: "POST", headers, body: JSON.stringify({ links: items }),
+        method: "POST", headers,
+        body: JSON.stringify({
+          links: items,
+          group_id: parseInt(selectedGroupId),
+        }),
       });
       const d = await r.json();
       setResults(d.results ?? []);
@@ -95,7 +103,7 @@ export default function DouyinPostsPage() {
     setTimeout(() => { mutatePosts(); setChecking(false); }, 4000);
   };
 
-  const handleDelete = async (note_id: string) => {
+  const handleDelete = async (note_id: string, owner_user_id?: number | null) => {
     const ok = await confirmDialog({
       title: "删除监控",
       content: "确认删除这条监控？",
@@ -104,7 +112,39 @@ export default function DouyinPostsPage() {
       danger: true,
     });
     if (!ok) return;
-    await fetch(API(`/posts/${note_id}`), { method: "DELETE", headers });
+    const qs = owner_user_id ? `?owner_user_id=${owner_user_id}` : "";
+    await fetch(API(`/posts/${note_id}${qs}`), { method: "DELETE", headers });
+    await mutatePosts();
+  };
+
+  // 多选 + 批量删除
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const postKey = (p: Post) => `${(p as any).user_id || 0}__${p.note_id}`;
+  const toggleKey = (k: string) => setSelectedKeys((prev) => {
+    const next = new Set(prev);
+    if (next.has(k)) next.delete(k); else next.add(k);
+    return next;
+  });
+  const togglePageAll = (rows: Post[]) => setSelectedKeys((prev) => {
+    const allKeys = rows.map(postKey);
+    const allOn = allKeys.length > 0 && allKeys.every((k) => prev.has(k));
+    const next = new Set(prev);
+    for (const k of allKeys) { if (allOn) next.delete(k); else next.add(k); }
+    return next;
+  });
+  const handleBatchDelete = async () => {
+    if (selectedKeys.size === 0) return;
+    const ok = await confirmDialog({
+      title: "批量删除", content: `确认删除选中的 ${selectedKeys.size} 条？`,
+      confirmText: "删除", cancelText: "取消", danger: true,
+    });
+    if (!ok) return;
+    const noteIds = Array.from(selectedKeys).map((k) => k.split("__").slice(1).join("__"));
+    await fetch(API("/posts/batch-delete"), {
+      method: "POST", headers,
+      body: JSON.stringify({ note_ids: noteIds }),
+    });
+    setSelectedKeys(new Set());
     await mutatePosts();
   };
 
@@ -187,7 +227,15 @@ export default function DouyinPostsPage() {
 
       <div className="flex items-center justify-between">
         <Chip size="sm" color="primary" variant="flat">v1 - 详情抓取</Chip>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
+          {selectedKeys.size > 0 && (
+            <Button size="sm" color="danger" variant="flat"
+              startContent={<Trash2 size={14} />}
+              onPress={handleBatchDelete}>
+              删除选中 ({selectedKeys.size})
+            </Button>
+          )}
+          <MonitorGroupsButton token={token} />
           <Button size="sm" variant="flat"
             startContent={<RefreshCw size={15} className={checking ? "animate-spin" : ""} />}
             onPress={handleCheck} isLoading={checking}>
@@ -225,6 +273,16 @@ export default function DouyinPostsPage() {
           ) : (
           <Table aria-label="douyin-posts" removeWrapper>
             <TableHeader>
+              <TableColumn className="w-12">
+                <Checkbox
+                  isSelected={posts.length > 0 && posts.every((p) => selectedKeys.has(postKey(p)))}
+                  isIndeterminate={
+                    posts.some((p) => selectedKeys.has(postKey(p))) &&
+                    !posts.every((p) => selectedKeys.has(postKey(p)))
+                  }
+                  onValueChange={() => togglePageAll(posts)}
+                />
+              </TableColumn>
               <TableColumn>视频</TableColumn>
               <TableColumn>状态</TableColumn>
               <TableColumn>点赞</TableColumn>
@@ -235,7 +293,13 @@ export default function DouyinPostsPage() {
             </TableHeader>
             <TableBody>
               {posts.map((p) => (
-                <TableRow key={p.note_id}>
+                <TableRow key={postKey(p)}>
+                  <TableCell>
+                    <Checkbox
+                      isSelected={selectedKeys.has(postKey(p))}
+                      onValueChange={() => toggleKey(postKey(p))}
+                    />
+                  </TableCell>
                   <TableCell>
                     <div className="flex flex-col gap-1">
                       <a href={p.note_url} target="_blank" rel="noreferrer"
@@ -293,7 +357,7 @@ export default function DouyinPostsPage() {
                       </Tooltip>
                       <Tooltip content="删除" color="danger">
                         <Button isIconOnly size="sm" variant="light" color="danger"
-                          onPress={() => handleDelete(p.note_id)}>
+                          onPress={() => handleDelete(p.note_id, (p as any).user_id)}>
                           <Trash2 size={15} />
                         </Button>
                       </Tooltip>
@@ -397,6 +461,9 @@ export default function DouyinPostsPage() {
         <AddDouyinPostsModal
           isOpen={isOpen}
           onClose={onClose}
+          groups={groups}
+          selectedGroupId={selectedGroupId}
+          setSelectedGroupId={setSelectedGroupId}
           links={links}
           setLinks={setLinks}
           results={results}

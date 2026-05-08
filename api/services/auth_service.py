@@ -99,6 +99,12 @@ def init_user_db():
     _ensure_column(cursor, "users", "mp_auth_appmsg_token", "TEXT DEFAULT ''")
     _ensure_column(cursor, "users", "mp_auth_at",           "TEXT")
 
+    # 用户级 trending 配置（之前在 monitor_settings 全局，2026-05 改为 per-user）
+    # admin 配的全局值仅作为新用户首次的默认；每用户独立维护自己的关键词
+    _ensure_column(cursor, "users", "trending_keywords",   "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "trending_enabled",    "INTEGER DEFAULT 0")
+    _ensure_column(cursor, "users", "trending_min_likes",  "INTEGER DEFAULT 1000")
+
     # 飞书 OAuth 自动绑定（每个用户独立的群 + 多维表格）
     # access_token 约 2h 过期，refresh_token 约 30 天；30 天内静默 refresh，超期需重新 OAuth
     _ensure_column(cursor, "users", "feishu_open_id",                   "TEXT DEFAULT ''")
@@ -290,6 +296,9 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "       COALESCE(mp_auth_pass_ticket,'')  AS mp_auth_pass_ticket, "
         "       COALESCE(mp_auth_appmsg_token,'') AS mp_auth_appmsg_token, "
         "       mp_auth_at, "
+        "       COALESCE(trending_keywords,'')   AS trending_keywords, "
+        "       COALESCE(trending_enabled,0)     AS trending_enabled, "
+        "       COALESCE(trending_min_likes,1000) AS trending_min_likes, "
         "       COALESCE(feishu_open_id,'')                   AS feishu_open_id, "
         "       COALESCE(feishu_user_access_token,'')         AS feishu_user_access_token, "
         "       COALESCE(feishu_refresh_token,'')             AS feishu_refresh_token, "
@@ -323,6 +332,9 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "mp_auth_pass_ticket":  row["mp_auth_pass_ticket"] or "",
         "mp_auth_appmsg_token": row["mp_auth_appmsg_token"] or "",
         "mp_auth_at": row["mp_auth_at"],
+        "trending_keywords":  row["trending_keywords"] or "",
+        "trending_enabled":   bool(row["trending_enabled"]),
+        "trending_min_likes": int(row["trending_min_likes"] or 1000),
         "feishu_open_id":                   row["feishu_open_id"] or "",
         "feishu_user_access_token":         row["feishu_user_access_token"] or "",
         "feishu_refresh_token":             row["feishu_refresh_token"] or "",
@@ -362,6 +374,45 @@ def update_user_mp_auth(
     cur.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
     conn.commit()
     conn.close()
+
+
+def update_user_trending(
+    user_id: int,
+    keywords: Optional[str] = None,
+    enabled: Optional[bool] = None,
+    min_likes: Optional[int] = None,
+) -> None:
+    """用户更新自己的 trending 配置（关键词、是否启用、点赞阈值）。"""
+    fields, values = [], []
+    if keywords is not None:
+        fields.append("trending_keywords = ?"); values.append(keywords)
+    if enabled is not None:
+        fields.append("trending_enabled = ?"); values.append(1 if enabled else 0)
+    if min_likes is not None:
+        fields.append("trending_min_likes = ?"); values.append(int(min_likes))
+    if not fields:
+        return
+    values.append(user_id)
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    cur.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
+    conn.commit()
+    conn.close()
+
+
+def list_users_with_trending() -> list:
+    """scheduler 用：列出所有 trending_enabled=1 的用户（含 keywords / min_likes）。"""
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, username, "
+        "       COALESCE(trending_keywords,'')   AS trending_keywords, "
+        "       COALESCE(trending_min_likes,1000) AS trending_min_likes "
+        "FROM users WHERE COALESCE(trending_enabled,0)=1 AND COALESCE(is_active,1)=1"
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def update_user_webhooks(

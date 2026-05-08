@@ -17,7 +17,11 @@ import {
 } from "@nextui-org/modal";
 import { Spinner } from "@nextui-org/spinner";
 import { Tooltip } from "@nextui-org/tooltip";
-import { ShieldCheck, Users, Server, Cpu, RefreshCw, QrCode, Plus, Pencil, KeyRound } from "lucide-react";
+import {
+  ShieldCheck, Users, Server, Cpu, RefreshCw, QrCode, Plus, Pencil, KeyRound,
+  Sparkles, Link2, SlidersHorizontal, ArrowRight,
+} from "lucide-react";
+import Link from "next/link";
 import { toastErr } from "@/lib/toast";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
@@ -386,6 +390,31 @@ export default function AdminPage() {
           value={settings.ai_api_key ? "已配置" : "未配置"}
           hint={settings.ai_model || ""}
         />
+      </div>
+
+      {/* 快捷入口：跳到独立的 admin 子页面 */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {[
+          { href: "/dashboard/admin/ai",       label: "AI 模型",   icon: <Sparkles size={18} />,           desc: "OpenAI 兼容接口配置" },
+          { href: "/dashboard/admin/feishu",   label: "飞书应用",  icon: <Link2 size={18} />,              desc: "App ID / OAuth / 多维表" },
+          { href: "/dashboard/admin/system",   label: "系统配置",  icon: <SlidersHorizontal size={18} />,  desc: "检测频率 / 阈值 / 七牛" },
+          { href: "/dashboard/admin/accounts", label: "账号管理",  icon: <Server size={18} />,             desc: "Cookie 池 / QR 登录" },
+        ].map((it) => (
+          <Link key={it.href} href={it.href} className="block">
+            <Card className="border border-divider hover:border-primary transition-colors h-full">
+              <CardBody className="py-3 px-4 flex flex-row items-center gap-3">
+                <div className="rounded-lg bg-primary/10 text-primary p-2 shrink-0">
+                  {it.icon}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium">{it.label}</p>
+                  <p className="text-xs text-default-400 truncate">{it.desc}</p>
+                </div>
+                <ArrowRight size={14} className="text-default-300 shrink-0" />
+              </CardBody>
+            </Card>
+          </Link>
+        ))}
       </div>
 
       <Tabs aria-label="admin sections">

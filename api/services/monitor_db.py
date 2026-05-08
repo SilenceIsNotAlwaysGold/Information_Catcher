@@ -91,6 +91,9 @@ INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_admin_open_id', '');
 -- 飞书企业邀请链接：自建应用只允许应用所属企业的成员授权，外部用户需先扫码
 -- 加入企业。admin 在飞书后台 → 通讯录管理 → 邀请成员 复制长效邀请链接到这里。
 INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_invite_url', '');
+-- 飞书 8 位企业邀请码：扫码后飞书 App 有时会跳转到「输入企业邀请码」页面，
+-- 需要用户手动输入这 8 位字母码。前端在二维码下方展示并提供一键复制。
+INSERT OR IGNORE INTO monitor_settings VALUES ('feishu_invite_code', '');
 -- 七牛云对象存储：用于商品图上传，得到公网 URL 后才能往飞书写
 INSERT OR IGNORE INTO monitor_settings VALUES ('qiniu_access_key', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('qiniu_secret_key', '');
@@ -289,6 +292,10 @@ CREATE TABLE IF NOT EXISTS image_gen_history (
     upload_status TEXT DEFAULT 'skipped',
     upload_retries INTEGER DEFAULT 0,
     upload_last_error TEXT DEFAULT '',
+    -- AI 配套文案：勾选「同时生成文案」时 AI 基于 prompt 生成的标题 + 正文，
+    -- 同一批次（同一次 /generate 调用）的所有图共用一份文案
+    generated_title TEXT DEFAULT '',
+    generated_body TEXT DEFAULT '',
     source_post_url TEXT DEFAULT '',
     source_post_title TEXT DEFAULT '',
     used_reference INTEGER DEFAULT 0,
@@ -588,6 +595,8 @@ async def _migrate(db):
     await _ensure_column(db, "image_gen_history", "upload_status", "TEXT DEFAULT 'skipped'")
     await _ensure_column(db, "image_gen_history", "upload_retries", "INTEGER DEFAULT 0")
     await _ensure_column(db, "image_gen_history", "upload_last_error", "TEXT DEFAULT ''")
+    await _ensure_column(db, "image_gen_history", "generated_title", "TEXT DEFAULT ''")
+    await _ensure_column(db, "image_gen_history", "generated_body", "TEXT DEFAULT ''")
     # 老数据：qiniu_url 非空说明同步上传成功过，标记 uploaded；空则 skipped
     await db.execute(
         "UPDATE image_gen_history SET upload_status='uploaded' "
@@ -2003,6 +2012,7 @@ async def add_image_history(
     set_idx: int = 1, in_set_idx: int = 1,
     local_url: str = "", qiniu_url: str = "", qiniu_key: str = "",
     upload_status: str = "skipped",
+    generated_title: str = "", generated_body: str = "",
     source_post_url: str = "", source_post_title: str = "",
     used_reference: bool = False,
 ) -> int:
@@ -2011,11 +2021,13 @@ async def add_image_history(
             """INSERT INTO image_gen_history
                (user_id, prompt, negative_prompt, size, model,
                 set_idx, in_set_idx, local_url, qiniu_url, qiniu_key,
-                upload_status, source_post_url, source_post_title, used_reference)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                upload_status, generated_title, generated_body,
+                source_post_url, source_post_title, used_reference)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (user_id, prompt, negative_prompt, size, model,
              set_idx, in_set_idx, local_url, qiniu_url, qiniu_key,
-             upload_status, source_post_url, source_post_title,
+             upload_status, generated_title, generated_body,
+             source_post_url, source_post_title,
              1 if used_reference else 0),
         )
         await db.commit()
