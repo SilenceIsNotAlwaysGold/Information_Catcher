@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
 import { Input, Textarea } from "@nextui-org/input";
@@ -439,6 +439,54 @@ export default function ProductImagePage() {
     } catch (e: any) { toastErr(`删除异常：${e?.message || e}`); }
   };
 
+  // 飞书 bitable 下的 table 列表（用户可以多建几张分用途存）
+  type BitableTable = { table_id: string; name: string };
+  const [bitableTables, setBitableTables] = useState<BitableTable[]>([]);
+  const [bitableAppToken, setBitableAppToken] = useState<string>("");
+  const [defaultImageTableId, setDefaultImageTableId] = useState<string>("");
+  const [selectedTableId, setSelectedTableId] = useState<string>("");
+
+  const reloadBitableTables = useCallback(async () => {
+    if (!token) return;
+    try {
+      const r = await fetch("/api/feishu/bitable/tables", { headers });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        const tables: BitableTable[] = data?.tables || [];
+        setBitableTables(tables);
+        setBitableAppToken(data?.app_token || "");
+        const def = data?.default_image_table_id || "";
+        setDefaultImageTableId(def);
+        // 当前没选 table 时默认选「图像」（用户绑定时自动建的那张）
+        setSelectedTableId((prev) => prev || def || (tables[0]?.table_id || ""));
+      }
+    } catch {}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  useEffect(() => { reloadBitableTables(); }, [reloadBitableTables]);
+
+  const handleCreateBitableTable = async () => {
+    const name = window.prompt("新表名（建议带业务标签，如「商品图-护肤」）：", "");
+    if (!name || !name.trim()) return;
+    try {
+      const r = await fetch("/api/feishu/bitable/tables", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ name: name.trim(), kind: "image" }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data?.ok) {
+        toastErr(`新建失败：${data?.detail || data?.error || `HTTP ${r.status}`}`);
+        return;
+      }
+      toastOk(`已创建：${name.trim()}`);
+      await reloadBitableTables();
+      // 自动切到刚建的表
+      if (data.table_id) setSelectedTableId(data.table_id);
+    } catch (e: any) { toastErr(`新建异常：${e?.message || e}`); }
+  };
+
   const syncSelectedToBitable = async () => {
     const ids = Array.from(historySelected);
     if (ids.length === 0) { toastErr("请先勾选要同步的记录"); return; }
@@ -447,7 +495,11 @@ export default function ProductImagePage() {
       const r = await fetch(API("/history/sync-bitable"), {
         method: "POST",
         headers,
-        body: JSON.stringify({ record_ids: ids }),
+        body: JSON.stringify({
+          record_ids: ids,
+          // 用户在下拉里选了 table → 同步到那张；没选则后端走默认（用户级 image_table）
+          target_table_id: selectedTableId || undefined,
+        }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok || data?.error) {
@@ -457,7 +509,8 @@ export default function ProductImagePage() {
       const results: Array<{ id: number; ok: boolean; reason?: string }> = data?.results || [];
       const okCount = results.filter((x) => x.ok).length;
       const failCount = results.length - okCount;
-      if (okCount > 0) toastOk(`同步成功 ${okCount} 条${failCount ? `，失败 ${failCount}` : ""}`);
+      const tableName = bitableTables.find((t) => t.table_id === selectedTableId)?.name || "默认表";
+      if (okCount > 0) toastOk(`同步「${tableName}」成功 ${okCount} 条${failCount ? `，失败 ${failCount}` : ""}`);
       if (failCount > 0) {
         const sample = results.find((x) => !x.ok);
         if (sample) toastErr(`部分失败：${sample.reason || "未知"}`);
@@ -473,9 +526,12 @@ export default function ProductImagePage() {
 
   const canGenerate = !!cfg.has_key && !!cfg.base_url && !!cfg.model && !generating;
 
-  // 前端分批：count > 4 时拆成多次请求，每批 4 张，增量追加显示。
-  // 单次请求耗时 ~30-60s，10 张分 3 批比一次等 3 分钟体验好得多。
-  const BATCH_SIZE = 4;
+  // 前端分批：每张单独一次请求（n=1）。原因：
+  // 1. 大量上游模型（gpt-image / dall-e-3 / wanx / cogview）单次只支持 n=1，
+  //    后端会拆成多次串行调用，单批 4 张耗时 ~60s
+  // 2. Cloudflare tunnel HTTP 超时 100s，单次响应 >100s 直接 524
+  // 3. 每张一次请求 → 单次响应 ~15s（远低于 100s），UI 也能逐张刷新进度
+  const BATCH_SIZE = 1;
 
   const handleGenerate = async () => {
     if (!prompt.trim()) { toastErr("请填写 Prompt 或通过向导生成"); return; }
@@ -1265,6 +1321,35 @@ export default function ProductImagePage() {
               <Chip size="sm" color="primary" variant="flat">
                 已选 {historySelected.size}
               </Chip>
+            )}
+            {/* 飞书目标 table 选择：用户在自己 bitable 里建了多张表时选写入哪张 */}
+            {bitableAppToken && bitableTables.length > 0 && (
+              <Select
+                aria-label="选择飞书目标表"
+                size="sm"
+                className="max-w-[180px]"
+                selectedKeys={selectedTableId ? new Set([selectedTableId]) : new Set()}
+                onSelectionChange={(k) => setSelectedTableId(Array.from(k)[0] as string ?? "")}
+              >
+                {bitableTables.map((t) => (
+                  <SelectItem
+                    key={t.table_id}
+                    textValue={t.name + (t.table_id === defaultImageTableId ? "（默认）" : "")}
+                  >
+                    {t.name}{t.table_id === defaultImageTableId ? " · 默认" : ""}
+                  </SelectItem>
+                ))}
+              </Select>
+            )}
+            {bitableAppToken && (
+              <Button
+                size="sm"
+                variant="light"
+                onPress={handleCreateBitableTable}
+                title="在我的飞书 bitable 里新建一张表"
+              >
+                + 新表
+              </Button>
             )}
             <Button
               size="sm"

@@ -83,6 +83,8 @@ class FetchPostCoverRequest(BaseModel):
 class SyncImageBitableRequest(BaseModel):
     """把若干历史记录同步到飞书多维表格的图像专用 sheet。"""
     record_ids: List[int]
+    # 可选：指定目标 table_id；不传则用 resolve_target 算出来的默认（用户级 image_table > 全局 image_table）
+    target_table_id: Optional[str] = None
 
 
 # ── Endpoints ───────────────────────────────────────────────────────────────
@@ -816,29 +818,26 @@ async def sync_history_to_bitable(
         }
     app_token = target["app_token"]
     table_id = target["table_id"]
+    # 用户在前端选了非默认 table → 覆盖 table_id（app_token 共用一个 bitable）
+    if (req.target_table_id or "").strip():
+        table_id = req.target_table_id.strip()
 
-    # 全局表第一次同步时自动建字段（用旧路径，需要 app_id/secret）；
-    # 用户专属表 provisioning 时已建好字段，跳过 ensure 即可。
-    if target["source"] == "global":
-        settings = await monitor_db.get_all_settings()
-        app_id     = settings.get("feishu_app_id", "")
-        app_secret = settings.get("feishu_app_secret", "")
-        if not (app_id and app_secret):
-            return {"error": "飞书 app_id / app_secret 未配置", "status": 400}
-        try:
-            await feishu_bitable.ensure_fields(
-                app_id, app_secret, app_token, table_id,
-                fields={
-                    "Prompt": "text", "图片": "url",
-                    "尺寸": "text", "模型": "text",
-                    "套号": "number", "套内序号": "number",
-                    "标题": "text", "正文": "text",
-                    "来源链接": "url", "来源标题": "text",
-                    "生成时间": "text",
-                },
-            )
-        except Exception as e:
-            return {"error": f"准备表格字段失败：{e}", "status": 400}
+    # 字段校验：用户可能选了一个新建的 table（或全局兜底表第一次同步），
+    # 把图像同步需要的字段补齐。已存在则跳过，幂等。
+    # 字段类型常量（飞书 Bitable）：1=多行文本 2=数字 15=超链接
+    expected_fields = [
+        ("Prompt", 1), ("图片", 15),
+        ("尺寸", 1), ("模型", 1),
+        ("套号", 2), ("套内序号", 2),
+        ("标题", 1), ("正文", 1),
+        ("来源链接", 15), ("来源标题", 1),
+        ("生成时间", 1),
+    ]
+    try:
+        for fname, ftype in expected_fields:
+            await feishu_bitable_v2.ensure_field(app_token, table_id, fname, ftype)
+    except Exception as e:
+        return {"error": f"准备表格字段失败：{e}", "status": 400}
 
     user_id = current_user.get("id") if current_user else None
     role = (current_user or {}).get("role") or "user"

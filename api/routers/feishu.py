@@ -21,6 +21,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from ..services import auth_service, monitor_db
 from ..services.feishu import oauth as feishu_oauth
 from ..services.feishu import provisioning as feishu_provisioning
+from ..services.feishu import bitable as feishu_bitable
+from pydantic import BaseModel
 from ..services.feishu.client import FeishuApiError
 from .auth import get_current_user
 
@@ -230,3 +232,79 @@ async def reprovision(
     except FeishuApiError as e:
         raise HTTPException(status_code=502, detail=e.msg)
     return {"ok": True, **result}
+
+
+# ── 多维表格 tables 管理 ────────────────────────────────────────────────────
+
+def _user_app_token(current_user: dict) -> str:
+    """拿当前用户的 bitable app_token；没绑定 OAuth 时回退到 admin 全局配的。"""
+    return (current_user.get("feishu_bitable_app_token") or "").strip()
+
+
+@router.get("/bitable/tables", summary="列出当前用户 bitable 下的所有 table")
+async def list_bitable_tables(current_user: dict = Depends(get_current_user)) -> dict:
+    """前端「同步飞书」时用这个端点拿 table 列表给用户选。"""
+    app_token = _user_app_token(current_user)
+    # 没绑定 OAuth → 回退到全局 admin 配的 app_token
+    if not app_token:
+        app_token = (await monitor_db.get_setting("feishu_bitable_app_token", "")).strip()
+    if not app_token:
+        return {"app_token": "", "tables": [], "default_image_table_id": "", "default_trending_table_id": ""}
+    try:
+        tables = await feishu_bitable.list_tables(app_token)
+    except FeishuApiError as e:
+        raise HTTPException(status_code=502, detail=e.msg)
+    return {
+        "app_token": app_token,
+        "tables": tables,
+        # 让前端能默认选中"自动建好的图像表"
+        "default_image_table_id": (current_user.get("feishu_bitable_image_table_id") or "")
+            or (await monitor_db.get_setting("feishu_bitable_image_table_id", "")).strip(),
+        "default_trending_table_id": (current_user.get("feishu_bitable_trending_table_id") or ""),
+    }
+
+
+class CreateTableRequest(BaseModel):
+    name: str
+    # kind 决定预建什么字段。'image' = 商品图标准字段；'blank' = 空表（用户自己加列）
+    kind: Optional[str] = "image"
+
+
+# 商品图同步用的字段集（跟 image_gen.py sync-bitable 用的字段一致）
+_IMAGE_FIELDS = [
+    {"field_name": "Prompt", "type": 1},
+    {"field_name": "图片", "type": 15},
+    {"field_name": "尺寸", "type": 1},
+    {"field_name": "模型", "type": 1},
+    {"field_name": "套号", "type": 2},
+    {"field_name": "套内序号", "type": 2},
+    {"field_name": "标题", "type": 1},
+    {"field_name": "正文", "type": 1},
+    {"field_name": "来源链接", "type": 15},
+    {"field_name": "来源标题", "type": 1},
+    {"field_name": "生成时间", "type": 1},
+]
+
+
+@router.post("/bitable/tables", summary="在当前用户 bitable 下新建一个 table")
+async def create_bitable_table(
+    req: CreateTableRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """让用户能给不同业务建独立的 table（比如「护肤产品图」「美妆产品图」分开存）。"""
+    if not (req.name or "").strip():
+        raise HTTPException(status_code=400, detail="table 名称不能为空")
+    app_token = _user_app_token(current_user)
+    if not app_token:
+        raise HTTPException(
+            status_code=400,
+            detail="尚未绑定飞书，无法建表（先绑定即可自动开通用户专属 bitable）",
+        )
+    fields = _IMAGE_FIELDS if (req.kind or "image") == "image" else [
+        {"field_name": "字段1", "type": 1},  # 至少需要一个字段
+    ]
+    try:
+        result = await feishu_bitable.create_table(app_token, req.name.strip(), fields)
+    except FeishuApiError as e:
+        raise HTTPException(status_code=502, detail=e.msg)
+    return {"ok": True, "table_id": result.get("table_id", ""), "name": req.name.strip()}

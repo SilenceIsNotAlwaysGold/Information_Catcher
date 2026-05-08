@@ -118,6 +118,24 @@ async def list_field_names(app_token: str, table_id: str) -> List[str]:
     return [it.get("field_name") for it in items if it.get("field_name")]
 
 
+async def list_tables(app_token: str) -> List[Dict[str, Any]]:
+    """列出 app 下所有 table。返回 [{table_id, name, revision}, ...]。
+
+    用户可以在飞书 bitable 里直接建表，也可以通过我们的 create_table 建。
+    Pulse 同步时让用户从这个列表选目标。
+    """
+    data = await get(f"/bitable/v1/apps/{app_token}/tables")
+    items = (data.get("data") or {}).get("items") or []
+    return [
+        {
+            "table_id": it.get("table_id", ""),
+            "name": it.get("name", ""),
+            "revision": it.get("revision", 0),
+        }
+        for it in items if it.get("table_id")
+    ]
+
+
 async def ensure_field(
     app_token: str,
     table_id: str,
