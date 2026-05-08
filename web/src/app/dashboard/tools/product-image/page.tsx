@@ -526,9 +526,14 @@ export default function ProductImagePage() {
 
   const canGenerate = !!cfg.has_key && !!cfg.base_url && !!cfg.model && !generating;
 
-  // 单次请求 n=1（避免 cloudflare tunnel 100s 超时 + 兼容单图模型 gpt-image / dall-e-3）
-  // 多张靠前端 4 路并发：单张 ~15s，4 路并发 → 15 张 ~60s（vs 串行 ~3min）
-  const CONCURRENCY = 4;
+  // 每批最多 4 张（单次上游请求 n），3 路并发提交。整体节奏：
+  //   - 首批同步跑（顺便拿 AI 配套文案）
+  //   - 剩余批次 3 个 worker 并发，每个抢下一批
+  //   - 单批响应 ~15-30s（n=4 多图模型）；超 100s 风险由后端拆批兜底
+  // 注意：上游若是单图模型（dall-e-3 / wanx2 等），后端 _max_per_batch_for 会拆成
+  // 多次串行调用，单批耗时拉长可能撞 cloudflare 524 — 那种模型建议换。
+  const BATCH_SIZE = 4;
+  const CONCURRENCY = 3;
 
   const handleGenerate = async () => {
     if (!prompt.trim()) { toastErr("请填写 Prompt 或通过向导生成"); return; }
@@ -542,7 +547,6 @@ export default function ProductImagePage() {
     const baseBody = {
       prompt: prompt.trim(),
       negative_prompt: negativePrompt.trim(),
-      n: 1,
       size: genSize || undefined,
       images_per_set: imagesPerSet,
       source_post_url: postUrlInput.trim() || undefined,
@@ -550,18 +554,24 @@ export default function ProductImagePage() {
       ...(refImageB64 ? { reference_image_b64: refImageB64 } : {}),
     };
 
-    // 用 sparse 数组按 index 写入，保证顺序与套号一致；失败留 null
+    // 切批：[4, 4, 4, ..., 余数]，每批一个 startIndex
+    const batches: { startIndex: number; n: number }[] = [];
+    for (let i = 0; i < count; i += BATCH_SIZE) {
+      batches.push({ startIndex: i, n: Math.min(BATCH_SIZE, count - i) });
+    }
+
+    // sparse 数组按全局 index 存放结果，刷新 UI 时过滤 null 保序
     const results: (GenItem | null)[] = new Array(count).fill(null);
     const errors: string[] = [];
     let captionTitle = "";
     let captionBody = "";
 
-    // 提交单张请求；首张同步等 caption（其余批次复用）
-    const requestOne = async (index: number, isFirst: boolean): Promise<void> => {
+    const runBatch = async (b: { startIndex: number; n: number }, isFirst: boolean) => {
       const body = {
         ...baseBody,
-        start_index: index,
-        auto_rewrite: captionEnabled && isFirst,  // 仅首张让 AI 生成 caption
+        n: b.n,
+        start_index: b.startIndex,
+        auto_rewrite: captionEnabled && isFirst,
         forced_title: isFirst ? "" : captionTitle,
         forced_body: isFirst ? "" : captionBody,
       };
@@ -570,13 +580,13 @@ export default function ProductImagePage() {
           method: "POST", headers, body: JSON.stringify(body),
         });
         const data = await r.json().catch(() => ({}));
-        const batchImgs: GenItem[] = Array.isArray(data?.images) ? data.images : [];
-        if (!r.ok || data?.error || batchImgs.length === 0) {
+        const imgs: GenItem[] = Array.isArray(data?.images) ? data.images : [];
+        if (!r.ok || data?.error) {
           const msg = data?.error || data?.detail || `HTTP ${r.status}`;
-          errors.push(`#${index + 1}: ${msg}`);
+          errors.push(`批次 ${b.startIndex + 1}-${b.startIndex + b.n}: ${msg}`);
           return;
         }
-        // 首张：拿 caption 给后续批次复用
+        // 首批拿 caption
         if (isFirst && captionEnabled) {
           if (data?.generated_title || data?.generated_body) {
             captionTitle = data.generated_title || "";
@@ -585,25 +595,31 @@ export default function ProductImagePage() {
             toastErr(`配套文案生成失败：${data.caption_error}（图正常生成）`);
           }
         }
-        results[index] = batchImgs[0];
-        // 增量刷新 UI（过滤掉 null，保持顺序）
+        // 上游可能返回 < n 张（部分模型不严格遵守 n）— 写入实际数量，缺位留 null
+        for (let i = 0; i < imgs.length && b.startIndex + i < count; i++) {
+          results[b.startIndex + i] = imgs[i];
+        }
+        if (imgs.length < b.n) {
+          errors.push(`批次 ${b.startIndex + 1}-${b.startIndex + b.n}: 上游返回 ${imgs.length} 张（请求 ${b.n}）`);
+        }
         setItemsAndCache(results.filter((x): x is GenItem => x !== null));
       } catch (e: any) {
-        errors.push(`#${index + 1}: ${e?.message || e}`);
+        errors.push(`批次 ${b.startIndex + 1}-${b.startIndex + b.n}: ${e?.message || e}`);
       }
     };
 
     try {
-      // 1) 首张串行（同步等 caption 结果）
-      await requestOne(0, true);
-
-      // 2) 剩余 (count-1) 张以 CONCURRENCY 路并发
-      if (count > 1) {
+      // 1) 首批同步（拿 caption）
+      if (batches.length > 0) {
+        await runBatch(batches[0], true);
+      }
+      // 2) 剩余批次 3 路并发
+      if (batches.length > 1) {
         let next = 1;
-        const workers = Array.from({ length: Math.min(CONCURRENCY, count - 1) }, async () => {
-          while (next < count) {
+        const workers = Array.from({ length: Math.min(CONCURRENCY, batches.length - 1) }, async () => {
+          while (next < batches.length) {
             const i = next++;
-            await requestOne(i, false);
+            await runBatch(batches[i], false);
           }
         });
         await Promise.all(workers);
