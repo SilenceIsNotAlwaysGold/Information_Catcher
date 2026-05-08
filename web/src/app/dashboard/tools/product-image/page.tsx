@@ -526,12 +526,9 @@ export default function ProductImagePage() {
 
   const canGenerate = !!cfg.has_key && !!cfg.base_url && !!cfg.model && !generating;
 
-  // 前端分批：每张单独一次请求（n=1）。原因：
-  // 1. 大量上游模型（gpt-image / dall-e-3 / wanx / cogview）单次只支持 n=1，
-  //    后端会拆成多次串行调用，单批 4 张耗时 ~60s
-  // 2. Cloudflare tunnel HTTP 超时 100s，单次响应 >100s 直接 524
-  // 3. 每张一次请求 → 单次响应 ~15s（远低于 100s），UI 也能逐张刷新进度
-  const BATCH_SIZE = 1;
+  // 单次请求 n=1（避免 cloudflare tunnel 100s 超时 + 兼容单图模型 gpt-image / dall-e-3）
+  // 多张靠前端 4 路并发：单张 ~15s，4 路并发 → 15 张 ~60s（vs 串行 ~3min）
+  const CONCURRENCY = 4;
 
   const handleGenerate = async () => {
     if (!prompt.trim()) { toastErr("请填写 Prompt 或通过向导生成"); return; }
@@ -540,94 +537,93 @@ export default function ProductImagePage() {
     setGenErrorAndCache("");
     setItemsAndCache([]);
 
-    const accumulated: GenItem[] = [];
-    let remaining = count;
-    // 配套文案：首批让后端 AI 生成一份，后续批次回传复用
+    const platMap: Record<string, string> = { 小红书: "xhs", 抖音: "douyin", 公众号: "mp" };
+    const targetPlatform = platMap[selectedPlatform] || "xhs";
+    const baseBody = {
+      prompt: prompt.trim(),
+      negative_prompt: negativePrompt.trim(),
+      n: 1,
+      size: genSize || undefined,
+      images_per_set: imagesPerSet,
+      source_post_url: postUrlInput.trim() || undefined,
+      target_platform: targetPlatform,
+      ...(refImageB64 ? { reference_image_b64: refImageB64 } : {}),
+    };
+
+    // 用 sparse 数组按 index 写入，保证顺序与套号一致；失败留 null
+    const results: (GenItem | null)[] = new Array(count).fill(null);
+    const errors: string[] = [];
     let captionTitle = "";
     let captionBody = "";
 
-    try {
-      while (remaining > 0) {
-        const take = Math.min(remaining, BATCH_SIZE);
-        const isFirstBatch = accumulated.length === 0;
-        // 平台映射：UI "小红书"/"抖音"/"公众号" → 后端 xhs/douyin/mp
-        const platMap: Record<string, string> = { 小红书: "xhs", 抖音: "douyin", 公众号: "mp" };
-        const targetPlatform = platMap[selectedPlatform] || "xhs";
-
-        const body: Record<string, any> = {
-          prompt: prompt.trim(),
-          negative_prompt: negativePrompt.trim(),
-          n: take,
-          size: genSize || undefined,
-          images_per_set: imagesPerSet,
-          start_index: accumulated.length,
-          source_post_url: postUrlInput.trim() || undefined,
-          // 配套文案：勾选时启用；首批让后端生成，后续批次复用
-          auto_rewrite: captionEnabled,
-          target_platform: targetPlatform,
-          forced_title: isFirstBatch ? "" : captionTitle,
-          forced_body: isFirstBatch ? "" : captionBody,
-        };
-        if (refImageB64) body.reference_image_b64 = refImageB64;
-
+    // 提交单张请求；首张同步等 caption（其余批次复用）
+    const requestOne = async (index: number, isFirst: boolean): Promise<void> => {
+      const body = {
+        ...baseBody,
+        start_index: index,
+        auto_rewrite: captionEnabled && isFirst,  // 仅首张让 AI 生成 caption
+        forced_title: isFirst ? "" : captionTitle,
+        forced_body: isFirst ? "" : captionBody,
+      };
+      try {
         const r = await fetch(API("/generate"), {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body),
+          method: "POST", headers, body: JSON.stringify(body),
         });
         const data = await r.json().catch(() => ({}));
         const batchImgs: GenItem[] = Array.isArray(data?.images) ? data.images : [];
-
-        if (!r.ok || data?.error) {
+        if (!r.ok || data?.error || batchImgs.length === 0) {
           const msg = data?.error || data?.detail || `HTTP ${r.status}`;
-          if (accumulated.length > 0) {
-            // 部分成功：保留已生成的，并提示剩余失败
-            setGenErrorAndCache(`已生成 ${accumulated.length}/${count} 张，剩余失败：${msg}`);
-            toastErr(`部分成功（${accumulated.length}/${count}）：${msg}`);
-            return;
-          }
-          setGenErrorAndCache(String(msg));
-          toastErr(`生成失败：${msg}`);
+          errors.push(`#${index + 1}: ${msg}`);
           return;
         }
-        if (batchImgs.length === 0) {
-          if (accumulated.length > 0) {
-            setGenErrorAndCache(`已生成 ${accumulated.length}/${count} 张，剩余批次未返回图片`);
-            toastErr(`部分成功（${accumulated.length}/${count}）`);
-            return;
-          }
-          setGenErrorAndCache("上游未返回图片");
-          toastErr("上游未返回图片");
-          return;
-        }
-
-        // 首批：拿到 AI 生成的 caption，后续批次回传复用
-        if (isFirstBatch && captionEnabled) {
+        // 首张：拿 caption 给后续批次复用
+        if (isFirst && captionEnabled) {
           if (data?.generated_title || data?.generated_body) {
             captionTitle = data.generated_title || "";
             captionBody = data.generated_body || "";
           } else if (data?.caption_error) {
-            // AI 失败不阻塞生图，只提示
             toastErr(`配套文案生成失败：${data.caption_error}（图正常生成）`);
           }
         }
-
-        accumulated.push(...batchImgs);
-        // 立刻刷新到 UI，让用户能看到进度
-        setItemsAndCache([...accumulated]);
-        remaining -= take;
+        results[index] = batchImgs[0];
+        // 增量刷新 UI（过滤掉 null，保持顺序）
+        setItemsAndCache(results.filter((x): x is GenItem => x !== null));
+      } catch (e: any) {
+        errors.push(`#${index + 1}: ${e?.message || e}`);
       }
+    };
+
+    try {
+      // 1) 首张串行（同步等 caption 结果）
+      await requestOne(0, true);
+
+      // 2) 剩余 (count-1) 张以 CONCURRENCY 路并发
+      if (count > 1) {
+        let next = 1;
+        const workers = Array.from({ length: Math.min(CONCURRENCY, count - 1) }, async () => {
+          while (next < count) {
+            const i = next++;
+            await requestOne(i, false);
+          }
+        });
+        await Promise.all(workers);
+      }
+
+      const okCount = results.filter((x) => x !== null).length;
       const captionMsg = captionEnabled && captionTitle ? "（含配套文案）" : "";
-      toastOk(`生成成功（${accumulated.length} 张）${captionMsg}`);
+      if (okCount === count) {
+        toastOk(`生成成功（${okCount} 张）${captionMsg}`);
+      } else if (okCount > 0) {
+        setGenErrorAndCache(`成功 ${okCount}/${count} 张${errors.length ? "；失败：" + errors.slice(0, 3).join("；") : ""}`);
+        toastErr(`部分成功（${okCount}/${count}）`);
+      } else {
+        setGenErrorAndCache(errors.slice(0, 3).join("；") || "全部失败");
+        toastErr(`生成失败：${errors[0] || "未知"}`);
+      }
       reloadHistory();
     } catch (e: any) {
-      if (accumulated.length > 0) {
-        setGenErrorAndCache(`已生成 ${accumulated.length}/${count} 张，中断：${e?.message || e}`);
-        toastErr(`部分成功（${accumulated.length}/${count}）：${e?.message || e}`);
-      } else {
-        setGenErrorAndCache(e?.message || String(e));
-        toastErr(`生成失败：${e?.message || e}`);
-      }
+      setGenErrorAndCache(e?.message || String(e));
+      toastErr(`生成失败：${e?.message || e}`);
     } finally {
       setGenerating(false);
     }
