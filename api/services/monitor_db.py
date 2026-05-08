@@ -296,6 +296,9 @@ CREATE TABLE IF NOT EXISTS image_gen_history (
     -- 同一批次（同一次 /generate 调用）的所有图共用一份文案
     generated_title TEXT DEFAULT '',
     generated_body TEXT DEFAULT '',
+    -- batch_id: 同一次 handleGenerate 操作的所有图共享一个 uuid（前端生成）
+    -- 用于历史 UI 按 (batch_id, set_idx) 聚合分组 + 飞书同步按套合并成一行
+    batch_id TEXT DEFAULT '',
     source_post_url TEXT DEFAULT '',
     source_post_title TEXT DEFAULT '',
     used_reference INTEGER DEFAULT 0,
@@ -607,6 +610,7 @@ async def _migrate(db):
     await _ensure_column(db, "image_gen_history", "upload_last_error", "TEXT DEFAULT ''")
     await _ensure_column(db, "image_gen_history", "generated_title", "TEXT DEFAULT ''")
     await _ensure_column(db, "image_gen_history", "generated_body", "TEXT DEFAULT ''")
+    await _ensure_column(db, "image_gen_history", "batch_id", "TEXT DEFAULT ''")
     # 老数据：qiniu_url 非空说明同步上传成功过，标记 uploaded；空则 skipped
     await db.execute(
         "UPDATE image_gen_history SET upload_status='uploaded' "
@@ -2036,6 +2040,7 @@ async def add_image_history(
     local_url: str = "", qiniu_url: str = "", qiniu_key: str = "",
     upload_status: str = "skipped",
     generated_title: str = "", generated_body: str = "",
+    batch_id: str = "",
     source_post_url: str = "", source_post_title: str = "",
     used_reference: bool = False,
 ) -> int:
@@ -2044,12 +2049,12 @@ async def add_image_history(
             """INSERT INTO image_gen_history
                (user_id, prompt, negative_prompt, size, model,
                 set_idx, in_set_idx, local_url, qiniu_url, qiniu_key,
-                upload_status, generated_title, generated_body,
+                upload_status, generated_title, generated_body, batch_id,
                 source_post_url, source_post_title, used_reference)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (user_id, prompt, negative_prompt, size, model,
              set_idx, in_set_idx, local_url, qiniu_url, qiniu_key,
-             upload_status, generated_title, generated_body,
+             upload_status, generated_title, generated_body, batch_id,
              source_post_url, source_post_title,
              1 if used_reference else 0),
         )

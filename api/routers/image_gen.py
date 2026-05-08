@@ -73,6 +73,8 @@ class GenerateRequest(BaseModel):
     # 多批次共享文案：前端首批拿到 title/body 后，后续批次回传过来直接复用，避免每批都调 AI
     forced_title: Optional[str] = ""
     forced_body: Optional[str] = ""
+    # 同一次"生成"操作的 uuid：前端生成，所有图共享，用于历史 UI 按 (batch_id, set_idx) 分组
+    batch_id: Optional[str] = ""
 
 
 class FetchPostCoverRequest(BaseModel):
@@ -85,6 +87,22 @@ class SyncImageBitableRequest(BaseModel):
     record_ids: List[int]
     # 可选：指定目标 table_id；不传则用 resolve_target 算出来的默认（用户级 image_table > 全局 image_table）
     target_table_id: Optional[str] = None
+
+
+class GenerateSetPlanRequest(BaseModel):
+    """让 AI 一次生成 N 套 × M 张差异化方案。
+
+    每套返回 {title, body, image_prompts: [M 条不同视角的 prompt]}。
+    套与套之间：主题/卖点不同（避免矩阵号被识别）；
+    套内 M 张：主体一致但镜头/构图/前景不同（避免轮播 9 张一模一样）。
+    """
+    base_prompt: str
+    sets: int = 1
+    images_per_set: int = 1
+    target_platform: str = "xhs"
+    source_post_url: Optional[str] = ""
+    source_post_title: Optional[str] = ""
+    source_post_desc: Optional[str] = ""
 
 
 # ── Endpoints ───────────────────────────────────────────────────────────────
@@ -508,6 +526,153 @@ async def _generate_caption(
         return "", content[:1500], ""
 
 
+async def _generate_caption_variants(
+    base_prompt: str,
+    n_variants: int,
+    images_per_set: int = 1,
+    platform: str = "xhs",
+    source_title: str = "",
+    source_desc: str = "",
+) -> tuple[List[dict], str]:
+    """让 AI 一次生成 N 套 × M 张差异化方案。
+
+    返回 ([{title, body, image_prompts: [M 条]}, ...], error)。
+
+    两层差异化：
+      套间：title/body/角度 完全不同（避免矩阵号被风控）
+      套内：image_prompts 是 M 条不同视角的 prompt（主体一致，镜头/构图/前景不同）
+    """
+    if n_variants < 1:
+        return [], "n_variants 必须 ≥ 1"
+    images_per_set = max(1, int(images_per_set))
+    ai_base_url = (await monitor_db.get_setting("ai_base_url", "")).strip()
+    ai_api_key = (await monitor_db.get_setting("ai_api_key", "")).strip()
+    ai_model = (await monitor_db.get_setting("ai_model", "gpt-4o-mini")).strip() or "gpt-4o-mini"
+    if not ai_base_url or not ai_api_key:
+        return [], "AI 服务未配置（ai_base_url / ai_api_key）"
+
+    brief = _CAPTION_PLATFORM_BRIEFS.get(platform, _CAPTION_PLATFORM_BRIEFS["xhs"])
+    system_prompt = (
+        f"你是专业的内容创作者。为同一个产品/选题生成 {n_variants} 套笔记，每套含 "
+        f"{images_per_set} 张差异化的配图描述。\n\n"
+        f"两层差异化要求：\n"
+        f"1. **套与套之间**：title / body 必须**完全不同的角度**（亲身经历、对比测评、"
+        f"干货清单、提问钩子、反差体验等），避免被识别为矩阵号搬运。\n"
+        f"2. **每套内 {images_per_set} 张**：image_prompts 是 {images_per_set} 个 prompt，"
+        f"必须**保持商品主体一致**（同一产品/同一服务），但**镜头、构图、前景物、"
+        f"光线、机位、人物动作要明显不同**（特写 vs 全景；俯拍 vs 平视；"
+        f"主体单独 vs 加配饰；正面 vs 侧面；白天 vs 夜晚；室内 vs 户外 等）。\n\n"
+        + brief
+        + f"\n严格按 JSON 输出（必须有 {n_variants} 个 variant，每个的 image_prompts "
+        + f"长度必须 ≥ {images_per_set}）：\n"
+        + '{"variants": [{"title": "...", "body": "...", "image_prompts": ['
+        + ', '.join(['"prompt_' + str(i+1) + '"' for i in range(min(images_per_set, 3))])
+        + (', ...]' if images_per_set > 3 else ']')
+        + '}, ...]}'
+    )
+    user_msg = (
+        f"原图片 / 商品场景 prompt：\n{base_prompt}\n\n"
+        + (f"参考来源标题：{source_title}\n" if source_title else "")
+        + (f"参考来源正文（前 300 字）：{source_desc[:300]}\n" if source_desc else "")
+        + f"\n请生成 {n_variants} 套 × {images_per_set} 张的方案。"
+        + f"image_prompts 用英文写更稳，每条都要明确视觉差异（不要复制粘贴）。"
+    )
+
+    url = f"{ai_base_url.rstrip('/')}/chat/completions"
+    payload = {
+        "model": ai_model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": 0.95,
+        "max_tokens": min(8000, (400 + 200 * images_per_set) * n_variants),
+        "response_format": {"type": "json_object"},
+    }
+    headers = {"Authorization": f"Bearer {ai_api_key}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code >= 400:
+                return [], f"AI HTTP {resp.status_code}: {resp.text[:200]}"
+            data = resp.json()
+    except httpx.TimeoutException:
+        return [], "AI 响应超时（120s）"
+    except Exception as e:
+        return [], f"AI 调用异常：{e}"
+
+    content = (
+        data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    )
+    if not content:
+        return [], "AI 未返回内容"
+
+    import json as _json
+    try:
+        obj = _json.loads(content)
+        variants = obj.get("variants") or []
+    except Exception as e:
+        return [], f"AI 输出 JSON 解析失败：{e}"
+    if not variants:
+        return [], "AI 未返回 variants"
+
+    cleaned = []
+    for v in variants:
+        if not isinstance(v, dict):
+            continue
+        prompts = v.get("image_prompts") or []
+        if isinstance(prompts, str):  # 容错：AI 偶尔返回字符串
+            prompts = [prompts]
+        prompts = [str(p).strip() for p in prompts if p]
+        # 套内不足 M 张：用 base_prompt 加视角后缀补齐
+        while len(prompts) < images_per_set:
+            i = len(prompts)
+            angles = [
+                "wide angle shot, full scene", "close-up detail shot",
+                "from above, top-down view", "side angle, 45 degree",
+                "with hand interaction in frame", "lifestyle scene with subtle props",
+                "evening warm light", "morning soft light",
+                "minimal background, isolated subject",
+            ]
+            angle = angles[i % len(angles)]
+            prompts.append(f"{base_prompt}, {angle}")
+        cleaned.append({
+            "title": (v.get("title") or "").strip(),
+            "body": (v.get("body") or "").strip(),
+            "image_prompts": prompts[:images_per_set],
+        })
+    if not cleaned:
+        return [], "AI 输出格式异常，无可用 variant"
+    while len(cleaned) < n_variants:
+        cleaned.append(dict(cleaned[-1]))
+    return cleaned[:n_variants], ""
+
+
+@router.post("/generate-set-plan", summary="为 N 套 × M 张图生成差异化方案（每套独立文案 + image prompt）")
+async def generate_set_plan(
+    req: GenerateSetPlanRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """前端在生成 N 套图前先调这个，拿到 N 份独立的 {title, body, image_prompt}，
+    然后循环按每套的 image_prompt 生成对应图片，写历史时带各套自己的 title/body。
+    """
+    if req.sets < 1:
+        return {"error": "sets 必须 ≥ 1"}
+    if req.sets > 30:
+        return {"error": "sets 上限 30（避免 AI 一次输出过长）"}
+    variants, err = await _generate_caption_variants(
+        base_prompt=(req.base_prompt or "").strip(),
+        n_variants=req.sets,
+        images_per_set=max(1, int(req.images_per_set or 1)),
+        platform=req.target_platform or "xhs",
+        source_title=(req.source_post_title or "").strip(),
+        source_desc=(req.source_post_desc or "").strip(),
+    )
+    if err:
+        return {"error": err}
+    return {"plan": variants}
+
+
 @router.post("/generate", summary="调用第三方图像 API 生成图片（支持参考图）")
 async def generate_image(
     req: GenerateRequest,
@@ -653,6 +818,7 @@ async def generate_image(
                         upload_status=upload_status,
                         generated_title=gen_title,
                         generated_body=gen_body,
+                        batch_id=(req.batch_id or "").strip(),
                         source_post_url=src_url, source_post_title=src_title,
                         used_reference=used_reference,
                     )
@@ -822,14 +988,17 @@ async def sync_history_to_bitable(
     if (req.target_table_id or "").strip():
         table_id = req.target_table_id.strip()
 
-    # 字段校验：用户可能选了一个新建的 table（或全局兜底表第一次同步），
-    # 把图像同步需要的字段补齐。已存在则跳过，幂等。
-    # 字段类型常量（飞书 Bitable）：1=多行文本 2=数字 15=超链接
+    # 字段校验：一行 = 一套（同 batch_id + 同 set_idx 的多张图合并为一行）
+    # 字段类型：1=多行文本 2=数字 15=超链接
     expected_fields = [
-        ("Prompt", 1), ("图片", 15),
-        ("尺寸", 1), ("模型", 1),
-        ("套号", 2), ("套内序号", 2),
+        ("套号", 2),
+        ("张数", 2),
         ("标题", 1), ("正文", 1),
+        # 9 列图片 URL（小红书轮播图最多 9 张）。不够 9 张时多余字段留空。
+        ("图片1", 15), ("图片2", 15), ("图片3", 15),
+        ("图片4", 15), ("图片5", 15), ("图片6", 15),
+        ("图片7", 15), ("图片8", 15), ("图片9", 15),
+        ("Prompt", 1), ("尺寸", 1), ("模型", 1),
         ("来源链接", 15), ("来源标题", 1),
         ("生成时间", 1),
     ]
@@ -843,40 +1012,100 @@ async def sync_history_to_bitable(
     role = (current_user or {}).get("role") or "user"
     scope_uid = None if role == "admin" else user_id
 
-    results = []
+    # 先把 record_ids 全部捞出来，按 (batch_id, set_idx) 分组
+    # 一行 = 一套（同 batch_id + 同 set_idx 的 N 张图合并）。老数据 batch_id="" 时按 record id 单独成组。
+    fetched: List[dict] = []
+    skip_results: List[dict] = []
     for rid in req.record_ids:
         rec = await monitor_db.get_image_history(rid)
         if not rec:
-            results.append({"id": rid, "ok": False, "reason": "记录不存在"})
+            skip_results.append({"id": rid, "ok": False, "reason": "记录不存在"})
             continue
-        # 普通用户不能同步别人的
         if scope_uid is not None and rec.get("user_id") != scope_uid:
-            results.append({"id": rid, "ok": False, "reason": "无权同步该记录"})
+            skip_results.append({"id": rid, "ok": False, "reason": "无权同步该记录"})
             continue
         url = (rec.get("qiniu_url") or "").strip()
         if not url:
-            results.append({"id": rid, "ok": False, "reason": "图片未上传到七牛（先配七牛再生成）"})
+            skip_results.append({"id": rid, "ok": False, "reason": "图片未上传到七牛（先配七牛再生成）"})
             continue
+        fetched.append(rec)
+
+    # 按 (batch_id || "single:{id}", set_idx) 分组
+    groups: dict = {}
+    for rec in fetched:
+        bid = (rec.get("batch_id") or "").strip()
+        gkey = f"{bid}:{rec.get('set_idx', 1)}" if bid else f"single:{rec['id']}"
+        groups.setdefault(gkey, []).append(rec)
+    # 组内按套内序号排序，让"图片1"对应套内第 1 张
+    for gkey, items in groups.items():
+        items.sort(key=lambda x: (x.get("in_set_idx") or 0))
+
+    results: List[dict] = list(skip_results)
+    for gkey, items in groups.items():
+        first = items[0]
+        src_url = (first.get("source_post_url") or "").strip()
+        # 构造 9 列图片（不够 9 张时多余字段空字符串）
+        image_cols = {}
+        for i in range(9):
+            field = f"图片{i+1}"
+            if i < len(items):
+                u = (items[i].get("qiniu_url") or "").strip()
+                image_cols[field] = {"link": u, "text": u} if u else ""
+            else:
+                image_cols[field] = ""
+        fields_payload = {
+            "套号": first.get("set_idx", 1),
+            "张数": len(items),
+            "标题": first.get("generated_title", ""),
+            "正文": first.get("generated_body", ""),
+            **image_cols,
+            "Prompt": first.get("prompt", ""),
+            "尺寸": first.get("size", ""),
+            "模型": first.get("model", ""),
+            "来源链接": ({"link": src_url, "text": src_url} if src_url else ""),
+            "来源标题": first.get("source_post_title", ""),
+            "生成时间": first.get("created_at", ""),
+        }
+        ids = [it["id"] for it in items]
         try:
-            src_url = (rec.get("source_post_url") or "").strip()
-            await feishu_bitable_v2.add_record(
-                app_token, table_id,
-                fields={
-                    "Prompt": rec.get("prompt", ""),
-                    "图片": {"link": url, "text": url},
-                    "尺寸": rec.get("size", ""),
-                    "模型": rec.get("model", ""),
-                    "套号": rec.get("set_idx", 1),
-                    "套内序号": rec.get("in_set_idx", 1),
-                    "标题": rec.get("generated_title", ""),
-                    "正文": rec.get("generated_body", ""),
-                    "来源链接": ({"link": src_url, "text": src_url} if src_url else ""),
-                    "来源标题": rec.get("source_post_title", ""),
-                    "生成时间": rec.get("created_at", ""),
-                },
-            )
-            await monitor_db.mark_image_history_synced(rid)
-            results.append({"id": rid, "ok": True})
+            await feishu_bitable_v2.add_record(app_token, table_id, fields=fields_payload)
+            for rid in ids:
+                await monitor_db.mark_image_history_synced(rid)
+            # 每组算 N 条成功（让前端 toast 数量直观）
+            for rid in ids:
+                results.append({"id": rid, "ok": True, "set_key": gkey})
         except Exception as e:
-            results.append({"id": rid, "ok": False, "reason": str(e)})
+            for rid in ids:
+                results.append({"id": rid, "ok": False, "reason": str(e), "set_key": gkey})
+
+    ok_count = sum(1 for r in results if r.get("ok"))
+    fail_count = len(results) - ok_count
+    # 实际写入飞书的"行数" = 成功的组数（一组一行）
+    synced_rows = len({r.get("set_key") for r in results if r.get("ok") and r.get("set_key")})
+
+    # 同步成功 → 给用户的飞书专属群发一条卡片通知（含 bitable 链接 + 数量 + 表名）
+    chat_id = (current_user.get("feishu_chat_id") or "").strip() if current_user else ""
+    if ok_count > 0 and chat_id:
+        try:
+            from ..services.feishu import bitable as feishu_bitable_v2_2
+            tables = await feishu_bitable_v2_2.list_tables(app_token)
+            table_name = next((t["name"] for t in tables if t["table_id"] == table_id), "默认表")
+        except Exception:
+            table_name = "默认表"
+        try:
+            from ..services.feishu import chat as chat_api
+            bitable_url = f"https://feishu.cn/base/{app_token}?table={table_id}"
+            content = (
+                f"已同步 **{synced_rows}** 套（共 {ok_count} 张图）到表「**{table_name}**」"
+                + (f"，{fail_count} 张失败" if fail_count else "")
+                + f"\n\n[👉 打开飞书表格]({bitable_url})"
+            )
+            card = chat_api.build_alert_card(
+                "📋 商品图同步完成", content,
+                template="green" if fail_count == 0 else "orange",
+            )
+            await chat_api.send_card(chat_id, card)
+        except Exception as e:
+            logger.warning(f"[image_gen] post-sync chat notify failed: {e}")
+
     return {"results": results, "target": target["source"]}

@@ -244,6 +244,9 @@ export default function ProductImagePage() {
   const [dragOver, setDragOver] = useState(false);
   const [postUrlInput, setPostUrlInput] = useState("");
   const [fetchingCover, setFetchingCover] = useState(false);
+  // 拉到的原作品文案（标题 + 正文），传给 /generate-set-plan 用于差异化仿写
+  const [sourcePostTitle, setSourcePostTitle] = useState("");
+  const [sourcePostDesc, setSourcePostDesc] = useState("");
 
   const handleImageFile = (file: File) => {
     if (!file.type.startsWith("image/")) {
@@ -296,6 +299,9 @@ export default function ProductImagePage() {
         toastErr("作品文案为空（可能被风控或无正文），请换一篇");
         return;
       }
+      // 存原文案，生成 N 套差异化方案时作为 AI 仿写输入
+      setSourcePostTitle(title);
+      setSourcePostDesc(desc);
 
       // 把文案拼成给图像模型用的中文 brief：标题作为主旨，正文截一段做场景描述
       const brief = [
@@ -347,6 +353,7 @@ export default function ProductImagePage() {
     upload_last_error?: string;
     generated_title?: string;
     generated_body?: string;
+    batch_id?: string;
     source_post_url?: string;
     source_post_title?: string;
     used_reference?: number;
@@ -355,6 +362,54 @@ export default function ProductImagePage() {
   };
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+
+  // 按 (batch_id, set_idx) 把历史聚合成组：一组 = 一套 = 一篇笔记（共享文案 + N 张图）
+  type HistoryGroup = {
+    key: string;
+    batch_id: string;
+    set_idx: number;
+    title: string;
+    body: string;
+    items: HistoryItem[];        // 该组的所有图，按 in_set_idx 排序
+    created_at: string;            // 组内最早的 created_at（用于排序）
+    source_post_title: string;
+    used_reference: boolean;
+    all_synced: boolean;            // 组内所有图都同步过
+  };
+  const historyGroups = useMemo<HistoryGroup[]>(() => {
+    const map = new Map<string, HistoryGroup>();
+    for (const h of history) {
+      // 没 batch_id 的老记录用 record id 当 key（每条独立成组）
+      const groupKey = h.batch_id ? `${h.batch_id}:${h.set_idx}` : `single:${h.id}`;
+      let g = map.get(groupKey);
+      if (!g) {
+        g = {
+          key: groupKey,
+          batch_id: h.batch_id || "",
+          set_idx: h.set_idx,
+          title: h.generated_title || "",
+          body: h.generated_body || "",
+          items: [],
+          created_at: h.created_at,
+          source_post_title: h.source_post_title || "",
+          used_reference: !!h.used_reference,
+          all_synced: true,
+        };
+        map.set(groupKey, g);
+      }
+      g.items.push(h);
+      // 文案/标题取组内第一个非空（同组应该都一样，但容错）
+      if (!g.title && h.generated_title) g.title = h.generated_title;
+      if (!g.body && h.generated_body) g.body = h.generated_body;
+      if (h.created_at < g.created_at) g.created_at = h.created_at;
+      if (!h.synced_to_bitable) g.all_synced = false;
+    }
+    // 组内按 in_set_idx 升序；组之间按 created_at 倒序（最新在上）
+    const groups = Array.from(map.values());
+    groups.forEach((g) => g.items.sort((a, b) => a.in_set_idx - b.in_set_idx));
+    groups.sort((a, b) => b.created_at.localeCompare(a.created_at));
+    return groups;
+  }, [history]);
   const [qiniuConfigured, setQiniuConfigured] = useState(false);
   const [historySelected, setHistorySelected] = useState<Set<number>>(new Set());
   const [historySyncing, setHistorySyncing] = useState(false);
@@ -542,79 +597,128 @@ export default function ProductImagePage() {
 
     const platMap: Record<string, string> = { 小红书: "xhs", 抖音: "douyin", 公众号: "mp" };
     const targetPlatform = platMap[selectedPlatform] || "xhs";
+    // 同一次生成操作 uuid，所有图共享，用于历史按 (batch_id, set_idx) 聚合分组
+    const batchId = (typeof crypto !== "undefined" && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `b-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    // ── Step 1：先拉 N 套 × M 张差异化方案
+    // 每套有自己的 title/body；套内 M 张图各自有不同的 image_prompt（镜头/构图差异）
+    type SetPlan = { title: string; body: string; image_prompts: string[] };
+    const plan: SetPlan[] = [];
+    if (captionEnabled) {
+      try {
+        toastOk(`AI 仿写 ${sets} 套 × ${imagesPerSet} 张差异化方案...`);
+        const r = await fetch(API("/generate-set-plan"), {
+          method: "POST", headers,
+          body: JSON.stringify({
+            base_prompt: prompt.trim(),
+            sets,
+            images_per_set: imagesPerSet,
+            target_platform: targetPlatform,
+            source_post_url: postUrlInput.trim() || undefined,
+            source_post_title: sourcePostTitle || undefined,
+            source_post_desc: sourcePostDesc || undefined,
+          }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || data?.error || !Array.isArray(data?.plan)) {
+          toastErr(`仿写方案失败：${data?.error || `HTTP ${r.status}`}（将用同一 prompt 生成图）`);
+        } else {
+          plan.push(...data.plan);
+        }
+      } catch (e: any) {
+        toastErr(`仿写异常：${e?.message || e}`);
+      }
+    }
+    // 不够 / 失败时兜底：每套 M 张都用 base prompt（用户自己的，会得到相似图）
+    while (plan.length < sets) {
+      plan.push({
+        title: "",
+        body: "",
+        image_prompts: Array(imagesPerSet).fill(prompt.trim()),
+      });
+    }
+    // 容错：每套 image_prompts 不足 M 张则补
+    plan.forEach((p) => {
+      while (p.image_prompts.length < imagesPerSet) {
+        p.image_prompts.push(p.image_prompts[p.image_prompts.length - 1] || prompt.trim());
+      }
+    });
+
+    // ── Step 2：每套用自己的 image_prompt + title/body 生成
+    // 仍然按"全局 idx"分批（BATCH_SIZE=1），但每个 batch 知道自己属于哪一套
     const baseBody = {
-      prompt: prompt.trim(),
       negative_prompt: negativePrompt.trim(),
       size: genSize || undefined,
       images_per_set: imagesPerSet,
       source_post_url: postUrlInput.trim() || undefined,
       target_platform: targetPlatform,
+      batch_id: batchId,
       ...(refImageB64 ? { reference_image_b64: refImageB64 } : {}),
     };
 
-    // 切批：[4, 4, 4, ..., 余数]，每批一个 startIndex
-    const batches: { startIndex: number; n: number }[] = [];
+    // 全局 idx → (setIdx 0-based, inSetIdx 0-based)
+    const setOfIdx = (idx: number) => Math.floor(idx / imagesPerSet);
+    const inSetOfIdx = (idx: number) => idx % imagesPerSet;
+
+    // BATCH_SIZE=1 所以每批就 1 张图，对应明确的 (setIdx, inSetIdx)
+    const batches: { startIndex: number; n: number; setIdx: number; inSetIdx: number }[] = [];
     for (let i = 0; i < count; i += BATCH_SIZE) {
-      batches.push({ startIndex: i, n: Math.min(BATCH_SIZE, count - i) });
+      batches.push({
+        startIndex: i,
+        n: Math.min(BATCH_SIZE, count - i),
+        setIdx: setOfIdx(i),
+        inSetIdx: inSetOfIdx(i),
+      });
     }
 
-    // sparse 数组按全局 index 存放结果，刷新 UI 时过滤 null 保序
     const results: (GenItem | null)[] = new Array(count).fill(null);
     const errors: string[] = [];
-    let captionTitle = "";
-    let captionBody = "";
 
-    // 单次请求；失败时延迟 2 秒重试最多 MAX_RETRY 次。返回是否最终成功。
-    const requestOnce = async (b: { startIndex: number; n: number }, isFirst: boolean): Promise<boolean> => {
+    const requestOnce = async (b: typeof batches[0]): Promise<boolean> => {
+      const setData = plan[b.setIdx] || plan[0];
+      // 该套的第 inSetIdx 张图：用对应索引的 image_prompt（套内每张视角不同）
+      const imgPrompt = setData.image_prompts[b.inSetIdx]
+        || setData.image_prompts[0]
+        || prompt.trim();
       const body = {
         ...baseBody,
+        prompt: imgPrompt,
         n: b.n,
         start_index: b.startIndex,
-        auto_rewrite: captionEnabled && isFirst,
-        forced_title: isFirst ? "" : captionTitle,
-        forced_body: isFirst ? "" : captionBody,
+        auto_rewrite: false,
+        forced_title: setData.title,
+        forced_body: setData.body,
       };
-      try {
-        const r = await fetch(API("/generate"), {
-          method: "POST", headers, body: JSON.stringify(body),
-        });
-        const data = await r.json().catch(() => ({}));
-        const imgs: GenItem[] = Array.isArray(data?.images) ? data.images : [];
-        if (!r.ok || data?.error) {
-          throw new Error(data?.error || data?.detail || `HTTP ${r.status}`);
-        }
-        if (imgs.length === 0) {
-          throw new Error("上游未返回图片");
-        }
-        // 首批拿 caption
-        if (isFirst && captionEnabled) {
-          if (data?.generated_title || data?.generated_body) {
-            captionTitle = data.generated_title || "";
-            captionBody = data.generated_body || "";
-          } else if (data?.caption_error) {
-            toastErr(`配套文案生成失败：${data.caption_error}（图正常生成）`);
-          }
-        }
-        for (let i = 0; i < imgs.length && b.startIndex + i < count; i++) {
-          results[b.startIndex + i] = imgs[i];
-        }
-        setItemsAndCache(results.filter((x): x is GenItem => x !== null));
-        return true;
-      } catch (e: any) {
-        throw e;
+      const r = await fetch(API("/generate"), {
+        method: "POST", headers, body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      const imgs: GenItem[] = Array.isArray(data?.images) ? data.images : [];
+      if (!r.ok || data?.error) {
+        throw new Error(data?.error || data?.detail || `HTTP ${r.status}`);
       }
+      if (imgs.length === 0) {
+        throw new Error("上游未返回图片");
+      }
+      for (let i = 0; i < imgs.length && b.startIndex + i < count; i++) {
+        results[b.startIndex + i] = imgs[i];
+      }
+      setItemsAndCache(results.filter((x): x is GenItem => x !== null));
+      return true;
     };
 
-    const runBatch = async (b: { startIndex: number; n: number }, isFirst: boolean) => {
+    const runBatch = async (b: typeof batches[0]) => {
       let lastErr: any = null;
       for (let attempt = 0; attempt <= MAX_RETRY; attempt++) {
         try {
-          const ok = await requestOnce(b, isFirst && attempt === 0);
+          const ok = await requestOnce(b);
           if (ok) return;
         } catch (e) {
           lastErr = e;
           if (attempt < MAX_RETRY) {
-            await new Promise((r) => setTimeout(r, 2000));  // 2 秒后重试
+            await new Promise((r) => setTimeout(r, 2000));
           }
         }
       }
@@ -623,24 +727,18 @@ export default function ProductImagePage() {
     };
 
     try {
-      // 1) 首批同步（拿 caption）
-      if (batches.length > 0) {
-        await runBatch(batches[0], true);
-      }
-      // 2) 剩余批次 3 路并发
-      if (batches.length > 1) {
-        let next = 1;
-        const workers = Array.from({ length: Math.min(CONCURRENCY, batches.length - 1) }, async () => {
-          while (next < batches.length) {
-            const i = next++;
-            await runBatch(batches[i], false);
-          }
-        });
-        await Promise.all(workers);
-      }
+      // CONCURRENCY 路并发跑所有批次（不再首批同步，因为 caption 已经在 plan 里了）
+      let next = 0;
+      const workers = Array.from({ length: Math.min(CONCURRENCY, batches.length) }, async () => {
+        while (next < batches.length) {
+          const i = next++;
+          await runBatch(batches[i]);
+        }
+      });
+      await Promise.all(workers);
 
       const okCount = results.filter((x) => x !== null).length;
-      const captionMsg = captionEnabled && captionTitle ? "（含配套文案）" : "";
+      const captionMsg = captionEnabled && plan.some((p) => p.title) ? `（${sets} 套差异化文案）` : "";
       if (okCount === count) {
         toastOk(`生成成功（${okCount} 张）${captionMsg}`);
       } else if (okCount > 0) {
@@ -1403,153 +1501,158 @@ export default function ProductImagePage() {
             <div className="flex items-center justify-center py-10">
               <Spinner size="sm" />
             </div>
-          ) : history.length === 0 ? (
+          ) : historyGroups.length === 0 ? (
             <EmptyState
               icon={HistoryIcon}
               title="还没有生成记录"
               hint="生成的图片会自动写入历史，配置七牛云后图片会上传并可同步到飞书表格。"
             />
           ) : (
-            <div className="space-y-2">
-              {history.map((h) => {
-                const checked = historySelected.has(h.id);
+            <div className="space-y-3">
+              {historyGroups.map((g) => {
+                // 整组的勾选状态：组内所有 id 都在 selected 中 = 选中
+                const allSelected = g.items.every((it) => historySelected.has(it.id));
+                const partialSelected = !allSelected && g.items.some((it) => historySelected.has(it.id));
+                const toggleGroup = () => {
+                  setHistorySelected((prev) => {
+                    const next = new Set(prev);
+                    if (allSelected) {
+                      g.items.forEach((it) => next.delete(it.id));
+                    } else {
+                      g.items.forEach((it) => next.add(it.id));
+                    }
+                    return next;
+                  });
+                };
+                const captionTxt = [g.title, g.body].filter(Boolean).join("\n\n");
+                const groupHasFailed = g.items.some((it) => it.upload_status === "failed");
                 return (
                   <div
-                    key={h.id}
-                    className={`flex items-start gap-3 rounded-lg border p-2.5 transition-colors ${
-                      checked ? "border-primary bg-primary/5" : "border-divider"
+                    key={g.key}
+                    className={`rounded-lg border p-3 transition-colors ${
+                      allSelected ? "border-primary bg-primary/5" : "border-divider"
                     }`}
                   >
-                    {/* 多选 */}
-                    <input
-                      type="checkbox"
-                      className="mt-2 cursor-pointer"
-                      checked={checked}
-                      onChange={() => toggleHistorySelected(h.id)}
-                      aria-label={`选择 #${h.id}`}
-                    />
-                    {/* 缩略图 - 点击弹大图预览 */}
-                    <button
-                      type="button"
-                      onClick={() => h.qiniu_url && setPreviewImage({ url: h.qiniu_url, title: `#${h.id}` })}
-                      className="shrink-0 w-16 h-16 rounded overflow-hidden bg-default-100 flex items-center justify-center cursor-zoom-in hover:ring-2 hover:ring-primary transition-all"
-                      title="点击查看大图"
-                    >
-                      {h.qiniu_url ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={proxyUrl(h.qiniu_url)} alt={`#${h.id}`} className="w-full h-full object-cover" />
-                      ) : (
-                        <ImageIcon size={20} className="text-default-300" />
-                      )}
-                    </button>
-                    {/* prompt + meta */}
-                    <div className="flex-1 min-w-0 space-y-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-xs text-default-500">
-                          套 {h.set_idx}-{h.in_set_idx}
-                        </span>
-                        {h.size && <span className="text-xs text-default-400">· {h.size}</span>}
-                        {h.used_reference ? (
-                          <Chip size="sm" variant="flat" color="default">参考图</Chip>
-                        ) : null}
-                        {/* 上传状态徽章：pending → 等待七牛 / uploaded → 已上传 / failed → 重试用尽 / skipped → 仅本地 */}
-                        {h.upload_status === "pending" ? (
-                          <Chip size="sm" variant="flat" color="warning">
-                            ⏳ 待上传七牛
-                            {(h.upload_retries ?? 0) > 0 ? `（已重试 ${h.upload_retries}）` : ""}
+                    {/* 卡片头：勾选 + 套号 + 文案标题 + 时间 + 操作 */}
+                    <div className="flex items-start gap-3 mb-3">
+                      <input
+                        type="checkbox"
+                        className="mt-1 cursor-pointer"
+                        checked={allSelected}
+                        ref={(el) => { if (el) el.indeterminate = partialSelected; }}
+                        onChange={toggleGroup}
+                        aria-label={`选择套 ${g.set_idx}`}
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap mb-1">
+                          <Chip size="sm" color="primary" variant="flat">
+                            套 {g.set_idx}
                           </Chip>
-                        ) : h.upload_status === "uploaded" ? (
-                          <Chip size="sm" variant="flat" color="success">已上传七牛</Chip>
-                        ) : h.upload_status === "failed" ? (
-                          <Chip size="sm" variant="flat" color="danger">上传失败</Chip>
-                        ) : null}
-                        {h.synced_to_bitable ? (
-                          <Chip size="sm" variant="flat" color="success" startContent={<Check size={11} />}>
-                            已同步飞书
-                          </Chip>
-                        ) : null}
-                        <span className="text-xs text-default-400 ml-auto">{h.created_at}</span>
-                      </div>
-                      <p className="text-xs text-default-600 line-clamp-2 leading-relaxed">
-                        {h.prompt}
-                      </p>
-                      {/* AI 生成的配套文案：标题置顶，正文 hover 看全部，按钮一键复制 */}
-                      {(h.generated_title || h.generated_body) && (
-                        <div className="flex items-start gap-1.5 rounded bg-secondary/5 border border-secondary/20 px-2 py-1.5">
-                          <span className="text-xs shrink-0 text-secondary-600">📝</span>
-                          <div
-                            className="flex-1 min-w-0 cursor-help"
-                            title={[h.generated_title, h.generated_body].filter(Boolean).join("\n\n")}
-                          >
-                            {h.generated_title && (
-                              <div className="text-xs font-medium text-default-700 truncate">
-                                {h.generated_title}
-                              </div>
-                            )}
-                            {h.generated_body && (
-                              <div className="text-[11px] text-default-500 line-clamp-2 leading-snug mt-0.5">
-                                {h.generated_body}
-                              </div>
-                            )}
+                          <Chip size="sm" variant="flat">{g.items.length} 张</Chip>
+                          {g.used_reference && <Chip size="sm" variant="flat" color="default">参考图</Chip>}
+                          {g.all_synced && (
+                            <Chip size="sm" variant="flat" color="success" startContent={<Check size={11} />}>
+                              已同步飞书
+                            </Chip>
+                          )}
+                          <span className="text-xs text-default-400 ml-auto">{g.created_at}</span>
+                        </div>
+                        {/* 文案标题（醒目） */}
+                        {g.title ? (
+                          <div className="text-sm font-semibold text-default-800 truncate">
+                            📝 {g.title}
                           </div>
+                        ) : (
+                          <div className="text-xs text-default-400">（无配套文案）</div>
+                        )}
+                        {/* 文案正文：折叠 2 行，hover 看全部 */}
+                        {g.body && (
+                          <div
+                            className="text-xs text-default-500 line-clamp-2 leading-relaxed mt-1 cursor-help"
+                            title={g.body}
+                          >
+                            {g.body}
+                          </div>
+                        )}
+                        {g.source_post_title && (
+                          <div className="text-xs text-default-400 mt-1 truncate">
+                            来源：{g.source_post_title}
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {captionTxt && (
                           <Button
                             size="sm"
-                            variant="light"
-                            isIconOnly
-                            aria-label="复制文案"
-                            className="shrink-0 h-6 w-6 min-w-6"
+                            variant="flat"
+                            startContent={<Copy size={12} />}
                             onPress={async () => {
-                              const txt = [h.generated_title, h.generated_body].filter(Boolean).join("\n\n");
                               try {
-                                await navigator.clipboard.writeText(txt);
+                                await navigator.clipboard.writeText(captionTxt);
                                 toastOk("文案已复制");
                               } catch { toastErr("复制失败"); }
                             }}
                           >
-                            <Copy size={11} />
+                            复制文案
                           </Button>
-                        </div>
-                      )}
-                      {h.source_post_title && (
-                        <p className="text-xs text-default-400 truncate">
-                          来源：{h.source_post_title}
-                        </p>
-                      )}
-                    </div>
-                    {/* 操作 */}
-                    <div className="flex items-center gap-1 shrink-0">
-                      {h.upload_status === "failed" && (
-                        <Button
-                          size="sm"
-                          variant="flat"
-                          color="warning"
-                          onPress={() => retryUpload(h.id)}
-                          title={h.upload_last_error || ""}
-                        >
-                          重试上传
-                        </Button>
-                      )}
-                      {h.qiniu_url && (
+                        )}
+                        {groupHasFailed && (
+                          <Button
+                            size="sm"
+                            variant="flat"
+                            color="warning"
+                            onPress={() => {
+                              g.items.forEach((it) => {
+                                if (it.upload_status === "failed") retryUpload(it.id);
+                              });
+                            }}
+                          >
+                            重试上传
+                          </Button>
+                        )}
                         <Button
                           size="sm"
                           variant="light"
+                          color="danger"
                           isIconOnly
-                          aria-label="预览大图"
-                          onPress={() => setPreviewImage({ url: h.qiniu_url, title: `#${h.id}` })}
+                          aria-label="删除整套"
+                          onPress={async () => {
+                            if (!confirm(`删除套 ${g.set_idx} 的全部 ${g.items.length} 张图？`)) return;
+                            for (const it of g.items) await deleteHistory(it.id);
+                          }}
                         >
-                          <ImageIcon size={14} />
+                          <Trash2 size={14} />
                         </Button>
-                      )}
-                      <Button
-                        size="sm"
-                        variant="light"
-                        color="danger"
-                        isIconOnly
-                        aria-label="删除"
-                        onPress={() => deleteHistory(h.id)}
-                      >
-                        <Trash2 size={14} />
-                      </Button>
+                      </div>
+                    </div>
+
+                    {/* 卡片身：N 张缩略图横向滚动 */}
+                    <div className="flex gap-2 overflow-x-auto pb-1">
+                      {g.items.map((h) => (
+                        <button
+                          key={h.id}
+                          type="button"
+                          onClick={() => h.qiniu_url && setPreviewImage({ url: h.qiniu_url, title: `套 ${g.set_idx}-${h.in_set_idx}` })}
+                          className="relative shrink-0 w-20 h-20 rounded overflow-hidden bg-default-100 flex items-center justify-center cursor-zoom-in hover:ring-2 hover:ring-primary transition-all"
+                          title={`点击查看大图（${g.set_idx}-${h.in_set_idx}）`}
+                        >
+                          {h.qiniu_url ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={proxyUrl(h.qiniu_url)} alt={`${g.set_idx}-${h.in_set_idx}`} className="w-full h-full object-cover" />
+                          ) : (
+                            <ImageIcon size={18} className="text-default-300" />
+                          )}
+                          <span className="absolute top-0.5 left-0.5 rounded-full bg-black/60 text-white text-[10px] px-1.5 py-0.5">
+                            {h.in_set_idx}
+                          </span>
+                          {h.upload_status === "pending" && (
+                            <span className="absolute bottom-0.5 right-0.5 rounded bg-warning/90 text-white text-[9px] px-1">⏳</span>
+                          )}
+                          {h.upload_status === "failed" && (
+                            <span className="absolute bottom-0.5 right-0.5 rounded bg-danger/90 text-white text-[9px] px-1">!</span>
+                          )}
+                        </button>
+                      ))}
                     </div>
                   </div>
                 );
