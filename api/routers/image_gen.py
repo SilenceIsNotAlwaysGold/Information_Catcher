@@ -291,8 +291,19 @@ def _normalize_image_items(data: dict) -> List[dict]:
 
 
 # 单次上游请求最多生成几张：超过此值后端会拆成多次循环调用。
-# 多数 OpenAI 兼容图像 API 单次最多 4 张，gpt-image-1 仅支持 1 张。
-_MAX_PER_BATCH = 4
+# 多数 OpenAI 兼容图像 API 单次最多 4 张，gpt-image / dall-e-3 单次只支持 1 张
+# （即使传 n=4 也只返 1 张，导致总数只剩 1/4）。
+_MAX_PER_BATCH_DEFAULT = 4
+_SINGLE_IMAGE_MODELS = ("gpt-image", "dall-e-3", "dall-e-2", "wanx2", "cogview")
+
+
+def _max_per_batch_for(model: str) -> int:
+    """根据模型名判定单次最多生成张数。"""
+    m = (model or "").lower()
+    for keyword in _SINGLE_IMAGE_MODELS:
+        if keyword in m:
+            return 1
+    return _MAX_PER_BATCH_DEFAULT
 # /generate 单次请求最多生成的总张数。
 # 套图场景上限 = 10 套账号 × 9 张轮播 = 90，但实际是前端按 4 张/批多次调用，
 # 所以这里只是"单次最大"。设 60 已经足够（覆盖绝大多数自定义组合），
@@ -393,21 +404,27 @@ async def _call_edits(
 
 _CAPTION_PLATFORM_BRIEFS = {
     "xhs": (
-        "你为小红书写笔记。要求：\n"
+        "你为小红书写笔记。**核心原则：写真实使用感受 / 心情 / 故事，不要重复或描述图片本身。**\n"
         "- 标题 18 字内，带数字 / 钩子句 / 反问，吸引点击\n"
         "- 正文 200-300 字，3-5 段，每段开头 emoji，关键词加粗（用 **）\n"
-        "- 结尾给 3-5 个话题标签 #xxx#，与图片调性相关\n"
+        "- 写第一人称视角，给生活场景细节（地点 / 时间 / 心情 / 用过/没用过的对比）\n"
+        "- 不要照搬图片场景词，把它当作配图灵感即可\n"
+        "- 结尾给 3-5 个话题标签 #xxx#，与生活场景相关\n"
     ),
     "douyin": (
-        "你为抖音视频写口播脚本（图文版也按这个调性）。要求：\n"
+        "你为抖音视频写口播脚本（图文版也按这个调性）。**核心原则：写抓眼球的口播，不是描述画面。**\n"
         "- 标题 12 字内，开头 3 秒抓眼球（数字 / 反差 / 提问）\n"
         "- 正文 100-200 字，按口播节奏分行，每行 15-25 字\n"
+        "- 用强烈情绪词、反差词、口语化表达\n"
+        "- 不要复述图片场景词，从「为什么观众应该看」切入\n"
         "- 结尾留钩子（点关注 / 问问题）\n"
     ),
     "mp": (
-        "你为微信公众号写文章导言（图文版）。要求：\n"
+        "你为微信公众号写文章导言（图文版）。**核心原则：观点先行，图片只是论据。**\n"
         "- 标题 25 字内，正式、信息量足\n"
         "- 正文 300-500 字，分段叙述，论据/观点为主，少用 emoji\n"
+        "- 给读者一个明确的「为什么读这篇」\n"
+        "- 不要把图片场景描述当成正文素材\n"
         "- 结尾给 1-2 句行动呼吁\n"
     ),
 }
@@ -430,14 +447,19 @@ async def _generate_caption(
 
     brief = _CAPTION_PLATFORM_BRIEFS.get(platform, _CAPTION_PLATFORM_BRIEFS["xhs"])
     system_prompt = (
-        "你是专业的内容创作者，根据用户提供的「图片场景描述」生成与图片调性匹配的笔记。\n"
+        "你是专业的爆款内容创作者。配图已经画好了，"
+        "你要做的是基于配图主题，写一篇**会让人想点赞收藏的真实笔记**——而不是描述图片。\n\n"
         + brief
-        + "严格按 JSON 输出，不要任何解释：{\"title\": \"...\", \"body\": \"...\"}"
+        + "\n严格按 JSON 输出，不要任何解释：{\"title\": \"...\", \"body\": \"...\"}"
     )
+    # 把 image_prompt 弱化为「灵感参考」，并明确 anti-pattern
     user_msg = (
-        f"图片场景描述：\n{image_prompt}\n\n"
-        + (f"参考来源标题：{source_title}\n" if source_title else "")
-        + "请生成与图配套的笔记。"
+        "配图灵感（仅供参考主题，不要复述其中的视觉描写词）：\n"
+        f"{image_prompt}\n\n"
+        + (f"参考标题（参考调性，不要照抄）：{source_title}\n\n" if source_title else "")
+        + "请写一篇这个主题的真实笔记。\n"
+        + "**禁止**：复述图片描述词、提到「图片」「画面」「场景」、把 prompt 当文案。\n"
+        + "**应当**：站在第一人称，写感受、故事、对比、避坑、清单。"
     )
 
     url = f"{ai_base_url.rstrip('/')}/chat/completions"
@@ -447,7 +469,8 @@ async def _generate_caption(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_msg},
         ],
-        "temperature": 0.85,
+        # 温度提高到 1.1，让仿写多样化（避免每套都长得像）
+        "temperature": 1.1,
         "max_tokens": 1000,
         "response_format": {"type": "json_object"},  # 部分兼容模型支持
     }
@@ -514,12 +537,13 @@ async def generate_image(
         except Exception as e:
             return {"error": f"参考图解码失败：{e}", "status": 400}
 
-    # 多张时分批：一次 generate-batch（n>4）会被拆成 ⌈n/4⌉ 次上游请求。
+    # 多张时分批：根据 model 决定单次上游最大张数（gpt-image / dall-e-3 只能 n=1）。
     # 顺序调用而非并发——避免触发上游限流，也方便把第一次失败的错误直接返回。
+    max_per_batch = _max_per_batch_for(model)
     batches: list[int] = []
     remaining = n
     while remaining > 0:
-        take = min(remaining, _MAX_PER_BATCH)
+        take = min(remaining, max_per_batch)
         batches.append(take)
         remaining -= take
 
