@@ -526,14 +526,12 @@ export default function ProductImagePage() {
 
   const canGenerate = !!cfg.has_key && !!cfg.base_url && !!cfg.model && !generating;
 
-  // 每批最多 4 张（单次上游请求 n），3 路并发提交。整体节奏：
-  //   - 首批同步跑（顺便拿 AI 配套文案）
-  //   - 剩余批次 3 个 worker 并发，每个抢下一批
-  //   - 单批响应 ~15-30s（n=4 多图模型）；超 100s 风险由后端拆批兜底
-  // 注意：上游若是单图模型（dall-e-3 / wanx2 等），后端 _max_per_batch_for 会拆成
-  // 多次串行调用，单批耗时拉长可能撞 cloudflare 524 — 那种模型建议换。
-  const BATCH_SIZE = 4;
+  // 单次请求 n=1（单批永不撞 cloudflare 100s 超时），3 路并发提交，单点失败自动重试 1 次。
+  // 之前 BATCH_SIZE=4 时单批失败会丢 4 张（实测 5×3=15 只出 7-8 张）；
+  // 降回 1 张/批后单点失败只丢 1 张，重试基本能补回，整体张数稳定。
+  const BATCH_SIZE = 1;
   const CONCURRENCY = 3;
+  const MAX_RETRY = 1;
 
   const handleGenerate = async () => {
     if (!prompt.trim()) { toastErr("请填写 Prompt 或通过向导生成"); return; }
@@ -566,7 +564,8 @@ export default function ProductImagePage() {
     let captionTitle = "";
     let captionBody = "";
 
-    const runBatch = async (b: { startIndex: number; n: number }, isFirst: boolean) => {
+    // 单次请求；失败时延迟 2 秒重试最多 MAX_RETRY 次。返回是否最终成功。
+    const requestOnce = async (b: { startIndex: number; n: number }, isFirst: boolean): Promise<boolean> => {
       const body = {
         ...baseBody,
         n: b.n,
@@ -582,9 +581,10 @@ export default function ProductImagePage() {
         const data = await r.json().catch(() => ({}));
         const imgs: GenItem[] = Array.isArray(data?.images) ? data.images : [];
         if (!r.ok || data?.error) {
-          const msg = data?.error || data?.detail || `HTTP ${r.status}`;
-          errors.push(`批次 ${b.startIndex + 1}-${b.startIndex + b.n}: ${msg}`);
-          return;
+          throw new Error(data?.error || data?.detail || `HTTP ${r.status}`);
+        }
+        if (imgs.length === 0) {
+          throw new Error("上游未返回图片");
         }
         // 首批拿 caption
         if (isFirst && captionEnabled) {
@@ -595,17 +595,31 @@ export default function ProductImagePage() {
             toastErr(`配套文案生成失败：${data.caption_error}（图正常生成）`);
           }
         }
-        // 上游可能返回 < n 张（部分模型不严格遵守 n）— 写入实际数量，缺位留 null
         for (let i = 0; i < imgs.length && b.startIndex + i < count; i++) {
           results[b.startIndex + i] = imgs[i];
         }
-        if (imgs.length < b.n) {
-          errors.push(`批次 ${b.startIndex + 1}-${b.startIndex + b.n}: 上游返回 ${imgs.length} 张（请求 ${b.n}）`);
-        }
         setItemsAndCache(results.filter((x): x is GenItem => x !== null));
+        return true;
       } catch (e: any) {
-        errors.push(`批次 ${b.startIndex + 1}-${b.startIndex + b.n}: ${e?.message || e}`);
+        throw e;
       }
+    };
+
+    const runBatch = async (b: { startIndex: number; n: number }, isFirst: boolean) => {
+      let lastErr: any = null;
+      for (let attempt = 0; attempt <= MAX_RETRY; attempt++) {
+        try {
+          const ok = await requestOnce(b, isFirst && attempt === 0);
+          if (ok) return;
+        } catch (e) {
+          lastErr = e;
+          if (attempt < MAX_RETRY) {
+            await new Promise((r) => setTimeout(r, 2000));  // 2 秒后重试
+          }
+        }
+      }
+      const msg = (lastErr as any)?.message || String(lastErr);
+      errors.push(`#${b.startIndex + 1}: ${msg}`);
     };
 
     try {
