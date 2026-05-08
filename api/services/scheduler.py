@@ -158,12 +158,22 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
     collects_thr = _int_setting(group and group.get("collects_threshold"), "collects_threshold", "50", platform=platform_key)
     comments_thr = _int_setting(group and group.get("comments_threshold"), "comments_threshold", "1",  platform=platform_key)
 
-    # Group-specific webhooks (fall back to global)
-    g_wecom  = (group.get("wecom_webhook_url")  if group else "") or wecom_url
-    g_feishu = (group.get("feishu_webhook_url") if group else "") or feishu_url
-    # 飞书群 chat_id：仅当 group 没显式配置 webhook 时才走 chat_id（避免 admin 显式
-    # 路由到特定群的意图被忽略）。group 有 webhook = 显式覆盖，跳过 chat_id。
-    g_feishu_chat = "" if (group and group.get("feishu_webhook_url")) else feishu_chat_id
+    # 推送目标解析（2026-05 改为 per-group 飞书绑定优先）：
+    #   group.feishu_chat_id   有 → 内部群应用机器人（最优先）
+    #   group.feishu_webhook_url 有 → 外部群自定义机器人 webhook
+    #   都没 → fallback 用户级 chat_id（个人专属群）
+    group_chat = (group.get("feishu_chat_id") if group else "") or ""
+    group_webhook = (group.get("feishu_webhook_url") if group else "") or ""
+    if group_chat:
+        g_feishu_chat = group_chat
+        g_feishu = ""  # group 已显式绑 chat，不再走 webhook
+    elif group_webhook:
+        g_feishu_chat = ""
+        g_feishu = group_webhook
+    else:
+        g_feishu_chat = feishu_chat_id  # fallback 用户专属群
+        g_feishu = ""  # 用户级 webhook 已废弃
+    g_wecom = (group.get("wecom_webhook_url") if group else "") or wecom_url
 
     if not g_wecom and not g_feishu and not g_feishu_chat:
         return

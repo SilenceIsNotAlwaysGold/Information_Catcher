@@ -572,7 +572,17 @@ async def _migrate(db):
     # type: delta（现有 +N 触发）/ cumulative（首次累计达到 N）/ percent（24h 涨幅 N%）
     # 留 NULL 时仍然兼容旧 likes_alert_enabled / threshold 老字段
     await _ensure_column(db, "monitor_groups", "alert_rules", "TEXT DEFAULT ''")
-    await _seed_default_groups(db)
+    # 2026-05 分组级飞书绑定：每个分组绑一个飞书群（应用机器人 chat 或外部 webhook）
+    await _ensure_column(db, "monitor_groups", "feishu_chat_id", "TEXT DEFAULT ''")
+    # 旧默认组（「我的帖子」「观测帖子」）已废弃，统一让用户自己建分组：
+    # 1) 把仍指向 builtin 组的帖子 group_id 设为 NULL（前端「未分组」tab 兜底显示）
+    # 2) DELETE is_builtin=1 的所有 monitor_groups 记录
+    await db.execute(
+        "UPDATE monitor_posts SET group_id=NULL "
+        "WHERE group_id IN (SELECT id FROM monitor_groups WHERE is_builtin=1)"
+    )
+    await db.execute("DELETE FROM monitor_groups WHERE is_builtin=1")
+    # 不再调 _seed_default_groups —— 用户自己建分组（POST /groups 时按 mode 自动建群）
     await _migrate_post_type_to_group(db)
     # Trending posts: media URLs (cover / images JSON / video URL / type)
     await _ensure_column(db, "trending_posts", "cover_url", "TEXT DEFAULT ''")
@@ -1725,12 +1735,13 @@ async def get_unsynced_trending_posts(user_id: Optional[int] = None) -> List[Dic
 
 _GROUP_COLUMNS = (
     "id, name, feishu_webhook_url, wecom_webhook_url, "
+    "COALESCE(feishu_chat_id,'') AS feishu_chat_id, "
     "likes_alert_enabled, likes_threshold, "
     "collects_alert_enabled, collects_threshold, "
     "comments_alert_enabled, comments_threshold, "
     "message_prefix, template_likes, template_collects, template_comments, "
     "COALESCE(alert_rules,'') AS alert_rules, "
-    "is_builtin, created_at"
+    "is_builtin, user_id, created_at"
 )
 
 
@@ -1766,10 +1777,22 @@ async def get_group(group_id: int, user_id: Optional[int] = None) -> Optional[Di
             return dict(row) if row else None
 
 
-async def create_group(name: str, user_id: Optional[int] = None) -> int:
+async def create_group(
+    name: str,
+    user_id: Optional[int] = None,
+    feishu_chat_id: str = "",
+    feishu_webhook_url: str = "",
+) -> int:
+    """创建分组。新版支持绑定飞书：
+      - feishu_chat_id  非空 → 内部群（应用机器人）
+      - feishu_webhook_url 非空 → 外部群（自定义机器人 webhook）
+      - 都为空 → 仅本地分组（不会触发告警推送）
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO monitor_groups (name, user_id) VALUES (?, ?)", (name, user_id)
+            "INSERT INTO monitor_groups (name, user_id, feishu_chat_id, feishu_webhook_url) "
+            "VALUES (?, ?, ?, ?)",
+            (name, user_id, feishu_chat_id, feishu_webhook_url),
         )
         await db.commit()
         return cur.lastrowid
@@ -1782,7 +1805,7 @@ async def update_group(group_id: int, user_id: Optional[int] = None, **fields) -
     user_id 传值：仅当 group 是内置的或属于该 user 才改；否则返回 False（无权限）。
     """
     allowed = {
-        "name", "feishu_webhook_url", "wecom_webhook_url",
+        "name", "feishu_webhook_url", "feishu_chat_id", "wecom_webhook_url",
         "likes_alert_enabled", "likes_threshold",
         "collects_alert_enabled", "collects_threshold",
         "comments_alert_enabled", "comments_threshold",

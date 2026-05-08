@@ -23,6 +23,7 @@ type Group = {
   id: number;
   name: string;
   feishu_webhook_url: string;
+  feishu_chat_id: string;     // 内部群应用机器人模式
   wecom_webhook_url: string;
   likes_alert_enabled: number | null;
   likes_threshold: number | null;
@@ -37,6 +38,8 @@ type Group = {
   alert_rules: string;  // JSON array
   is_builtin: number;
 };
+
+type GroupMode = "chat" | "webhook" | "none";
 
 type Form = Partial<Group> & { name: string };
 
@@ -65,6 +68,9 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState<Form>(EMPTY);
   const [saving, setSaving] = useState(false);
+  // 新建分组时的推送模式（编辑现有分组时不允许改 mode，只能改其它字段）
+  const [createMode, setCreateMode] = useState<GroupMode>("chat");
+  const [createWebhookUrl, setCreateWebhookUrl] = useState("");
 
   const set = <K extends keyof Form>(k: K, v: Form[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
@@ -78,6 +84,8 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
 
   const openCreate = () => {
     setEditingId(null); setForm({ ...EMPTY });
+    setCreateMode("chat");
+    setCreateWebhookUrl("");
     editor.onOpen();
   };
   const openEdit = (g: Group) => {
@@ -122,15 +130,29 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
       }
 
       if (editingId == null) {
-        // 新建：先 POST 拿 id，再 PATCH 更新所有字段
+        // 新建：根据 mode 走不同分支
+        // - chat: 后端自动建飞书群 + 拉用户 + 拉 admin + 发欢迎消息
+        // - webhook: 直接存 webhook URL
+        // - none: 仅本地分组（不绑飞书）
+        const createBody: Record<string, any> = {
+          name: body.name,
+          mode: createMode,
+        };
+        if (createMode === "webhook") {
+          if (!createWebhookUrl.trim()) {
+            toastErr("外部群模式必须填 Webhook URL"); return;
+          }
+          createBody.feishu_webhook_url = createWebhookUrl.trim();
+        }
         const r = await fetch(API("/groups"), {
           method: "POST", headers,
-          body: JSON.stringify({ name: body.name }),
+          body: JSON.stringify(createBody),
         });
         const d = await r.json();
         if (!r.ok) {
           toastErr(d.detail || "新建失败"); return;
         }
+        // 再 PATCH 阈值/模板等其它字段
         await fetch(API(`/groups/${d.id}`), {
           method: "PATCH", headers,
           body: JSON.stringify(body),
@@ -208,6 +230,14 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1 text-xs">
+                        {/* 推送目标 */}
+                        {g.feishu_chat_id ? (
+                          <Chip size="sm" color="success" variant="flat">内部群</Chip>
+                        ) : g.feishu_webhook_url ? (
+                          <Chip size="sm" color="primary" variant="flat">外部群 webhook</Chip>
+                        ) : (
+                          <Chip size="sm" color="default" variant="flat">未绑飞书</Chip>
+                        )}
                         {(g.likes_threshold || g.collects_threshold || g.comments_threshold) && (
                           <Chip size="sm" color="warning" variant="flat">自定义阈值</Chip>
                         )}
@@ -245,6 +275,87 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
               value={form.name}
               onValueChange={(v) => set("name", v)}
             />
+
+            {/* 仅新建时显示 mode 选择；编辑现有分组时不可改（chat_id / webhook 已固定） */}
+            {editingId == null && (
+              <div className="rounded-lg border border-divider p-3 space-y-3">
+                <div>
+                  <p className="text-sm font-medium mb-1.5">推送目标</p>
+                  <p className="text-xs text-default-400 mb-2">
+                    系统会按选项自动建飞书群或绑定外部群。创建后该分组的所有告警走这个目标。
+                  </p>
+                </div>
+                <div className="flex flex-col gap-2">
+                  {([
+                    {
+                      key: "chat" as const,
+                      title: "内部群（自动建群）",
+                      desc: "系统自动创建飞书群，拉你 + admin + 应用机器人。仅限同企业成员，外部群用不了。",
+                    },
+                    {
+                      key: "webhook" as const,
+                      title: "外部群（自定义机器人 webhook）",
+                      desc: "群管理员先在群里添加自定义机器人，把 webhook URL 粘到下面。跨企业 / 外部协作群用这个。",
+                    },
+                    {
+                      key: "none" as const,
+                      title: "仅本地分组（不绑飞书）",
+                      desc: "只用来给帖子做归类，不会推送告警。",
+                    },
+                  ]).map((opt) => (
+                    <label
+                      key={opt.key}
+                      className={`flex items-start gap-2 rounded-md border p-2.5 cursor-pointer transition-colors ${
+                        createMode === opt.key
+                          ? "border-primary bg-primary/5"
+                          : "border-divider hover:border-default-400"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="group-mode"
+                        checked={createMode === opt.key}
+                        onChange={() => setCreateMode(opt.key)}
+                        className="mt-1"
+                      />
+                      <div className="flex-1">
+                        <p className="text-sm font-medium">{opt.title}</p>
+                        <p className="text-xs text-default-400 mt-0.5">{opt.desc}</p>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+                {createMode === "webhook" && (
+                  <Input
+                    label="Webhook URL"
+                    labelPlacement="outside"
+                    placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+                    value={createWebhookUrl}
+                    onValueChange={setCreateWebhookUrl}
+                    description="飞书群 → 设置 → 群机器人 → 添加机器人 → 自定义机器人 → 复制 webhook URL"
+                  />
+                )}
+              </div>
+            )}
+
+            {/* 编辑现有分组：展示当前推送目标（只读，不允许改 mode） */}
+            {editingId != null && (
+              <div className="rounded-lg border border-divider p-3 text-xs space-y-1">
+                <p className="font-medium text-default-700">推送目标（创建时已固定）</p>
+                {form.feishu_chat_id ? (
+                  <p className="text-default-500">
+                    内部群应用机器人 · chat_id: <code className="font-mono">{form.feishu_chat_id}</code>
+                  </p>
+                ) : form.feishu_webhook_url ? (
+                  <p className="text-default-500 truncate">
+                    外部群 webhook · {form.feishu_webhook_url}
+                  </p>
+                ) : (
+                  <p className="text-default-400">未绑飞书（不会推送告警）</p>
+                )}
+              </div>
+            )}
+
             <Input
               label="消息前缀"
               placeholder="例：【竞品 A 监控】"

@@ -19,11 +19,18 @@ class BatchDeletePostsRequest(BaseModel):
 
 class CreateGroupRequest(BaseModel):
     name: str
+    # 推送目标模式：
+    #   "chat"    → 系统自动建飞书群（应用机器人发卡片，仅内部成员）
+    #   "webhook" → 用户手填自定义机器人 webhook（外部群、跨企业必须用这个）
+    #   "none"    → 仅本地分组，不绑飞书（不推送）
+    mode: str = "chat"
+    feishu_webhook_url: Optional[str] = None  # mode=webhook 时必填
 
 
 class UpdateGroupRequest(BaseModel):
     name: Optional[str] = None
     feishu_webhook_url: Optional[str] = None
+    feishu_chat_id: Optional[str] = None
     wecom_webhook_url: Optional[str] = None
     likes_alert_enabled: Optional[bool] = None
     likes_threshold: Optional[int] = None

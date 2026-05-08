@@ -1139,11 +1139,80 @@ async def create_group(req: CreateGroupRequest, current_user: dict = Depends(get
     name = req.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="分组名不能为空")
+
+    mode = (req.mode or "chat").strip()
+    feishu_chat_id = ""
+    feishu_webhook_url = (req.feishu_webhook_url or "").strip()
+
+    # ── 模式 A：内部群（自动建群 + 应用机器人）─────────────────────────────
+    if mode == "chat":
+        if not (current_user.get("feishu_open_id") or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail="内部群模式需要先在「个人设置」绑定飞书。如果通知到的是外部群，请改选「外部群（webhook）」模式。",
+            )
+        # 拉成员：当前用户 + admin（如果不是当前用户自己）
+        from ..services.feishu import chat as chat_api
+        from ..services.feishu.client import FeishuApiError
+
+        members = [current_user["feishu_open_id"]]
+        admin_open = (await db.get_setting("feishu_admin_open_id", "")).strip()
+        if admin_open and admin_open != current_user["feishu_open_id"]:
+            members.append(admin_open)
+
+        chat_name = f"Pulse · {name}"
+        chat_desc = f"用户 {current_user.get('username') or current_user['id']} 创建的「{name}」监控告警群"
+        try:
+            result = await chat_api.create_chat(
+                name=chat_name,
+                description=chat_desc,
+                user_open_ids=members,
+            )
+            feishu_chat_id = (result.get("chat_id") or "").strip()
+            if not feishu_chat_id:
+                raise FeishuApiError(-1, f"建群响应缺少 chat_id：{result}")
+            # 欢迎消息
+            try:
+                await chat_api.send_text(
+                    feishu_chat_id,
+                    f"🎉 「{name}」监控告警群已创建。这个分组下的帖子告警会推送到这里。",
+                )
+            except FeishuApiError:
+                pass  # 欢迎消息失败不阻塞
+        except FeishuApiError as e:
+            raise HTTPException(status_code=502, detail=f"建群失败：{e.msg}")
+
+    # ── 模式 B：外部群（手填 webhook）─────────────────────────────────────
+    elif mode == "webhook":
+        if not feishu_webhook_url:
+            raise HTTPException(status_code=400, detail="外部群模式必须填 Webhook URL")
+        if not feishu_webhook_url.startswith("https://open.feishu.cn/"):
+            raise HTTPException(
+                status_code=400,
+                detail="不像是飞书自定义机器人 webhook（应以 https://open.feishu.cn/ 开头）",
+            )
+
+    # ── 模式 C：none 仅本地分组 ──────────────────────────────────────────
+    elif mode == "none":
+        pass
+    else:
+        raise HTTPException(status_code=400, detail=f"未知模式：{mode}")
+
     try:
-        gid = await db.create_group(name, user_id=current_user["id"])
+        gid = await db.create_group(
+            name, user_id=current_user["id"],
+            feishu_chat_id=feishu_chat_id,
+            feishu_webhook_url=feishu_webhook_url,
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"创建失败：{e}")
-    return {"ok": True, "id": gid}
+    return {
+        "ok": True,
+        "id": gid,
+        "mode": mode,
+        "feishu_chat_id": feishu_chat_id,
+        "feishu_webhook_url": feishu_webhook_url,
+    }
 
 
 @router.patch("/groups/{group_id}", summary="更新分组")
