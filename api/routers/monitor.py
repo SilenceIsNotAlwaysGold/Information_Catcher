@@ -1180,7 +1180,32 @@ async def create_group(req: CreateGroupRequest, current_user: dict = Depends(get
             except FeishuApiError:
                 pass  # 欢迎消息失败不阻塞
         except FeishuApiError as e:
-            raise HTTPException(status_code=502, detail=f"建群失败：{e.msg}")
+            # 把常见错误转成可执行的中文修复指引
+            msg = (e.msg or "").lower()
+            if "bot ability" in msg or e.code == 232025:
+                hint = (
+                    "建群失败：飞书应用还没启用「机器人能力」。"
+                    "请管理员去飞书开放平台 → 你的应用 → 应用功能 → 添加「机器人」能力 "
+                    "→ 应用发布 → 创建版本提交（自建应用秒批）。"
+                    "完成后再来「分组管理」点新建即可。"
+                )
+            elif "no permission" in msg or "permission denied" in msg:
+                hint = (
+                    f"建群失败：飞书 API 权限不足（{e.msg}）。"
+                    "需要在开放平台申请并发布权限：im:chat / im:message:send_as_bot。"
+                )
+            elif "user_id_list" in msg or "open_id" in msg:
+                hint = (
+                    f"建群失败：拉人时出错（{e.msg}）。"
+                    "可能是 admin 还没绑定飞书，或被拉用户不在企业里。"
+                    "建议改用「外部群（webhook）」模式，先在飞书里手动建群，添加自定义机器人后粘 webhook URL。"
+                )
+            else:
+                hint = (
+                    f"建群失败：{e.msg}。"
+                    "如果反复失败可改用「外部群（webhook）」模式：在飞书里手动建群、加自定义机器人、粘 webhook URL。"
+                )
+            raise HTTPException(status_code=502, detail=hint)
 
     # ── 模式 B：外部群（手填 webhook）─────────────────────────────────────
     elif mode == "webhook":

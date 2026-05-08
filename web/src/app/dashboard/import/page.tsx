@@ -7,13 +7,15 @@ import { Textarea } from "@nextui-org/input";
 import { Select, SelectItem } from "@nextui-org/select";
 import { Chip } from "@nextui-org/chip";
 import { Divider } from "@nextui-org/divider";
-import { Upload, Trash2, Download, CheckCircle, XCircle } from "lucide-react";
+import { Upload, Trash2, Download, CheckCircle, XCircle, AlertCircle } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { toastErr } from "@/lib/toast";
 
 const API = (p: string) => `/api/monitor${p}`;
 
 type Post = { note_id: string; title: string; short_url: string; note_url: string; is_active: number };
 type Account = { id: number; name: string };
+type Group = { id: number; name: string };
 type Result = { link: string; ok: boolean; note_id?: string; reason?: string };
 
 export default function ImportPage() {
@@ -22,18 +24,25 @@ export default function ImportPage() {
 
   const [links, setLinks] = useState("");
   const [accountId, setAccountId] = useState("");
+  const [groupId, setGroupId] = useState("");
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
   const [posts, setPosts] = useState<Post[]>([]);
   const [results, setResults] = useState<Result[]>([]);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
-    const [p, a] = await Promise.all([
+    const [p, a, g] = await Promise.all([
       fetch(API("/posts"), { headers: h }).then((r) => r.json()),
       fetch(API("/accounts"), { headers: h }).then((r) => r.json()),
+      fetch(API("/groups"), { headers: h }).then((r) => r.json()),
     ]);
     setPosts(p.posts ?? []);
     setAccounts(a.accounts ?? []);
+    const gs: Group[] = g.groups ?? [];
+    setGroups(gs);
+    // 没选过分组时，默认选第一个，避免首次提交因没选直接 400
+    setGroupId((prev) => prev || (gs[0] ? String(gs[0].id) : ""));
   }, [token]);
 
   useEffect(() => { load(); }, [load]);
@@ -41,18 +50,37 @@ export default function ImportPage() {
   const handleImport = async () => {
     const items = links.split("\n").map((l) => l.trim()).filter(Boolean);
     if (!items.length) return;
+    if (!groupId) {
+      toastErr("请先选择分组（导入的帖子需要归属到一个分组）");
+      return;
+    }
     setLoading(true);
     setResults([]);
-    const res = await fetch(API("/posts"), {
-      method: "POST",
-      headers: h,
-      body: JSON.stringify({ links: items, account_id: accountId ? parseInt(accountId) : null }),
-    });
-    const data = await res.json();
-    setResults(data.results ?? []);
-    setLinks("");
-    await load();
-    setLoading(false);
+    try {
+      const res = await fetch(API("/posts"), {
+        method: "POST",
+        headers: h,
+        body: JSON.stringify({
+          links: items,
+          account_id: accountId ? parseInt(accountId) : null,
+          group_id: parseInt(groupId),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // 后端拒绝（如 400 必须选分组、429 超配额）— 把错误打到 UI，不要让用户以为"丢失了"
+        const msg = data?.detail || data?.error || `HTTP ${res.status}`;
+        toastErr(`导入失败：${msg}`);
+        return;
+      }
+      setResults(data.results ?? []);
+      setLinks("");
+      await load();
+    } catch (e: any) {
+      toastErr(`导入异常：${e?.message || e}`);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleDelete = async (note_id: string) => {
@@ -100,9 +128,28 @@ export default function ImportPage() {
             classNames={{ input: "font-mono text-sm" }}
           />
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            {/* 分组：必选，导入的帖子必须归属到某个分组（监控告警按分组路由） */}
+            <Select
+              isRequired
+              label="分组"
+              labelPlacement="outside-left"
+              placeholder={groups.length ? "选择分组" : "暂无分组（先去监控设置创建）"}
+              size="sm"
+              className="flex-1 max-w-xs"
+              isDisabled={groups.length === 0}
+              selectedKeys={groupId ? new Set([groupId]) : new Set()}
+              onSelectionChange={(k) => setGroupId(Array.from(k)[0] as string ?? "")}
+              errorMessage={!groupId ? "必填" : undefined}
+            >
+              {groups.map((g) => (
+                <SelectItem key={String(g.id)}>{g.name}</SelectItem>
+              ))}
+            </Select>
             {accounts.length > 0 && (
               <Select
+                label="账号"
+                labelPlacement="outside-left"
                 placeholder="绑定账号（可选）"
                 size="sm"
                 className="flex-1 max-w-xs"
@@ -119,11 +166,18 @@ export default function ImportPage() {
               isLoading={loading}
               startContent={!loading ? <Upload size={16} /> : undefined}
               onPress={handleImport}
-              isDisabled={!links.trim()}
+              isDisabled={!links.trim() || !groupId}
             >
               解析并导入
             </Button>
           </div>
+
+          {groups.length === 0 && (
+            <div className="flex items-center gap-2 text-xs text-warning bg-warning/10 rounded p-2">
+              <AlertCircle size={14} className="shrink-0" />
+              <span>还没有分组，去「监控设置 → 监控分组」新建一个</span>
+            </div>
+          )}
 
           {/* Results */}
           {results.length > 0 && (
