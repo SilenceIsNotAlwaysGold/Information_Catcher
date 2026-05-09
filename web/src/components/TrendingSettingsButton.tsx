@@ -24,7 +24,14 @@ import { toastOk, toastErr } from "@/lib/toast";
 
 const API = (p: string) => `/api/monitor${p}`;
 
-export function TrendingSettingsButton() {
+type Props = {
+  /** 当前页面平台（用于按平台拉飞书专属群）。trending 页面传入；不传则默认 xhs。 */
+  platform?: "xhs" | "douyin" | "mp";
+};
+
+const PLATFORM_LABEL: Record<string, string> = { xhs: "小红书", douyin: "抖音", mp: "公众号" };
+
+export function TrendingSettingsButton({ platform = "xhs" }: Props = {}) {
   const { token } = useAuth();
   const headers = useMemo(
     () => ({ "Content-Type": "application/json", Authorization: `Bearer ${token}` }),
@@ -40,6 +47,9 @@ export function TrendingSettingsButton() {
   const [maxPerKeyword, setMaxPerKeyword] = useState<string>("30");
   const [trendingInterval, setTrendingInterval] = useState<string>("0");
   const [globalInterval, setGlobalInterval] = useState<string>("30");
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [chatMapJson, setChatMapJson] = useState<string>("");
+  const [rebuilding, setRebuilding] = useState(false);
 
   const load = async () => {
     if (!token) return;
@@ -54,6 +64,8 @@ export function TrendingSettingsButton() {
       setMaxPerKeyword(String(d.trending_max_per_keyword || 30));
       setTrendingInterval(String(d.trending_interval_minutes ?? 0));
       setGlobalInterval(String(d.check_interval_minutes || 30));
+      setPushEnabled(d.trending_push_enabled === "1" || d.trending_push_enabled === true);
+      setChatMapJson(d.trending_chat_id || "");
     } catch (e: any) {
       toastErr(`读取设置失败：${e?.message || e}`);
     } finally {
@@ -86,6 +98,7 @@ export function TrendingSettingsButton() {
           Math.min(200, parseInt(maxPerKeyword || "30") || 30),
         ),
         trending_interval_minutes: clampInterval(trendingInterval),
+        trending_push_enabled: pushEnabled,
       };
       const r = await fetch(API("/settings"), {
         method: "PUT", headers, body: JSON.stringify(payload),
@@ -187,6 +200,58 @@ export function TrendingSettingsButton() {
                             填正数 = 你希望多久跑一次（最小 = 系统基线，最大 1440）。
                             调高可减少风控触发。`}
             />
+
+            {/* per-feature 飞书推送：lazy 建群（首次有命中爆款时才建专属群） */}
+            <div className="border-t border-divider pt-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">推送到飞书专属群</p>
+                  <p className="text-xs text-default-400">
+                    打开后第一条命中爆款会自动拉一个「TrendPulse {PLATFORM_LABEL[platform]} 热门内容 - 你的用户名」群；
+                    关闭后停止推送但群保留。
+                  </p>
+                </div>
+                <Switch
+                  isSelected={pushEnabled}
+                  onValueChange={setPushEnabled}
+                  isDisabled={loading}
+                  color="primary"
+                />
+              </div>
+              {pushEnabled && (() => {
+                let chatMap: Record<string, string> = {};
+                try { chatMap = chatMapJson ? JSON.parse(chatMapJson) : {}; } catch {}
+                const existing = chatMap[platform];
+                return (
+                  <div className="text-xs flex items-center justify-between gap-2 pl-1">
+                    <span className="text-default-500">
+                      {existing
+                        ? `已建群（${PLATFORM_LABEL[platform]}）：${existing.slice(0, 12)}…`
+                        : `还未建群（${PLATFORM_LABEL[platform]}），首次命中爆款会自动拉群`}
+                    </span>
+                    {existing && (
+                      <Button size="sm" variant="flat" isDisabled={rebuilding}
+                        onPress={async () => {
+                          if (!confirm(`重建后旧群保留但新数据推到新群，确认重建（${PLATFORM_LABEL[platform]}）?`)) return;
+                          setRebuilding(true);
+                          try {
+                            const r = await fetch(
+                              `/api/feishu/feature-chat/trending/recreate?platform=${platform}`,
+                              { method: "POST", headers },
+                            );
+                            const d = await r.json().catch(() => ({}));
+                            if (!r.ok) { toastErr(d.detail || `HTTP ${r.status}`); return; }
+                            toastOk("已重建专属群");
+                            await load();
+                          } finally { setRebuilding(false); }
+                        }}>
+                        重建群
+                      </Button>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
           </ModalBody>
           <ModalFooter>
             <Button variant="flat" onPress={modal.onClose} isDisabled={saving}>

@@ -112,6 +112,14 @@ def init_user_db():
     # 设计：admin 控制全局 baseline 决定最快频率；用户能调慢减少风控暴露
     _ensure_column(cursor, "users", "monitor_interval_minutes",  "INTEGER DEFAULT 0")
     _ensure_column(cursor, "users", "trending_interval_minutes", "INTEGER DEFAULT 0")
+    # ── 飞书 per-feature 推送：lazy 建群（首开开关 + 第一条数据触发时才建）──
+    # push_enabled = 0/1；chat_id 为空 = 还没建过群
+    _ensure_column(cursor, "users", "trending_push_enabled", "INTEGER DEFAULT 0")
+    _ensure_column(cursor, "users", "trending_chat_id",      "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "creator_push_enabled",  "INTEGER DEFAULT 0")
+    _ensure_column(cursor, "users", "creator_chat_id",       "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "bitable_push_enabled",  "INTEGER DEFAULT 0")
+    _ensure_column(cursor, "users", "bitable_chat_id",       "TEXT DEFAULT ''")
 
     # 飞书 OAuth 自动绑定（每个用户独立的群 + 多维表格）
     # access_token 约 2h 过期，refresh_token 约 30 天；30 天内静默 refresh，超期需重新 OAuth
@@ -356,6 +364,12 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "       COALESCE(trending_max_per_keyword,30) AS trending_max_per_keyword, "
         "       COALESCE(monitor_interval_minutes,0)  AS monitor_interval_minutes, "
         "       COALESCE(trending_interval_minutes,0) AS trending_interval_minutes, "
+        "       COALESCE(trending_push_enabled,0) AS trending_push_enabled, "
+        "       COALESCE(trending_chat_id,'')     AS trending_chat_id, "
+        "       COALESCE(creator_push_enabled,0)  AS creator_push_enabled, "
+        "       COALESCE(creator_chat_id,'')      AS creator_chat_id, "
+        "       COALESCE(bitable_push_enabled,0)  AS bitable_push_enabled, "
+        "       COALESCE(bitable_chat_id,'')      AS bitable_chat_id, "
         "       COALESCE(feishu_open_id,'')                   AS feishu_open_id, "
         "       COALESCE(feishu_user_access_token,'')         AS feishu_user_access_token, "
         "       COALESCE(feishu_refresh_token,'')             AS feishu_refresh_token, "
@@ -401,6 +415,12 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "trending_max_per_keyword": int(row["trending_max_per_keyword"] or 30),
         "monitor_interval_minutes":  int(row["monitor_interval_minutes"] or 0),
         "trending_interval_minutes": int(row["trending_interval_minutes"] or 0),
+        "trending_push_enabled": bool(row["trending_push_enabled"]),
+        "trending_chat_id":      row["trending_chat_id"] or "",
+        "creator_push_enabled":  bool(row["creator_push_enabled"]),
+        "creator_chat_id":       row["creator_chat_id"] or "",
+        "bitable_push_enabled":  bool(row["bitable_push_enabled"]),
+        "bitable_chat_id":       row["bitable_chat_id"] or "",
         "feishu_open_id":                   row["feishu_open_id"] or "",
         "feishu_user_access_token":         row["feishu_user_access_token"] or "",
         "feishu_refresh_token":             row["feishu_refresh_token"] or "",
@@ -670,6 +690,14 @@ _FEISHU_FIELDS = {
     "feishu_bitable_trending_table_id",
     "feishu_bound_at",
     "feishu_name",
+    # per-feature 推送 chat_id（lazy 建群后回填）
+    "trending_chat_id",
+    "creator_chat_id",
+    "bitable_chat_id",
+    # per-feature 推送开关（用户在 settings 里改）
+    "trending_push_enabled",
+    "creator_push_enabled",
+    "bitable_push_enabled",
 }
 
 

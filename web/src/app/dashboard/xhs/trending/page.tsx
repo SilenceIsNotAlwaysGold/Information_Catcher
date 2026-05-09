@@ -12,7 +12,7 @@ import {
 import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
 } from "@nextui-org/modal";
-import { RefreshCw, ExternalLink, Sparkles, Send, TrendingUp } from "lucide-react";
+import { RefreshCw, ExternalLink, Sparkles, Send, TrendingUp, Trash2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
@@ -64,6 +64,7 @@ export default function XhsTrendingPage() {
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [loading, setLoading] = useState(false);
   const [triggering, setTriggering] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [syncing, setSyncing] = useState(false);
 
@@ -102,7 +103,7 @@ export default function XhsTrendingPage() {
     setLoading(true);
     try {
       const [pRes, prRes] = await Promise.all([
-        fetch(API("/trending?limit=200"), { headers }).then((r) => r.json()),
+        fetch(API("/trending?limit=200&platform=xhs"), { headers }).then((r) => r.json()),
         fetch(API("/prompts"),               { headers }).then((r) => r.json()),
       ]);
       setPosts(pRes.posts ?? []);
@@ -121,6 +122,30 @@ export default function XhsTrendingPage() {
     setTriggering(true);
     await fetch(API("/trending/check"), { method: "POST", headers });
     setTimeout(() => { setTriggering(false); load(); }, 4000);
+  };
+
+  const clearAll = async () => {
+    if (posts.length === 0) return;
+    const ok = window.confirm(
+      `确认清空当前所有 ${posts.length} 条小红书热门内容？\n\n此操作不可恢复，但下次抓取仍会重新写入新数据。`,
+    );
+    if (!ok) return;
+    setClearing(true);
+    try {
+      const r = await fetch(API("/trending?platform=xhs"), { method: "DELETE", headers });
+      const d = await r.json();
+      if (!r.ok) {
+        toastErr(d.detail || "清空失败");
+        return;
+      }
+      toastOk(`已清空 ${d.deleted} 条热门内容`);
+      setSelected(new Set());
+      await load();
+    } catch (e: any) {
+      toastErr(e?.message || "清空失败");
+    } finally {
+      setClearing(false);
+    }
   };
 
   const fmt = (n: number) => n >= 10000 ? `${(n / 10000).toFixed(1)}万` : String(n);
@@ -313,7 +338,7 @@ export default function XhsTrendingPage() {
           </p>
         </div>
         <div className="flex gap-2 flex-wrap">
-          <TrendingSettingsButton />
+          <TrendingSettingsButton platform="xhs" />
           <PromptTemplatesButton token={token} />
           <Button variant="flat" startContent={<RefreshCw size={15} />}
             onPress={load} isLoading={loading} size="sm">刷新</Button>
@@ -324,6 +349,11 @@ export default function XhsTrendingPage() {
           </Button>
           <Button color="primary" startContent={<Sparkles size={15} />}
             onPress={triggerCheck} isLoading={triggering} size="sm">立即抓取</Button>
+          <Button color="danger" variant="flat" startContent={<Trash2 size={15} />}
+            onPress={clearAll} isLoading={clearing}
+            isDisabled={posts.length === 0} size="sm">
+            清空
+          </Button>
         </div>
       </div>
 

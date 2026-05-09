@@ -190,6 +190,10 @@ class UpdateSettingsRequest(BaseModel):
     trending_max_per_keyword: Optional[int] = None  # 单关键词单次抓取目标数量（1-200）
     monitor_interval_minutes: Optional[int] = None   # 用户级监控帖子频率（0=跟全局）
     trending_interval_minutes: Optional[int] = None  # 用户级热门抓取频率（0=跟全局）
+    # per-feature 飞书推送开关（关→开 + 第一条数据触发时自动建专属群）
+    trending_push_enabled: Optional[bool] = None
+    creator_push_enabled: Optional[bool] = None
+    bitable_push_enabled: Optional[bool] = None
     trending_account_ids: Optional[str] = None
     comments_fetch_enabled: Optional[bool] = None
     newrank_api_key: Optional[str] = None

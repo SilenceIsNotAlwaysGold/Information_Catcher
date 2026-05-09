@@ -1161,6 +1161,13 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     # 用户级抓取频率（0 = 跟随全局 check_interval_minutes）
     base["monitor_interval_minutes"] = str(me.get("monitor_interval_minutes") or 0)
     base["trending_interval_minutes"] = str(me.get("trending_interval_minutes") or 0)
+    # per-feature 飞书推送开关 + 已建群标识（前端用来 toggle 开关 / 显示「群已存在」）
+    base["trending_push_enabled"] = "1" if me.get("trending_push_enabled") else "0"
+    base["creator_push_enabled"]  = "1" if me.get("creator_push_enabled")  else "0"
+    base["bitable_push_enabled"]  = "1" if me.get("bitable_push_enabled")  else "0"
+    base["trending_chat_id"] = me.get("trending_chat_id", "") or ""
+    base["creator_chat_id"]  = me.get("creator_chat_id",  "") or ""
+    base["bitable_chat_id"]  = me.get("bitable_chat_id",  "") or ""
     return base
 
 
@@ -1197,6 +1204,15 @@ async def update_settings(
             monitor_interval_minutes=req.monitor_interval_minutes,
             trending_interval_minutes=req.trending_interval_minutes,
         )
+
+    # per-feature 飞书推送开关：直接通过 update_user_feishu 写入（_FEISHU_FIELDS 已含）
+    push_updates = {}
+    for key in ("trending_push_enabled", "creator_push_enabled", "bitable_push_enabled"):
+        v = getattr(req, key, None)
+        if v is not None:
+            push_updates[key] = 1 if v else 0
+    if push_updates:
+        auth_service.update_user_feishu(current_user["id"], **push_updates)
 
     simple_fields = [
         "daily_report_time",
@@ -1313,7 +1329,7 @@ async def create_group(req: CreateGroupRequest, current_user: dict = Depends(get
         if admin_open and admin_open != current_user["feishu_open_id"]:
             members.append(admin_open)
 
-        chat_name = f"Pulse · {name}"
+        chat_name = f"TrendPulse 监控帖子 - {name}"
         chat_desc = f"用户 {current_user.get('username') or current_user['id']} 创建的「{name}」监控告警群"
         try:
             result = await chat_api.create_chat(
@@ -1561,13 +1577,39 @@ async def backfill_trending_media(
         ok_count = 0
         fail_count = 0
 
+        from ..services import extension_dispatcher
         async def _one(p):
             nonlocal ok_count, fail_count
             async with sem:
                 try:
-                    metrics, status = await fetcher.fetch_note_metrics(
-                        p["note_id"], p.get("xsec_token", ""), "pc_search", account=account,
-                    )
+                    plat = (p.get("platform") or "xhs").lower()
+                    metrics = None
+                    status = "skip"
+                    # 抖音帖子走扩展通道（无匿名兜底）；小红书优先扩展失败回退匿名
+                    if plat == "douyin":
+                        if extension_dispatcher.has_online_extension(scope_uid):
+                            res = await extension_dispatcher.dispatch_douyin_note_detail(
+                                user_id=scope_uid, aweme_id=p["note_id"],
+                            )
+                            if res.get("ok"):
+                                metrics = res
+                                status = "ok"
+                    else:  # xhs 默认
+                        if extension_dispatcher.has_online_extension(scope_uid):
+                            try:
+                                res = await extension_dispatcher.dispatch_xhs_note_detail(
+                                    user_id=scope_uid, note_id=p["note_id"],
+                                    xsec_token=p.get("xsec_token", ""),
+                                )
+                                if res.get("ok"):
+                                    metrics = res
+                                    status = "ok"
+                            except Exception:
+                                pass
+                        if not metrics:
+                            metrics, status = await fetcher.fetch_note_metrics(
+                                p["note_id"], p.get("xsec_token", ""), "pc_search", account=account,
+                            )
                     if metrics:
                         await db.update_trending_media(
                             p["note_id"],
@@ -1620,12 +1662,22 @@ async def fetch_trending_content(
     note_type = "normal"
     via = ""
 
-    # 路径 1: 扩展通道（小红书帖子）
-    if (post.get("platform") or "xhs") == "xhs" and extension_dispatcher.has_online_extension(scope_uid):
+    plat_name = (post.get("platform") or "xhs").lower()
+
+    # 路径 1: 扩展通道（按平台路由）
+    if extension_dispatcher.has_online_extension(scope_uid):
         try:
-            res = await extension_dispatcher.dispatch_xhs_note_detail(
-                user_id=scope_uid, note_id=note_id, xsec_token=post.get("xsec_token", ""),
-            )
+            if plat_name == "xhs":
+                res = await extension_dispatcher.dispatch_xhs_note_detail(
+                    user_id=scope_uid, note_id=note_id,
+                    xsec_token=post.get("xsec_token", ""),
+                )
+            elif plat_name == "douyin":
+                res = await extension_dispatcher.dispatch_douyin_note_detail(
+                    user_id=scope_uid, aweme_id=note_id,
+                )
+            else:
+                res = {"ok": False}
             if res.get("ok"):
                 title = res.get("title") or title
                 desc = res.get("desc") or ""
@@ -1637,8 +1689,8 @@ async def fetch_trending_content(
         except Exception as e:
             logger.warning(f"[fetch-content] extension path failed for {note_id}: {e}")
 
-    # 路径 2: 匿名兜底
-    if not desc and (post.get("platform") or "xhs") == "xhs":
+    # 路径 2: 匿名兜底（仅小红书有匿名 fetch_note_metrics 实现）
+    if not desc and plat_name == "xhs":
         metrics, status = await fetcher.fetch_note_metrics(
             note_id, post.get("xsec_token", ""), "pc_search", account=None,
         )
@@ -1657,6 +1709,12 @@ async def fetch_trending_content(
                     detail="该帖子需要登录态。请先安装并连接 TrendPulse Helper 浏览器扩展，浏览器登录小红书后重试。",
                 )
             raise HTTPException(status_code=400, detail=f"抓取失败：{status}")
+    elif not desc and via != "extension":
+        # 抖音/公众号 没有匿名兜底，缺扩展直接报错
+        raise HTTPException(
+            status_code=400,
+            detail=f"抓取失败。请先安装 TrendPulse Helper 浏览器扩展并在浏览器登录{plat_name}。",
+        )
 
     if desc:
         await db.update_trending_desc(note_id, desc, user_id=scope_uid)

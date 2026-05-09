@@ -9,11 +9,13 @@ import { Tooltip } from "@nextui-org/tooltip";
 import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
 } from "@nextui-org/modal";
-import { Plus, RefreshCw, X } from "lucide-react";
+import { Plus, RefreshCw, X, Settings, Bell, BellOff } from "lucide-react";
+import { Switch } from "@nextui-org/switch";
 import { useAuth } from "@/contexts/AuthContext";
 import { CreatorRow, PlatformKey, PLATFORM_LABEL } from "./types";
 import { toastOk, toastErr, toastInfo } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
+import { FeishuPushToggle } from "@/components/FeishuPushToggle";
 
 /**
  * 通用「博主追新」卡片组件，三个平台共用。
@@ -127,6 +129,88 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
     await load();
   };
 
+  // ── 全局博主追新设置弹窗（影响该用户所有博主）───────────────────────
+  const settingsModal = useDisclosure();
+  const [pushOnEdit, setPushOnEdit] = useState(true);
+  const [intervalEdit, setIntervalEdit] = useState<number>(60);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [feishuStatus, setFeishuStatus] = useState<{
+    bound: boolean; chat_id?: string; chat_name?: string;
+    bitable_app_token?: string;
+  } | null>(null);
+  const [provisioning, setProvisioning] = useState(false);
+
+  const openGlobalSettings = async () => {
+    settingsModal.onOpen();
+    // 拉飞书状态
+    try {
+      const r = await fetch("/api/feishu/status", { headers });
+      if (r.ok) {
+        const d = await r.json();
+        setFeishuStatus({
+          bound: !!d.bound || !!d.feishu_open_id,
+          chat_id: d.feishu_chat_id || "",
+          chat_name: d.feishu_chat_name || "",
+          bitable_app_token: d.feishu_bitable_app_token || "",
+        });
+      }
+    } catch {}
+    // 当前已订阅博主中取最常见的设置作为默认（简单起见取第一个）
+    if (creators.length > 0) {
+      const c = creators[0];
+      setPushOnEdit(!(c.push_enabled === false || c.push_enabled === 0));
+      setIntervalEdit(c.fetch_interval_minutes || 60);
+    }
+  };
+
+  const saveSettings = async () => {
+    setSavingSettings(true);
+    try {
+      // 批量把所有博主的 push_enabled / fetch_interval_minutes 同步成全局值
+      const tasks = creators.map((c) =>
+        fetch(`/api/monitor/creators/${c.id}/settings`, {
+          method: "PUT", headers,
+          body: JSON.stringify({
+            push_enabled: pushOnEdit,
+            fetch_interval_minutes: intervalEdit,
+          }),
+        }),
+      );
+      await Promise.all(tasks);
+      toastOk(`已保存（应用到 ${creators.length} 个博主）`);
+      settingsModal.onClose();
+      await load();
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const reprovision = async () => {
+    setProvisioning(true);
+    try {
+      const r = await fetch("/api/feishu/reprovision", { method: "POST", headers });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        toastErr(j.detail || "建群失败");
+        return;
+      }
+      toastOk("飞书群已建/已重建，告警将推送到该群");
+      // 刷新状态
+      const sr = await fetch("/api/feishu/status", { headers });
+      if (sr.ok) {
+        const d = await sr.json();
+        setFeishuStatus({
+          bound: !!d.bound || !!d.feishu_open_id,
+          chat_id: d.feishu_chat_id || "",
+          chat_name: d.feishu_chat_name || "",
+          bitable_app_token: d.feishu_bitable_app_token || "",
+        });
+      }
+    } finally {
+      setProvisioning(false);
+    }
+  };
+
   const checkOne = async (cid: number) => {
     const r = await fetch(`/api/monitor/creators/${cid}/check`, { method: "POST", headers });
     if (r.ok) {
@@ -155,8 +239,8 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
   const desc = platform === "mp"
     ? "输入公众号名称即可订阅，系统通过搜狗微信搜索抓最近 ~10 篇文章并自动入库；6 小时检查一次更新。"
     : platform === "douyin"
-    ? "输入博主主页 URL 订阅。需要平台抖音账号 cookie，6 小时检查一次更新。"
-    : "输入博主主页 URL 订阅。需要平台小红书账号 cookie，6 小时检查一次更新。";
+    ? "输入博主主页 URL 订阅。通过 TrendPulse Helper 浏览器扩展抓取（请安装扩展并在浏览器登录抖音），6 小时检查一次更新。"
+    : "输入博主主页 URL 订阅。通过 TrendPulse Helper 浏览器扩展抓取（请安装扩展并在浏览器登录小红书），6 小时检查一次更新。";
 
   return (
     <>
@@ -166,10 +250,16 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
             <p className="text-sm font-medium">{PLATFORM_LABEL[platform]} · 博主追新</p>
             <p className="text-xs text-default-400">已订阅 {creators.length} 个</p>
           </div>
-          <Button size="sm" color="primary" startContent={<Plus size={14} />}
-            onPress={() => { setFollowInput(""); setFollowError(""); setFollowResult(null); followModal.onOpen(); }}>
-            {platform === "mp" ? "订阅公众号" : "订阅博主"}
-          </Button>
+          <div className="flex gap-2">
+            <Button size="sm" variant="flat" startContent={<Settings size={14} />}
+              onPress={openGlobalSettings}>
+              追新设置
+            </Button>
+            <Button size="sm" color="primary" startContent={<Plus size={14} />}
+              onPress={() => { setFollowInput(""); setFollowError(""); setFollowResult(null); followModal.onOpen(); }}>
+              {platform === "mp" ? "订阅公众号" : "订阅博主"}
+            </Button>
+          </div>
         </CardHeader>
         <CardBody className="space-y-2">
           {loading ? (
@@ -177,22 +267,26 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
           ) : creators.length === 0 ? (
             <p className="text-sm text-default-400">还没有订阅任何博主</p>
           ) : (
-            <div className="flex flex-row gap-2 flex-wrap">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
               {creators.map((c) => {
                 const status = c.last_check_status || "unknown";
                 const unread = c.unread_count || 0;
-                // chip 配色：失效=红、无账号=橙、错=黄、ok/未知=绿
-                const color: any =
-                  status === "cookie_invalid" ? "danger"
-                  : status === "no_account"   ? "warning"
-                  : status === "error"        ? "warning"
-                  :                              "success";
+                const dotColor =
+                  status === "cookie_invalid" ? "bg-danger"
+                  : status === "no_extension" ? "bg-warning"
+                  : status === "ext_login_required" ? "bg-warning"
+                  : status === "no_account"   ? "bg-warning"
+                  : status === "error"        ? "bg-warning"
+                  : status === "ok"           ? "bg-success"
+                  :                              "bg-default-300";
                 const statusText =
-                  status === "cookie_invalid" ? "账号 Cookie 失效（去账号管理重新登录）"
-                  : status === "no_account"   ? "缺少可用账号 cookie，无法追新"
-                  : status === "error"        ? "上次抓取出错"
+                  status === "no_extension" ? "未连接扩展"
+                  : status === "ext_login_required" ? "扩展未登录该平台"
+                  : status === "cookie_invalid" ? "Cookie 失效"
+                  : status === "no_account"   ? "无账号"
+                  : status === "error"        ? "抓取出错"
                   : status === "ok"           ? "抓取正常"
-                  :                              "尚未运行过";
+                  :                              "尚未运行";
 
                 const tipLines: string[] = [];
                 tipLines.push(`状态：${statusText}`);
@@ -200,47 +294,77 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
                 if (c.last_post_at)  tipLines.push(`最近发帖：${c.last_post_at.slice(5, 16)}`);
                 if (c.last_check_error) tipLines.push(`错误：${c.last_check_error}`);
 
-                // 标签文本：creator_name 优先，URL 作 fallback；URL 太长截断防 chip 撑爆
-                const rawLabel = c.creator_name || c.creator_url;
-                const label = rawLabel.length > 28 ? rawLabel.slice(0, 26) + "…" : rawLabel;
+                const name = c.creator_name || "(未知博主)";
+                const initial = (name || "?").slice(0, 1);
+                const followers = (c as any).followers_count || 0;
+                const likes = (c as any).likes_count || 0;
+                const notes = (c as any).notes_count || 0;
+                const desc = (c as any).creator_desc || "";
+                const fmt = (n: number) =>
+                  n >= 10000 ? `${(n / 10000).toFixed(1)}万` : String(n || 0);
+
                 return (
-                  <Tooltip key={c.id} content={
-                    <div className="text-xs whitespace-pre-line max-w-xs">
-                      {tipLines.join("\n")}
+                  <div key={c.id}
+                    className="rounded-lg border border-default-200 hover:border-default-300 transition px-3 py-3 bg-content1">
+                    <div className="flex items-start gap-3">
+                      {/* avatar */}
+                      {c.avatar_url ? (
+                        <img src={c.avatar_url} alt="" referrerPolicy="no-referrer"
+                          className="w-12 h-12 rounded-full object-cover flex-shrink-0" />
+                      ) : (
+                        <div className="w-12 h-12 rounded-full bg-primary-100 text-primary-700 flex items-center justify-center text-base font-semibold flex-shrink-0">
+                          {initial}
+                        </div>
+                      )}
+                      {/* main */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`w-1.5 h-1.5 rounded-full ${dotColor} flex-shrink-0`} />
+                          <Tooltip content={<div className="text-xs whitespace-pre-line max-w-xs">{tipLines.join("\n")}</div>}>
+                            <span className="text-sm font-medium truncate cursor-help">{name}</span>
+                          </Tooltip>
+                          {unread > 0 && (
+                            <span className="px-1.5 py-px rounded-full bg-success-100 text-success-700 text-[10px] font-semibold flex-shrink-0">
+                              {unread} 新
+                            </span>
+                          )}
+                        </div>
+                        {/* 数据条：粉丝 / 获赞 / 笔记数 */}
+                        <div className="flex gap-3 mt-1 text-[11px] text-default-600">
+                          <span><span className="text-default-400">粉丝</span> <strong>{fmt(followers)}</strong></span>
+                          <span><span className="text-default-400">获赞</span> <strong>{fmt(likes)}</strong></span>
+                          <span><span className="text-default-400">作品</span> <strong>{fmt(notes)}</strong></span>
+                        </div>
+                        {/* 简介 */}
+                        {desc && (
+                          <div className="text-[11px] text-default-500 mt-1 truncate" title={desc}>
+                            {desc}
+                          </div>
+                        )}
+                        {/* 最近帖子 */}
+                        <div className="text-[11px] text-default-500 mt-1 truncate">
+                          {c.last_post_title
+                            ? <span className="text-default-700">📄 {c.last_post_title}</span>
+                            : c.last_post_at
+                              ? <span className="text-default-400">最近发帖 {c.last_post_at.slice(5, 16)}</span>
+                              : <span className="text-default-300">尚未抓到帖子</span>}
+                        </div>
+                      </div>
+                      {/* actions */}
+                      <div className="flex flex-col gap-0.5 flex-shrink-0">
+                        <Button size="sm" variant="light" isIconOnly
+                          onPress={() => checkOne(c.id)}
+                          aria-label="立刻刷新" className="min-w-0 w-7 h-7">
+                          <RefreshCw size={13} />
+                        </Button>
+                        <Button size="sm" variant="light" isIconOnly color="danger"
+                          onPress={() => unfollow(c.id)}
+                          aria-label="取消订阅" className="min-w-0 w-7 h-7">
+                          <X size={13} />
+                        </Button>
+                      </div>
                     </div>
-                  }>
-                    <Chip size="sm" variant="dot" color={color}
-                      endContent={
-                        <span className="flex items-center gap-0.5 ml-1">
-                          <Button size="sm" variant="light" isIconOnly
-                            onPress={() => checkOne(c.id)}
-                            className="min-w-0 w-5 h-5"
-                            aria-label="立刻刷新">
-                            <RefreshCw size={11} />
-                          </Button>
-                          <Button size="sm" variant="light" isIconOnly color="danger"
-                            onPress={() => unfollow(c.id)}
-                            className="min-w-0 w-5 h-5"
-                            aria-label="取消订阅">
-                            <X size={12} />
-                          </Button>
-                        </span>
-                      }>
-                      <span className="truncate inline-block max-w-[14rem] align-middle">
-                        {label}
-                      </span>
-                      {unread > 0 && (
-                        <span className="ml-1 px-1.5 py-px rounded-full bg-success-100 text-success-700 text-[10px] font-semibold">
-                          {unread} 新
-                        </span>
-                      )}
-                      {!unread && c.last_post_at && (
-                        <span className="text-[10px] text-default-400 ml-1">
-                          · {c.last_post_at.slice(5, 16)}
-                        </span>
-                      )}
-                    </Chip>
-                  </Tooltip>
+                  </div>
                 );
               })}
             </div>
@@ -271,6 +395,119 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
             <Button variant="light" onPress={followModal.onClose}>关闭</Button>
             <Button color="primary" onPress={submitFollow} isLoading={followBusy}>
               订阅并立即抓取
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* 全局博主追新设置弹窗（影响该用户所有博主）*/}
+      <Modal isOpen={settingsModal.isOpen} onClose={settingsModal.onClose} size="md">
+        <ModalContent>
+          <ModalHeader>博主追新 · 全局设置</ModalHeader>
+          <ModalBody className="space-y-4">
+            <p className="text-tiny text-default-500">
+              这些设置会应用到你订阅的所有博主（共 {creators.length} 个）。
+            </p>
+
+            {/* per-feature 飞书推送：lazy 拉「博主追新」专属群 */}
+            <FeishuPushToggle feature="creator" platform={platform} />
+
+            {/* 推送开关 */}
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium">推送到飞书</p>
+                <p className="text-xs text-default-400 mt-0.5">
+                  开启后博主有新帖会推送到下方绑定的飞书群；关闭只静默入库。
+                </p>
+              </div>
+              <Switch isSelected={pushOnEdit} onValueChange={setPushOnEdit} color="primary" />
+            </div>
+
+            {/* 飞书群绑定状态 + 拉群 */}
+            <div className="px-3 py-2.5 rounded-md bg-default-50 border border-default-200 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium">飞书群</span>
+                {feishuStatus === null ? (
+                  <span className="text-tiny text-default-400">加载中…</span>
+                ) : !feishuStatus.bound ? (
+                  <span className="text-tiny text-warning">未绑定飞书</span>
+                ) : feishuStatus.chat_id ? (
+                  <span className="text-tiny text-success">已建群</span>
+                ) : (
+                  <span className="text-tiny text-warning">已绑飞书但无群</span>
+                )}
+              </div>
+              {feishuStatus?.bound && feishuStatus.chat_id && (
+                <div className="text-tiny text-default-500 break-all">
+                  群 ID: <code className="text-[10px]">{feishuStatus.chat_id.slice(0, 30)}…</code>
+                </div>
+              )}
+              {!feishuStatus?.bound ? (
+                <a href="/dashboard/profile" className="block text-tiny text-primary underline">
+                  → 前往「个人设置」绑定飞书
+                </a>
+              ) : (
+                <Button size="sm" variant="flat" color="primary"
+                  isLoading={provisioning}
+                  onPress={reprovision}
+                  className="mt-1">
+                  {feishuStatus.chat_id ? "重建群组" : "立即建群"}
+                </Button>
+              )}
+            </div>
+
+            {/* 频率 */}
+            <div>
+              <p className="text-sm font-medium mb-2">默认抓取频率</p>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { v: 30,   l: "30 分钟" },
+                  { v: 60,   l: "1 小时" },
+                  { v: 180,  l: "3 小时" },
+                  { v: 360,  l: "6 小时" },
+                  { v: 1440, l: "每天" },
+                ].map((opt) => (
+                  <button
+                    key={opt.v}
+                    type="button"
+                    onClick={() => setIntervalEdit(opt.v)}
+                    className={`px-3 py-1.5 rounded-md text-xs border transition ${
+                      intervalEdit === opt.v
+                        ? "bg-primary text-white border-primary"
+                        : "bg-content1 border-default-200 hover:border-default-400"
+                    }`}
+                  >
+                    {opt.l}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <Input
+                  type="number" size="sm" className="w-28"
+                  value={String(intervalEdit)}
+                  onValueChange={(v) => {
+                    const n = parseInt(v || "60");
+                    if (!isNaN(n)) setIntervalEdit(n);
+                  }}
+                  min={5}
+                  endContent={<span className="text-tiny text-default-400">分钟</span>}
+                />
+                <span className="text-tiny text-default-400">自定义（≥ 5 分钟）</span>
+              </div>
+              {intervalEdit < 30 && (
+                <div className="mt-2 px-3 py-2 rounded-md bg-warning-50 border border-warning-200 text-tiny text-warning-700">
+                  ⚠️ 频率高于每 30 分钟有触发风控的风险。建议保持 ≥ 30 分钟。
+                </div>
+              )}
+            </div>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="light" onPress={settingsModal.onClose} isDisabled={savingSettings}>
+              取消
+            </Button>
+            <Button color="primary" onPress={saveSettings} isLoading={savingSettings}
+              isDisabled={creators.length === 0}>
+              保存（应用到 {creators.length} 个博主）
             </Button>
           </ModalFooter>
         </ModalContent>

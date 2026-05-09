@@ -690,9 +690,18 @@ async def run_creator_check():
             except Exception as e:
                 logger.debug(f"[creator_check] add_post {pid} skipped: {e}")
 
+        # 把扩展抓到的博主元信息（粉丝/获赞/头像/简介）+ 最近帖子标题落库
+        prof = res.get("profile") or {}
+        latest_post_title = posts[0].get("title", "") if posts else ""
         await db.update_creator_check(
             creator["id"], last_post_id=newest,
-            creator_name=(posts[0].get("creator_name", "") if posts else ""),
+            creator_name=prof.get("creator_name") or (posts[0].get("creator_name", "") if posts else ""),
+            avatar_url=prof.get("avatar_url", ""),
+            last_post_title=latest_post_title,
+            followers_count=prof.get("followers_count"),
+            likes_count=prof.get("likes_count"),
+            notes_count=prof.get("notes_count"),
+            creator_desc=prof.get("desc", ""),
         )
         await db.cursor_mark_done("creator", ck, cursor=newest or "")
         await db.mark_creator_status(creator["id"], "ok")
@@ -706,8 +715,16 @@ async def run_creator_check():
             if not push_enabled:
                 logger.info(f"[creator_check] {creator.get('creator_name')} 推送已关闭，仅入库")
                 continue
-            wecom_url, feishu_url, chat_id = _channels(uid)
-            if wecom_url or feishu_url or chat_id:
+            wecom_url, feishu_url, _legacy_chat = _channels(uid)
+            # per-feature 推送：creator 用按平台分的专属群
+            push_chat = ""
+            full_user = auth_service.get_user_by_id(uid) or {}
+            if full_user.get("creator_push_enabled"):
+                from .feishu import provisioning as _prov
+                push_chat = await _prov.ensure_feature_chat(
+                    full_user, "creator", platform=platform_name,
+                ) or ""
+            if push_chat or wecom_url or feishu_url:
                 try:
                     await notifier.notify_creator_new_posts(
                         wecom_url, feishu_url,
@@ -718,7 +735,7 @@ async def run_creator_check():
                         ),
                         platform=platform_name,
                         posts=new_posts,
-                        feishu_chat_id=chat_id,
+                        feishu_chat_id=push_chat,
                     )
                 except Exception as e:
                     logger.warning(f"[creator_check] notify failed: {e}")
@@ -1112,11 +1129,21 @@ async def run_trending_monitor(platform: Optional[str] = None, user_id: Optional
                         except Exception as e:
                             logger.warning(f"[archive] enqueue failed: {e}")
 
-                if new_posts and (wecom_url or feishu_url or chat_id):
-                    await notifier.notify_trending(
-                        wecom_url, feishu_url, keyword, new_posts,
-                        feishu_chat_id=chat_id,
-                    )
+                if new_posts:
+                    # per-feature 推送：只在开关开启时推；首次推送 lazy 拉群
+                    push_chat = ""
+                    if full_user.get("trending_push_enabled"):
+                        from .feishu import provisioning as _prov
+                        # platform：用账号的平台 / 默认 xhs（trending 主要在 xhs/douyin）
+                        plat_for_chat = (account.get("platform") or "xhs") if account else "xhs"
+                        push_chat = await _prov.ensure_feature_chat(
+                            full_user, "trending", platform=plat_for_chat,
+                        ) or ""
+                    if push_chat or wecom_url or feishu_url:
+                        await notifier.notify_trending(
+                            wecom_url, feishu_url, keyword, new_posts,
+                            feishu_chat_id=push_chat,
+                        )
                 await db.cursor_mark_done("trending", cursor_key)
             except Exception as e:
                 logger.error(f"[trending] user={uid} keyword='{keyword}' error: {e}")

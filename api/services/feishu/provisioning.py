@@ -233,3 +233,147 @@ async def provision_user(user_id: int, *, force_recreate: bool = False) -> Provi
         result["bitable_error"] = str(e)
 
     return result
+
+
+# ── per-feature 独立群（lazy 拉群，按平台分）─────────────────────────────────
+# 群名规则：
+#   trending / creator → 按平台分群：TrendPulse {平台} {feature} - {username}
+#     例：TrendPulse 小红书 热门内容 - 张三
+#   bitable             → 单群：TrendPulse 消息同步 - {username}
+# 字段：
+#   {trending,creator}_chat_id 在 DB 里存 JSON map：{"xhs": "oc_xxx", "douyin": "oc_yy"}
+#   bitable_chat_id 存单字符串
+# 开关：{feature}_push_enabled 单一开关（关闭就所有平台都不推）
+
+import json as _json
+
+_FEATURE_LABELS = {
+    "trending": "热门内容",
+    "creator":  "博主追新",
+    "bitable":  "消息同步",
+}
+_FEATURE_INTROS = {
+    "trending": "热门内容速递（关键词命中爆款）会推送到这里。",
+    "creator":  "博主新发帖（订阅的博主有新作品）会推送到这里。",
+    "bitable":  "飞书表格写入完成的通知会推送到这里。",
+}
+_PLATFORM_LABELS = {"xhs": "小红书", "douyin": "抖音", "mp": "公众号"}
+# 哪些 feature 按平台分群
+_PER_PLATFORM_FEATURES = {"trending", "creator"}
+
+
+def _feature_chat_field(feature: str) -> str:
+    return f"{feature}_chat_id"
+
+
+def _read_chat_map(user: Dict[str, Any], feature: str) -> Dict[str, str]:
+    """trending/creator 字段存 JSON map；解析成 dict。"""
+    raw = (user.get(_feature_chat_field(feature)) or "").strip()
+    if not raw:
+        return {}
+    try:
+        m = _json.loads(raw)
+        return m if isinstance(m, dict) else {}
+    except Exception:
+        # 老数据可能是裸 chat_id 字符串，迁移到 'xhs' key（最常见）
+        return {"xhs": raw} if raw.startswith("oc_") else {}
+
+
+async def ensure_feature_chat(
+    user: Dict[str, Any], feature: str, *,
+    platform: Optional[str] = None,
+    force_recreate: bool = False,
+) -> Optional[str]:
+    """lazy 建群。返回 chat_id；建失败返 None（推送侧不阻塞）。
+
+    feature='bitable' 不需要 platform；其他 feature 必须传 platform。
+    `force_recreate=True` 强制重建（覆盖旧 chat_id）。
+    """
+    if feature not in _FEATURE_LABELS:
+        logger.warning(f"[ensure_feature_chat] unknown feature={feature}")
+        return None
+    if not (user.get("feishu_open_id") or "").strip():
+        return None
+
+    label_zh = _FEATURE_LABELS[feature]
+    welcome = _FEATURE_INTROS[feature]
+    username = user.get("username") or user.get("email") or f"uid{user['id']}"
+
+    # 已存在 → 直接复用
+    if feature in _PER_PLATFORM_FEATURES:
+        if not platform:
+            logger.warning(f"[ensure_feature_chat] feat={feature} 需要 platform 参数")
+            return None
+        chat_map = _read_chat_map(user, feature)
+        existing = (chat_map.get(platform) or "").strip()
+        if existing and not force_recreate:
+            return existing
+        platform_zh = _PLATFORM_LABELS.get(platform, platform)
+        name = f"TrendPulse {platform_zh} {label_zh} - {username}"
+    else:
+        existing = (user.get(_feature_chat_field(feature)) or "").strip()
+        if existing and not force_recreate:
+            return existing
+        name = f"TrendPulse {label_zh} - {username}"
+
+    description = f"TrendPulse 自动建群：{welcome}"
+    members = await _build_member_list(user)
+
+    try:
+        result = await chat_api.create_chat(
+            name=name, description=description, user_open_ids=members,
+        )
+    except FeishuApiError as e:
+        logger.warning(
+            f"[ensure_feature_chat] user={user['id']} feat={feature} "
+            f"plat={platform or '-'} build failed: {e}",
+        )
+        return None
+
+    chat_id = (result.get("chat_id") or "").strip()
+    if not chat_id:
+        return None
+
+    # 回填：trending/creator 写 JSON map；bitable 写单字符串
+    if feature in _PER_PLATFORM_FEATURES:
+        chat_map = _read_chat_map(user, feature)
+        chat_map[platform] = chat_id
+        auth_service.update_user_feishu(
+            user["id"],
+            **{_feature_chat_field(feature): _json.dumps(chat_map, ensure_ascii=False)},
+        )
+        # 同步本地 user dict，便于同一请求内复用
+        user[_feature_chat_field(feature)] = _json.dumps(chat_map, ensure_ascii=False)
+    else:
+        auth_service.update_user_feishu(user["id"], **{_feature_chat_field(feature): chat_id})
+        user[_feature_chat_field(feature)] = chat_id
+
+    # 欢迎语
+    try:
+        scope = ""
+        if feature in _PER_PLATFORM_FEATURES and platform:
+            scope = f"（平台：{_PLATFORM_LABELS.get(platform, platform)}）"
+        await chat_api.send_text(
+            chat_id,
+            f"🎉 「{label_zh}」专属通知群已开通{scope}\n\n"
+            f"{welcome}\n\n"
+            f"如需关闭推送，回到对应页面 → 设置里关掉推送开关即可（群保留，不再发新消息）。",
+        )
+    except FeishuApiError:
+        pass
+
+    return chat_id
+
+
+def get_feature_chat_id(user: Dict[str, Any], feature: str, platform: Optional[str] = None) -> str:
+    """同步读取已建好的 chat_id（不会建群）。推送侧用这个先查、需要时再调 ensure。"""
+    if feature in _PER_PLATFORM_FEATURES:
+        if not platform:
+            return ""
+        return (_read_chat_map(user, feature).get(platform) or "").strip()
+    return (user.get(_feature_chat_field(feature)) or "").strip()
+
+
+def is_feature_push_enabled(user: Dict[str, Any], feature: str) -> bool:
+    """读用户是否开启了 {feature} 推送开关。"""
+    return bool(user.get(f"{feature}_push_enabled"))

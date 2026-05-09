@@ -12,7 +12,7 @@ import {
 import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
 } from "@nextui-org/modal";
-import { RefreshCw, ExternalLink, Sparkles, Send, Download, TrendingUp } from "lucide-react";
+import { RefreshCw, ExternalLink, Sparkles, Send, Download, TrendingUp, Trash2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
@@ -55,6 +55,8 @@ export default function DouyinTrendingPage() {
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [loading, setLoading] = useState(false);
   const [triggering, setTriggering] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [backfilling, setBackfilling] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [syncing, setSyncing] = useState(false);
 
@@ -90,6 +92,51 @@ export default function DouyinTrendingPage() {
     setTriggering(true);
     await fetch(API("/trending/check?platform=douyin"), { method: "POST", headers });
     setTimeout(() => { setTriggering(false); load(); }, 4000);
+  };
+
+  const backfillMedia = async () => {
+    setBackfilling(true);
+    try {
+      const r = await fetch(API("/trending/backfill-media?only_missing=true"), {
+        method: "POST", headers,
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        toastErr(d.detail || "触发失败");
+        return;
+      }
+      // 后台异步执行；轮询刷新
+      for (let i = 0; i < 6; i++) {
+        await new Promise((res) => setTimeout(res, 8000));
+        await load();
+      }
+    } finally {
+      setBackfilling(false);
+    }
+  };
+
+  const clearAll = async () => {
+    if (posts.length === 0) return;
+    const ok = window.confirm(
+      `确认清空当前所有 ${posts.length} 条抖音热门内容？\n\n此操作不可恢复，但下次抓取仍会重新写入新数据。`,
+    );
+    if (!ok) return;
+    setClearing(true);
+    try {
+      const r = await fetch(API("/trending?platform=douyin"), { method: "DELETE", headers });
+      const d = await r.json();
+      if (!r.ok) {
+        toastErr(d.detail || "清空失败");
+        return;
+      }
+      toastOk(`已清空 ${d.deleted} 条抖音热门内容`);
+      setSelected(new Set());
+      await load();
+    } catch (e: any) {
+      toastErr(e?.message || "清空失败");
+    } finally {
+      setClearing(false);
+    }
   };
 
   const fmt = (n: number) => n >= 10000 ? `${(n / 10000).toFixed(1)}万` : String(n);
@@ -280,12 +327,22 @@ export default function DouyinTrendingPage() {
           </p>
         </div>
         <div className="flex gap-2 flex-wrap">
-          <TrendingSettingsButton />
+          <TrendingSettingsButton platform="douyin" />
           <PromptTemplatesButton token={token} />
           <Button variant="flat" startContent={<RefreshCw size={15} />}
             onPress={load} isLoading={loading} size="sm">刷新</Button>
+          <Button variant="flat" color="secondary" size="sm"
+            isLoading={backfilling}
+            onPress={backfillMedia}>
+            补全图片/视频
+          </Button>
           <Button color="primary" startContent={<Sparkles size={15} />}
             onPress={triggerCheck} isLoading={triggering} size="sm">立即抓取</Button>
+          <Button color="danger" variant="flat" startContent={<Trash2 size={15} />}
+            onPress={clearAll} isLoading={clearing}
+            isDisabled={posts.length === 0} size="sm">
+            清空
+          </Button>
         </div>
       </div>
 
@@ -309,7 +366,7 @@ export default function DouyinTrendingPage() {
             <EmptyState
               icon={TrendingUp}
               title="还没有抖音热门视频"
-              hint="请先在管理员页配置抖音账号 cookie 并设置 trending 关键词，然后点「立即抓取」拉取一次。"
+              hint="请先安装 TrendPulse Helper 浏览器扩展（在「我的浏览器扩展」页），并在浏览器登录抖音，然后在「监控设置」配置 trending 关键词后点「立即抓取」。"
               action={
                 <Button color="primary" startContent={<Sparkles size={14} />}
                   onPress={triggerCheck} isLoading={triggering}>

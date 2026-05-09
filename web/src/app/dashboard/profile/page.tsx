@@ -13,6 +13,7 @@ import { PromptTemplatesCard } from "@/components/PromptTemplatesCard";
 import { MonitorGroupsCard } from "@/components/MonitorGroupsCard";
 import { FeishuBindingCard } from "@/components/FeishuBindingCard";
 import { PlanUsageCard } from "@/components/PlanUsageCard";
+import { FeishuPushToggle } from "@/components/FeishuPushToggle";
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -342,6 +343,14 @@ export default function MonitorSettingsPage() {
 
       {/* 飞书 OAuth 绑定（推荐，自动建群 + 多维表格） */}
       <FeishuBindingCard />
+
+      {/* 飞书表格写入完成的通知（消息同步专属群，lazy 拉群） */}
+      <Card>
+        <CardHeader className="font-semibold">飞书消息同步</CardHeader>
+        <CardBody>
+          <FeishuPushToggle feature="bitable" />
+        </CardBody>
+      </Card>
 
       {/* Monitor Groups */}
       <MonitorGroupsCard token={token} />

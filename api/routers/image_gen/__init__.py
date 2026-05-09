@@ -305,7 +305,11 @@ async def sync_history_to_bitable(
     fail_count = len(results) - ok_count
     synced_rows = len({r.get("set_key") for r in results if r.get("ok") and r.get("set_key")})
 
-    chat_id = (current_user.get("feishu_chat_id") or "").strip() if current_user else ""
+    # per-feature 推送：bitable 同步通知到「消息同步」专属群（开关开 + lazy 建群）
+    chat_id = ""
+    if ok_count > 0 and current_user and current_user.get("bitable_push_enabled"):
+        from ...services.feishu import provisioning as _prov
+        chat_id = await _prov.ensure_feature_chat(current_user, "bitable") or ""
     if ok_count > 0 and chat_id:
         try:
             from ...services.feishu import bitable as feishu_bitable_v2_2

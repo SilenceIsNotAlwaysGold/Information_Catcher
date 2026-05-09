@@ -205,6 +205,33 @@ async def unbind(current_user: dict = Depends(get_current_user)) -> dict:
     return {"ok": True}
 
 
+# ── per-feature 专属群（trending / creator / bitable）─────────────────────────
+
+@router.post("/feature-chat/{feature}/recreate", summary="重建 per-feature 专属群")
+async def recreate_feature_chat(
+    feature: str,
+    platform: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """重建 trending / creator（按 platform 分群）/ bitable（单群）的专属通知群。
+
+    `feature` ∈ {trending, creator, bitable}
+    `platform` 仅在 trending / creator 必传，∈ {xhs, douyin, mp}
+    """
+    if feature not in ("trending", "creator", "bitable"):
+        raise HTTPException(400, f"未知 feature：{feature}")
+    if feature in ("trending", "creator") and platform not in ("xhs", "douyin", "mp"):
+        raise HTTPException(400, "trending / creator 必须指定 platform=xhs|douyin|mp")
+    if not (current_user.get("feishu_open_id") or "").strip():
+        raise HTTPException(400, "请先绑定飞书账号")
+    chat_id = await feishu_provisioning.ensure_feature_chat(
+        current_user, feature, platform=platform, force_recreate=True,
+    )
+    if not chat_id:
+        raise HTTPException(502, "建群失败，请检查机器人能力是否启用 / 权限是否齐全")
+    return {"ok": True, "chat_id": chat_id, "feature": feature, "platform": platform or ""}
+
+
 @router.post("/reprovision", summary="重建群 / 多维表格（兜底，绑定时部分失败可手动补做）")
 async def reprovision(
     force: bool = False,
