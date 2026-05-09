@@ -84,13 +84,14 @@ def _extract_aweme_id_from_url(url: str) -> Optional[str]:
         return None
     host = (p.hostname or "").lower()
     parts = [seg for seg in p.path.strip("/").split("/") if seg]
-    # www.douyin.com/video/{id}
-    if "douyin.com" in host and len(parts) >= 2 and parts[0] == "video":
+    # www.douyin.com/video/{id} 或 www.douyin.com/note/{id}（图文笔记）
+    # 抖音内部视频笔记和图文笔记共用 aweme_id 体系，详情接口通用
+    if "douyin.com" in host and len(parts) >= 2 and parts[0] in ("video", "note"):
         return parts[1]
-    # iesdouyin.com/share/video/{id}/
-    if "iesdouyin.com" in host and len(parts) >= 3 and parts[0] == "share" and parts[1] == "video":
+    # iesdouyin.com/share/video/{id}/ 或 iesdouyin.com/share/note/{id}/
+    if "iesdouyin.com" in host and len(parts) >= 3 and parts[0] == "share" and parts[1] in ("video", "note"):
         return parts[2]
-    # discovery / note 等其他形态可拓展
+    # discovery 等其他形态可拓展
     return None
 
 
