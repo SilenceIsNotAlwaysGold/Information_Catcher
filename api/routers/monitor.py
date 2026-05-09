@@ -1,6 +1,7 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from pydantic import BaseModel
 
 from ..schemas.monitor import (
     AddPostsRequest,
@@ -592,11 +593,13 @@ async def check_creator(
     try:
         posts = await plat.fetch_creator_posts(creator["creator_url"], account=use_account)
     except NotImplementedError as e:
+        await db.mark_creator_status(creator_id, "error", "平台抓取未实现")
         raise HTTPException(
             status_code=501,
             detail=f"{creator['platform']} 博主追新尚未实现（依赖 #13 抖音账号系统 / #15 抖音追新 / 后续 XHS）。当前订阅记录已保存，等实现后自动启用。",
         )
     except Exception as e:
+        await db.mark_creator_status(creator_id, "error", str(e))
         raise HTTPException(status_code=502, detail=f"抓取失败：{e}")
     # 把新帖子加到该用户的「我的关注」分组
     new_count = 0
@@ -624,7 +627,33 @@ async def check_creator(
         creator_id, last_post_id=newest,
         creator_name=(posts[0].get("creator_name", "") if posts else ""),
     )
+    # 健康度 + 未读：跟 scheduler 路径同语义
+    if not posts and use_account and use_account.get("cookie") and last_post_id:
+        await db.mark_creator_status(
+            creator_id, "cookie_invalid",
+            "抓取返回 0 帖，cookie 可能失效",
+        )
+    else:
+        await db.mark_creator_status(creator_id, "ok")
+    if new_count:
+        await db.add_creator_unread(creator_id, new_count)
     return {"ok": True, "fetched": len(posts), "added": new_count}
+
+
+class _SeenReq(BaseModel):
+    creator_ids: Optional[list[int]] = None  # 不给 = 全部已读
+
+
+@router.post("/creators/seen", summary="标记博主已读（清未读计数）")
+async def mark_creators_seen(
+    req: _SeenReq,
+    current_user: dict = Depends(get_current_user),
+):
+    """前端进入博主追新页面时调用，把展示的博主未读清零。"""
+    affected = await db.mark_creators_seen(
+        user_id=current_user["id"], creator_ids=req.creator_ids,
+    )
+    return {"ok": True, "affected": affected}
 
 
 # ── Lives / 直播间监控 v1 ───────────────────────────────────────────────────

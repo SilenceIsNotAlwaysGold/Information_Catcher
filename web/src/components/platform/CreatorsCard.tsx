@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
 import { Chip } from "@nextui-org/chip";
 import { Input } from "@nextui-org/input";
+import { Tooltip } from "@nextui-org/tooltip";
 import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
 } from "@nextui-org/modal";
-import { Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Plus, RefreshCw } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { CreatorRow, PlatformKey, PLATFORM_LABEL } from "./types";
 import { toastOk, toastErr } from "@/lib/toast";
@@ -17,10 +18,11 @@ import { confirmDialog } from "@/components/ConfirmDialog";
 /**
  * 通用「博主追新」卡片组件，三个平台共用。
  *
- * 使用：<CreatorsCard platform="xhs" />
- * - 列出当前用户在该平台订阅的所有博主
- * - 加 / 删 / 立即抓取
- * - 文案根据 platform 不同（XHS/抖音用「博主主页 URL」，公众号用「公众号名称」）
+ * v2：
+ * - chip 颜色按 last_check_status 区分（ok=绿 / no_account=橙 / cookie_invalid=红 / error=黄）
+ * - chip 显示未读数 (unread_count)，按"未读 + 最近发帖"排序（后端已排）
+ * - tooltip 展示上次检查时间 / 状态 / 错误说明
+ * - 列表展示后自动调 POST /creators/seen 清零未读（避免反复显示）
  */
 export function CreatorsCard({ platform }: { platform: PlatformKey }) {
   const { token } = useAuth();
@@ -28,6 +30,8 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
 
   const [creators, setCreators] = useState<CreatorRow[]>([]);
   const [loading, setLoading] = useState(true);
+  // 用 ref 记录已经"标记已读"过的 creator id，避免每次 setState 又触发重复 POST
+  const seenIdsRef = useRef<Set<number>>(new Set());
 
   const followModal = useDisclosure();
   const [followInput, setFollowInput] = useState("");
@@ -41,7 +45,23 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
       const r = await fetch(`/api/monitor/creators`, { headers });
       if (r.ok) {
         const d = await r.json();
-        setCreators((d.creators || []).filter((c: CreatorRow) => c.platform === platform));
+        const list = ((d.creators || []) as CreatorRow[]).filter(
+          (c) => c.platform === platform,
+        );
+        setCreators(list);
+
+        // 该平台下"有未读且本次会话还没标记过"的 creator → 一次性 POST 清零
+        const toMark = list
+          .filter((c) => (c.unread_count || 0) > 0 && !seenIdsRef.current.has(c.id))
+          .map((c) => c.id);
+        if (toMark.length) {
+          toMark.forEach((id) => seenIdsRef.current.add(id));
+          // fire-and-forget
+          fetch(`/api/monitor/creators/seen`, {
+            method: "POST", headers,
+            body: JSON.stringify({ creator_ids: toMark }),
+          }).catch(() => {});
+        }
       }
     } finally {
       setLoading(false);
@@ -108,6 +128,8 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
     if (r.ok) {
       const d = await r.json();
       toastOk(`刷新完成：抓到 ${d.fetched || 0} 篇，新增 ${d.added || 0} 篇`);
+      // 手动刷新会带新 unread → 立刻再清零（用户主动操作就视为已读）
+      seenIdsRef.current.delete(cid);
       await load();
     } else {
       const j = await r.json().catch(() => ({}));
@@ -147,24 +169,58 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
             <p className="text-sm text-default-400">还没有订阅任何博主</p>
           ) : (
             <div className="flex flex-row gap-2 flex-wrap">
-              {creators.map((c) => (
-                <Chip key={c.id} size="sm" variant="dot" color="success"
-                  onClose={() => unfollow(c.id)}
-                  endContent={
-                    <Button size="sm" variant="light" isIconOnly
-                      onPress={() => checkOne(c.id)}
-                      className="ml-1 min-w-0 w-5 h-5">
-                      <RefreshCw size={11} />
-                    </Button>
+              {creators.map((c) => {
+                const status = c.last_check_status || "unknown";
+                const unread = c.unread_count || 0;
+                // chip 配色：失效=红、无账号=橙、错=黄、ok/未知=绿
+                const color: any =
+                  status === "cookie_invalid" ? "danger"
+                  : status === "no_account"   ? "warning"
+                  : status === "error"        ? "warning"
+                  :                              "success";
+                const statusText =
+                  status === "cookie_invalid" ? "账号 Cookie 失效（去账号管理重新登录）"
+                  : status === "no_account"   ? "缺少可用账号 cookie，无法追新"
+                  : status === "error"        ? "上次抓取出错"
+                  : status === "ok"           ? "抓取正常"
+                  :                              "尚未运行过";
+
+                const tipLines: string[] = [];
+                tipLines.push(`状态：${statusText}`);
+                if (c.last_check_at) tipLines.push(`上次检查：${c.last_check_at}`);
+                if (c.last_post_at)  tipLines.push(`最近发帖：${c.last_post_at.slice(5, 16)}`);
+                if (c.last_check_error) tipLines.push(`错误：${c.last_check_error}`);
+
+                return (
+                  <Tooltip key={c.id} content={
+                    <div className="text-xs whitespace-pre-line max-w-xs">
+                      {tipLines.join("\n")}
+                    </div>
                   }>
-                  {c.creator_name || c.creator_url}
-                  {c.last_check_at && (
-                    <span className="text-[10px] text-default-400 ml-1">
-                      · {c.last_check_at.slice(5, 16)}
-                    </span>
-                  )}
-                </Chip>
-              ))}
+                    <Chip size="sm" variant="dot" color={color}
+                      onClose={() => unfollow(c.id)}
+                      endContent={
+                        <Button size="sm" variant="light" isIconOnly
+                          onPress={() => checkOne(c.id)}
+                          className="ml-1 min-w-0 w-5 h-5">
+                          <RefreshCw size={11} />
+                        </Button>
+                      }>
+                      {c.creator_name || c.creator_url}
+                      {unread > 0 && (
+                        <span className="ml-1 px-1.5 py-px rounded-full bg-success-100 text-success-700 text-[10px] font-semibold">
+                          {unread} 新
+                        </span>
+                      )}
+                      {!unread && c.last_post_at && (
+                        <span className="text-[10px] text-default-400 ml-1">
+                          · {c.last_post_at.slice(5, 16)}
+                        </span>
+                      )}
+                    </Chip>
+                  </Tooltip>
+                );
+              })}
             </div>
           )}
         </CardBody>

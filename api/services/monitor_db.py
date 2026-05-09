@@ -681,6 +681,12 @@ async def _migrate(db):
     # CookieBridge 浏览器扩展同步 cookie 的时间戳与来源
     await _ensure_column(db, "monitor_accounts", "cookie_synced_at", "TEXT DEFAULT ''")
     await _ensure_column(db, "monitor_accounts", "cookie_synced_via", "TEXT DEFAULT ''")
+    # 博主追新健康度 + 未读：让列表能区分"挂了 / 卡 cookie / 有新内容"
+    await _ensure_column(db, "monitor_creators", "last_check_status", "TEXT DEFAULT 'unknown'")
+    await _ensure_column(db, "monitor_creators", "last_check_error",  "TEXT DEFAULT ''")
+    await _ensure_column(db, "monitor_creators", "last_post_at",      "TEXT DEFAULT ''")
+    await _ensure_column(db, "monitor_creators", "unread_count",      "INTEGER DEFAULT 0")
+    await _ensure_column(db, "monitor_creators", "last_seen_at",      "TEXT DEFAULT ''")
     # post grouping: 'own' = my posts, 'observe' = others' posts (legacy)
     await _ensure_column(db, "monitor_posts", "post_type", "TEXT DEFAULT 'observe'")
     # Track per-post fetch outcome so the UI can flag XHS-locked / deleted notes.
@@ -1395,12 +1401,21 @@ async def add_creator(
 
 
 async def list_creators(user_id: Optional[int] = None) -> List[Dict]:
+    """订阅博主列表。
+
+    排序：未读 > 0 优先 → 最近发帖时间倒序 → id 倒序。
+    意图：进入页面就一眼看到「有新内容的、最近活跃的」博主。
+    """
     sql = "SELECT * FROM monitor_creators WHERE is_active=1"
     params: list = []
     if user_id is not None:
         sql += " AND user_id=?"
         params.append(user_id)
-    sql += " ORDER BY id DESC"
+    sql += (
+        " ORDER BY CASE WHEN COALESCE(unread_count,0)>0 THEN 0 ELSE 1 END,"
+        "          COALESCE(last_post_at,'') DESC,"
+        "          id DESC"
+    )
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
@@ -1430,6 +1445,68 @@ async def update_creator_check(creator_id: int, last_post_id: str = "", creator_
         vals.append(creator_id)
         await db.execute(f"UPDATE monitor_creators SET {','.join(sets)} WHERE id=?", vals)
         await db.commit()
+
+
+async def mark_creator_status(
+    creator_id: int, status: str, error: str = "",
+) -> None:
+    """记录上次抓取的健康状态：ok | no_account | cookie_invalid | error。
+
+    前端用这个字段给 chip 着色，让用户一眼看到"哪些博主挂了"。
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE monitor_creators SET last_check_status=?, last_check_error=?, "
+            "last_check_at=datetime('now','localtime') WHERE id=?",
+            (status, (error or "")[:300], creator_id),
+        )
+        await db.commit()
+
+
+async def add_creator_unread(
+    creator_id: int, delta: int, last_post_at: str = "",
+) -> None:
+    """新发现 N 篇新帖时累加未读 + 刷新最近发帖时间。
+
+    排序逻辑依赖 last_post_at：哪个博主最新发帖，就排前面。
+    """
+    if delta <= 0:
+        return
+    now_iso = last_post_at or datetime.now().isoformat(timespec="seconds")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE monitor_creators SET "
+            "  unread_count = COALESCE(unread_count,0)+?, "
+            "  last_post_at = ? "
+            "WHERE id=?",
+            (delta, now_iso, creator_id),
+        )
+        await db.commit()
+
+
+async def mark_creators_seen(
+    user_id: Optional[int], creator_ids: Optional[List[int]] = None,
+) -> int:
+    """把指定博主的未读清零（用户访问列表/帖子页时调）。
+
+    creator_ids 不给则清零该用户所有 creator。返回受影响行数。
+    """
+    sql = (
+        "UPDATE monitor_creators SET unread_count=0, "
+        "last_seen_at=datetime('now','localtime') "
+        "WHERE COALESCE(unread_count,0)>0"
+    )
+    params: list = []
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params.append(user_id)
+    if creator_ids:
+        sql += " AND id IN (" + ",".join("?" * len(creator_ids)) + ")"
+        params.extend(creator_ids)
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(sql, params)
+        await db.commit()
+        return cur.rowcount or 0
 
 
 async def add_live(

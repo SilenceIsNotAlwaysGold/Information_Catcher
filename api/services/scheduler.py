@@ -493,6 +493,21 @@ async def run_creator_check():
     # 每个用户的抖音/XHS 账号缓存（追新需要登录账号）
     douyin_accounts_by_uid: dict = {}
     xhs_accounts_by_uid: dict = {}
+    # 用户级推送渠道缓存（飞书 chat_id / webhook、企微 webhook）
+    user_channels: dict = {}
+    from . import auth_service as _auth
+
+    def _channels(uid):
+        if uid in user_channels:
+            return user_channels[uid]
+        u = _auth.get_user_by_id(uid) if uid else {}
+        ch = (
+            (u or {}).get("wecom_webhook_url", "") or "",
+            (u or {}).get("feishu_webhook_url", "") or "",
+            (u or {}).get("feishu_chat_id", "") or "",
+        )
+        user_channels[uid] = ch
+        return ch
 
     for ck in sorted_keys:
         creator = creator_by_key[ck]
@@ -512,7 +527,10 @@ async def run_creator_check():
                 )
             account = douyin_accounts_by_uid.get(uid)
             if not account:
-                continue  # 没账号直接跳过
+                await db.mark_creator_status(
+                    creator["id"], "no_account", "无可用抖音账号 cookie",
+                )
+                continue
         elif creator.get("platform") == "xhs":
             if uid not in xhs_accounts_by_uid:
                 accs = await db.get_accounts(
@@ -523,22 +541,51 @@ async def run_creator_check():
                 )
             account = xhs_accounts_by_uid.get(uid)
             if not account:
-                continue  # 没账号直接跳过
+                await db.mark_creator_status(
+                    creator["id"], "no_account", "无可用小红书账号 cookie",
+                )
+                continue
+        # 账号 cookie 状态硬过期就别用（fast path 走 risk control）
+        if account and account.get("cookie_status") == "expired":
+            await db.mark_creator_status(
+                creator["id"], "cookie_invalid",
+                f"账号 '{account.get('name')}' cookie 已失效",
+            )
+            continue
 
         await db.cursor_mark_running("creator", ck)
         try:
             posts = await plat.fetch_creator_posts(creator["creator_url"], account=account)
         except NotImplementedError:
             await db.cursor_mark_failed("creator", ck, "platform NotImplementedError")
+            await db.mark_creator_status(creator["id"], "error", "平台抓取未实现")
             continue
         except Exception as e:
             logger.error(f"[creator_check] {creator['creator_url']} error: {e}")
             await db.cursor_mark_failed("creator", ck, str(e))
+            await db.mark_creator_status(creator["id"], "error", str(e))
             continue
 
+        # 抓回 0 帖且账号已带 cookie：大概率 cookie 失效（XHS 跳登录墙）
+        # 如果是首次订阅（last_post_id 为空），给条警告但不打 cookie_invalid
         last_post_id = creator.get("last_post_id") or ""
+        if not posts and account and account.get("cookie"):
+            if last_post_id:
+                # 之前抓到过，现在 0 帖更可疑 → 标失效
+                await db.mark_creator_status(
+                    creator["id"], "cookie_invalid",
+                    "抓取返回 0 帖，cookie 可能失效或博主主页无内容",
+                )
+            else:
+                await db.mark_creator_status(
+                    creator["id"], "error", "首次抓取返回 0 帖",
+                )
+            await db.cursor_mark_done("creator", ck)
+            continue
+
         newest = last_post_id
         added = 0
+        new_posts: list = []
         for p in posts:
             pid = p.get("post_id")
             if not pid:
@@ -555,6 +602,7 @@ async def run_creator_check():
                     platform=plat.name,
                 )
                 added += 1
+                new_posts.append(p)
                 if not newest:
                     newest = pid
             except Exception as e:
@@ -565,8 +613,29 @@ async def run_creator_check():
             creator_name=(posts[0].get("creator_name", "") if posts else ""),
         )
         await db.cursor_mark_done("creator", ck, cursor=newest or "")
+        await db.mark_creator_status(creator["id"], "ok")
         if added:
-            logger.info(f"[creator_check] {creator.get('creator_name') or creator['creator_url']} +{added} 新帖")
+            await db.add_creator_unread(creator["id"], added)
+            logger.info(
+                f"[creator_check] {creator.get('creator_name') or creator['creator_url']} +{added} 新帖"
+            )
+            # 用户级飞书/企微推送：博主新发就告警
+            wecom_url, feishu_url, chat_id = _channels(uid)
+            if wecom_url or feishu_url or chat_id:
+                try:
+                    await notifier.notify_creator_new_posts(
+                        wecom_url, feishu_url,
+                        creator_name=(
+                            creator.get("creator_name")
+                            or (new_posts[0].get("creator_name") if new_posts else "")
+                            or creator.get("creator_url", "")
+                        ),
+                        platform=plat.name,
+                        posts=new_posts,
+                        feishu_chat_id=chat_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"[creator_check] notify failed: {e}")
 
 
 async def run_live_check():

@@ -188,6 +188,40 @@ async def notify_new_comments(
                 feishu_chat_id=feishu_chat_id)
 
 
+# ── Creator new posts alert ──────────────────────────────────────────────────
+
+async def notify_creator_new_posts(
+    wecom_url: str,
+    feishu_url: str,
+    creator_name: str,
+    platform: str,
+    posts: List[Dict],
+    feishu_chat_id: str = "",
+) -> None:
+    """关注的博主发了新内容，给用户的飞书/企微推送一条。
+
+    posts 项需含 post_id / title / url / xsec_token（XHS）。
+    """
+    if not posts:
+        return
+    label = {"xhs": "小红书", "douyin": "抖音", "mp": "公众号"}.get(platform, platform)
+    title_line = f"**{creator_name or '博主'}** ({label}) 发布了 {len(posts)} 篇新内容"
+    lines = [title_line, ""]
+    for i, p in enumerate(posts[:5], 1):
+        t = (p.get("title") or p.get("post_id", ""))[:40]
+        url = p.get("url") or _note_link(
+            p.get("post_id", ""), p.get("xsec_token", ""),
+        )
+        lines.append(f"{i}. [{t}]({url})")
+    if len(posts) > 5:
+        lines.append(f"\n（仅展示前 5 条，共 {len(posts)} 条）")
+    await _push(
+        wecom_url, feishu_url, "博主发新内容",
+        "\n".join(lines), template="green",
+        feishu_chat_id=feishu_chat_id,
+    )
+
+
 # ── Cookie health alert ──────────────────────────────────────────────────────
 
 async def notify_cookie_expired(
