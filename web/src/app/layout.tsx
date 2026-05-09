@@ -3,8 +3,8 @@ import { Providers } from "./providers";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Pulse",
-  description: "Social media post monitor",
+  title: "TrendPulse",
+  description: "TrendPulse — 多平台爆款监控 + 内容创作 SaaS",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

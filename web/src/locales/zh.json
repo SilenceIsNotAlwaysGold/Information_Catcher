@@ -1,6 +1,6 @@
 {
   "common": {
-    "appName": "Pulse",
+    "appName": "TrendPulse",
     "version": "v1.0.0",
     "login": "登录",
     "logout": "退出登录",
@@ -39,7 +39,7 @@
     "todayData": "今日新增",
     "viewAll": "查看全部",
     "openLink": "打开链接",
-    "copyright": "Pulse © 2025",
+    "copyright": "TrendPulse © 2026",
     "profile": "个人资料",
     "publishNote": "发布笔记"
   },

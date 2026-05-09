@@ -25,14 +25,14 @@ function inferTopbarTitle(pathname: string): string {
   if (pathname === "/dashboard" || pathname === "/dashboard/") return "概览";
   const parts = pathname.split("/").filter(Boolean); // ["dashboard", "<seg>", ...]
   const seg = parts[1];
-  if (!seg) return "Pulse";
+  if (!seg) return "TrendPulse";
   if (seg in PLATFORM_LABEL) return PLATFORM_LABEL[seg as PlatformKey];
   if (seg === "import") return "数据导入";
   if (seg === "monitor") return "设置";
   if (seg === "admin") return "管理员控制台";
   if (seg === "publish") return "发布";
   if (seg === "trending") return "热门内容";
-  return "Pulse";
+  return "TrendPulse";
 }
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {

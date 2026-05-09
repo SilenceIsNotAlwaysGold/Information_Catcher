@@ -43,10 +43,12 @@ export default function LoginPage() {
         {/* Logo */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-primary mb-4 shadow-lg shadow-primary/30">
-            <span className="text-white font-bold text-xl">P</span>
+            <span className="text-2xl">🪐</span>
           </div>
-          <h1 className="text-2xl font-bold text-gray-900">Pulse</h1>
-          <p className="text-sm text-gray-400 mt-1">帖子数据监控平台</p>
+          <h1 className="text-2xl font-bold text-gray-900 tracking-tight">
+            Trend<span className="text-primary">Pulse</span>
+          </h1>
+          <p className="text-sm text-gray-400 mt-1">多平台爆款监控 + 内容创作 SaaS</p>
         </div>
 
         {/* Form */}
@@ -91,7 +93,7 @@ export default function LoginPage() {
           </div>
         </div>
 
-        <p className="text-center text-xs text-gray-300 mt-6">Pulse © 2025</p>
+        <p className="text-center text-xs text-gray-300 mt-6">TrendPulse © 2026</p>
       </div>
     </div>
   );

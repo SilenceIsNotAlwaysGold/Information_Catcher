@@ -1,6 +1,6 @@
 {
   "common": {
-    "appName": "Pulse",
+    "appName": "TrendPulse",
     "version": "v1.0.0",
     "login": "Login",
     "logout": "Logout",
@@ -39,7 +39,7 @@
     "todayData": "Today",
     "viewAll": "View All",
     "openLink": "Open Link",
-    "copyright": "LittleCrawler © 2025 - Multi-platform Social Media Crawler",
+    "copyright": "TrendPulse © 2026",
     "profile": "Profile",
     "publishNote": "Publish Note"
   },

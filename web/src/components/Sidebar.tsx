@@ -206,7 +206,9 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps = {}
       <div className="h-16 flex items-center justify-between md:justify-center lg:justify-start px-4 border-b border-divider gap-2">
         <div className="flex items-center gap-2">
           <span className="text-2xl">🪐</span>
-          <span className="hidden max-md:block lg:block font-bold text-base text-foreground">Pulse</span>
+          <span className="hidden max-md:block lg:block font-bold text-base text-foreground tracking-tight">
+            Trend<span className="text-primary">Pulse</span>
+          </span>
         </div>
         <button
           type="button"
@@ -224,28 +226,28 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps = {}
             const isCollapsible = blk.module !== "common";
             const isOpen = !isCollapsible || !collapsed[blk.module];
             return (
-              <div key={bi} className="mb-1">
+              <div key={bi} className={isCollapsible ? "mt-3 mb-1" : "mb-1"}>
                 {isCollapsible && (
                   <button
                     type="button"
                     onClick={() => toggle(blk.module)}
-                    className="hidden max-md:flex lg:flex w-full items-center gap-2 px-3 pt-2 pb-1 text-left
-                               hover:bg-default-100 rounded transition-colors"
+                    className="hidden max-md:flex lg:flex w-full items-center gap-2.5 px-3 py-2 text-left
+                               text-default-700 hover:bg-default-100 rounded-lg transition-colors group"
                   >
-                    {isOpen
-                      ? <ChevronDown size={12} className="text-default-400" />
-                      : <ChevronRight size={12} className="text-default-400" />}
-                    <span className="shrink-0 scale-75 origin-left">
+                    <span className="shrink-0 text-default-500 group-hover:text-default-700 transition-colors">
                       {GROUP_ICON[blk.module as Exclude<ModuleId, "common">]}
                     </span>
-                    <span className="text-[10px] font-semibold text-default-400 uppercase tracking-wider">
+                    <span className="text-sm font-semibold flex-1">
                       {GROUP_LABEL[blk.module as Exclude<ModuleId, "common">]}
                     </span>
                     {blk.items[0]?.wip && (
-                      <Chip size="sm" variant="flat" color="default" className="h-4 px-1 text-[10px] ml-1">
-                        开发中
+                      <Chip size="sm" variant="flat" color="warning" className="h-5 px-1.5 text-[10px]">
+                        WIP
                       </Chip>
                     )}
+                    {isOpen
+                      ? <ChevronDown size={14} className="text-default-400 shrink-0" />
+                      : <ChevronRight size={14} className="text-default-400 shrink-0" />}
                   </button>
                 )}
                 {/* 子项：折叠时仅在 lg 屏隐藏；移动端 drawer 内（max-md）按宽态显示 */}
