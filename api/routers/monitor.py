@@ -571,6 +571,29 @@ async def delete_creator(
     return {"ok": True}
 
 
+class CreatorSettingsRequest(BaseModel):
+    push_enabled: Optional[bool] = None
+    fetch_interval_minutes: Optional[int] = None
+
+
+@router.put("/creators/{creator_id}/settings", summary="更新博主追新设置（推送开关 / 抓取频率）")
+async def update_creator_settings_route(
+    creator_id: int,
+    body: CreatorSettingsRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    if body.fetch_interval_minutes is not None and body.fetch_interval_minutes < 5:
+        raise HTTPException(status_code=400, detail="抓取频率最低 5 分钟")
+    ok = await db.update_creator_settings(
+        creator_id, user_id=int(current_user["id"]),
+        push_enabled=body.push_enabled,
+        fetch_interval_minutes=body.fetch_interval_minutes,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="博主不存在或无权操作")
+    return {"ok": True}
+
+
 @router.post("/creators/{creator_id}/check", summary="立刻抓取博主新发帖（手动触发，走扩展通道）")
 async def check_creator(
     creator_id: int,
@@ -1135,6 +1158,9 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     base["trending_enabled"] = "1" if me.get("trending_enabled") else "0"
     base["trending_min_likes"] = str(me.get("trending_min_likes") or 1000)
     base["trending_max_per_keyword"] = str(me.get("trending_max_per_keyword") or 30)
+    # 用户级抓取频率（0 = 跟随全局 check_interval_minutes）
+    base["monitor_interval_minutes"] = str(me.get("monitor_interval_minutes") or 0)
+    base["trending_interval_minutes"] = str(me.get("trending_interval_minutes") or 0)
     return base
 
 
@@ -1159,13 +1185,17 @@ async def update_settings(
     # 不再写到全局 monitor_settings；trending_account_ids 仍然全局（admin 配共享池）。
     if (req.trending_keywords is not None or req.trending_enabled is not None
             or req.trending_min_likes is not None
-            or req.trending_max_per_keyword is not None):
+            or req.trending_max_per_keyword is not None
+            or req.monitor_interval_minutes is not None
+            or req.trending_interval_minutes is not None):
         auth_service.update_user_trending(
             current_user["id"],
             keywords=req.trending_keywords,
             enabled=req.trending_enabled,
             min_likes=req.trending_min_likes,
             max_per_keyword=req.trending_max_per_keyword,
+            monitor_interval_minutes=req.monitor_interval_minutes,
+            trending_interval_minutes=req.trending_interval_minutes,
         )
 
     simple_fields = [

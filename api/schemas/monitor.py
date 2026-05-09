@@ -188,6 +188,8 @@ class UpdateSettingsRequest(BaseModel):
     trending_keywords: Optional[str] = None
     trending_min_likes: Optional[int] = None
     trending_max_per_keyword: Optional[int] = None  # 单关键词单次抓取目标数量（1-200）
+    monitor_interval_minutes: Optional[int] = None   # 用户级监控帖子频率（0=跟全局）
+    trending_interval_minutes: Optional[int] = None  # 用户级热门抓取频率（0=跟全局）
     trending_account_ids: Optional[str] = None
     comments_fetch_enabled: Optional[bool] = None
     newrank_api_key: Optional[str] = None

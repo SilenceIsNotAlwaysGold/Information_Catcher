@@ -107,6 +107,11 @@ def init_user_db():
     # 单关键词单次抓取的目标数量（默认 30；admin 可设到 200，普通用户 1-100）
     # 后端会按此值算 pages = ceil(N/18)，抓完 truncate 到 N 条
     _ensure_column(cursor, "users", "trending_max_per_keyword", "INTEGER DEFAULT 30")
+    # 用户级抓取频率覆盖（分钟）。0 = 跟随全局 check_interval_minutes；
+    # > 0 = 用户自定义（必须 ≥ 全局，否则全局 job 跑不到那么频繁）
+    # 设计：admin 控制全局 baseline 决定最快频率；用户能调慢减少风控暴露
+    _ensure_column(cursor, "users", "monitor_interval_minutes",  "INTEGER DEFAULT 0")
+    _ensure_column(cursor, "users", "trending_interval_minutes", "INTEGER DEFAULT 0")
 
     # 飞书 OAuth 自动绑定（每个用户独立的群 + 多维表格）
     # access_token 约 2h 过期，refresh_token 约 30 天；30 天内静默 refresh，超期需重新 OAuth
@@ -349,6 +354,8 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "       COALESCE(trending_enabled,0)     AS trending_enabled, "
         "       COALESCE(trending_min_likes,1000) AS trending_min_likes, "
         "       COALESCE(trending_max_per_keyword,30) AS trending_max_per_keyword, "
+        "       COALESCE(monitor_interval_minutes,0)  AS monitor_interval_minutes, "
+        "       COALESCE(trending_interval_minutes,0) AS trending_interval_minutes, "
         "       COALESCE(feishu_open_id,'')                   AS feishu_open_id, "
         "       COALESCE(feishu_user_access_token,'')         AS feishu_user_access_token, "
         "       COALESCE(feishu_refresh_token,'')             AS feishu_refresh_token, "
@@ -392,6 +399,8 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "trending_enabled":   bool(row["trending_enabled"]),
         "trending_min_likes": int(row["trending_min_likes"] or 1000),
         "trending_max_per_keyword": int(row["trending_max_per_keyword"] or 30),
+        "monitor_interval_minutes":  int(row["monitor_interval_minutes"] or 0),
+        "trending_interval_minutes": int(row["trending_interval_minutes"] or 0),
         "feishu_open_id":                   row["feishu_open_id"] or "",
         "feishu_user_access_token":         row["feishu_user_access_token"] or "",
         "feishu_refresh_token":             row["feishu_refresh_token"] or "",
@@ -439,8 +448,10 @@ def update_user_trending(
     enabled: Optional[bool] = None,
     min_likes: Optional[int] = None,
     max_per_keyword: Optional[int] = None,
+    monitor_interval_minutes: Optional[int] = None,
+    trending_interval_minutes: Optional[int] = None,
 ) -> None:
-    """用户更新自己的 trending 配置（关键词、是否启用、点赞阈值、单次抓取数量）。"""
+    """用户更新自己的抓取偏好（关键词、阈值、抓取频率等）。"""
     fields, values = [], []
     if keywords is not None:
         fields.append("trending_keywords = ?"); values.append(keywords)
@@ -450,7 +461,16 @@ def update_user_trending(
         fields.append("trending_min_likes = ?"); values.append(int(min_likes))
     if max_per_keyword is not None:
         fields.append("trending_max_per_keyword = ?")
-        values.append(max(1, min(int(max_per_keyword), 200)))  # 硬上限 200
+        values.append(max(1, min(int(max_per_keyword), 200)))
+    if monitor_interval_minutes is not None:
+        fields.append("monitor_interval_minutes = ?")
+        # 0 = 跟全局；>0 限制在 [1, 1440]（最大 24h）
+        v = int(monitor_interval_minutes)
+        values.append(0 if v <= 0 else max(1, min(v, 1440)))
+    if trending_interval_minutes is not None:
+        fields.append("trending_interval_minutes = ?")
+        v = int(trending_interval_minutes)
+        values.append(0 if v <= 0 else max(1, min(v, 1440)))
     if not fields:
         return
     values.append(user_id)
@@ -469,7 +489,8 @@ def list_users_with_trending() -> list:
         "SELECT id, username, "
         "       COALESCE(trending_keywords,'')   AS trending_keywords, "
         "       COALESCE(trending_min_likes,1000) AS trending_min_likes, "
-        "       COALESCE(trending_max_per_keyword,30) AS trending_max_per_keyword "
+        "       COALESCE(trending_max_per_keyword,30) AS trending_max_per_keyword, "
+        "       COALESCE(trending_interval_minutes,0) AS trending_interval_minutes "
         "FROM users WHERE COALESCE(trending_enabled,0)=1 AND COALESCE(is_active,1)=1"
     )
     rows = cur.fetchall()

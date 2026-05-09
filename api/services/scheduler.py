@@ -346,11 +346,60 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
         )
 
 
+async def _user_should_run(user_id: Optional[int], kind: str, user_interval_min: int) -> bool:
+    """判断该用户该 kind 是否到点跑。user_interval_min=0 表示跟随全局，永远跑。"""
+    if not user_id or user_interval_min <= 0:
+        return True
+    last_iso = await db.get_user_pace_last_run(user_id, kind)
+    if not last_iso:
+        return True
+    try:
+        from datetime import datetime as _dt
+        last = _dt.fromisoformat(last_iso)
+        elapsed = (_dt.now() - last).total_seconds() / 60.0
+        return elapsed >= user_interval_min
+    except Exception:
+        return True
+
+
+async def _filter_by_user_pace(items: list, *, kind: str) -> tuple[list, int]:
+    """按 user 级抓取频率过滤 items（必须含 user_id 字段）。返回 (留下的, 被跳数)。"""
+    from . import auth_service as _auth
+    by_uid: dict = {}
+    for it in items:
+        uid = it.get("user_id")
+        if uid is None:
+            by_uid.setdefault(None, []).append(it)
+            continue
+        by_uid.setdefault(uid, []).append(it)
+
+    interval_field = "monitor_interval_minutes" if kind == "monitor" else "trending_interval_minutes"
+    kept: list = []
+    skipped = 0
+    for uid, lst in by_uid.items():
+        if uid is None:
+            kept.extend(lst)
+            continue
+        u = _auth.get_user_by_id(uid) or {}
+        interval = int(u.get(interval_field) or 0)
+        if await _user_should_run(uid, kind, interval):
+            kept.extend(lst)
+        else:
+            skipped += len(lst)
+    return kept, skipped
+
+
 async def run_monitor():
     """Periodic job: check all active monitored posts."""
     settings = await db.get_all_settings()
 
     posts = await db.get_active_posts()
+    # 按用户级抓取频率过滤：用户配了 monitor_interval_minutes > 0 时，
+    # 距上次跑没到点的用户的所有帖子都跳过，到点的用户跑完更新 last_run。
+    # 配 0 = 跟全局，不过滤。
+    posts, paced_skipped = await _filter_by_user_pace(posts, kind="monitor")
+    if paced_skipped:
+        logger.info(f"[monitor] paced-skip {paced_skipped} posts (per-user interval not reached)")
     logger.info(f"[monitor] checking {len(posts)} posts")
 
     # Pre-load distinct accounts to avoid one DB query per post (N+1).
@@ -406,6 +455,13 @@ async def run_monitor():
                 logger.error(f"[monitor] error on {post['note_id']}: {e}")
 
     await asyncio.gather(*[_process(p) for p in posts])
+    # 给"本轮真正跑过帖子的用户"打个 last_run 时间戳
+    ran_uids = {p.get("user_id") for p in posts if p.get("user_id") is not None}
+    for uid in ran_uids:
+        try:
+            await db.mark_user_pace_run(uid, "monitor")
+        except Exception as e:
+            logger.warning(f"[monitor] mark_user_pace_run uid={uid} failed: {e}")
     if skipped:
         logger.info(f"[monitor] skipped {skipped} posts marked as dead (fail_count >= {db.DEAD_POST_FAIL_THRESHOLD})")
 
@@ -539,15 +595,30 @@ async def run_creator_check():
             online_cache[uid] = extension_dispatcher.has_online_extension(uid)
         return online_cache[uid]
 
+    # 解析每个博主自定义的间隔（push_enabled / fetch_interval_minutes 在 P9 引入）
+    import datetime as _dt
+    now = _dt.datetime.now()
+
     for ck in sorted_keys:
         creator = creator_by_key[ck]
         platform_name = creator.get("platform") or "xhs"
         uid = creator.get("user_id")
 
+        # 单博主自定义频率：到点了才跑（默认 60 分钟）
+        interval_min = int(creator.get("fetch_interval_minutes") or 60)
+        last_check_str = creator.get("last_check_at") or ""
+        if last_check_str:
+            try:
+                last_check = _dt.datetime.fromisoformat(last_check_str.replace(" ", "T"))
+                if (now - last_check).total_seconds() < interval_min * 60:
+                    continue  # 还没到点
+            except Exception:
+                pass
+
         if not _has_ext(uid):
             await db.mark_creator_status(
                 creator["id"], "no_extension",
-                "需要安装并连接 Pulse Helper 浏览器扩展，登录平台账号即可",
+                "需要安装并连接 TrendPulse Helper 浏览器扩展，登录平台账号即可",
             )
             continue
 
@@ -630,7 +701,11 @@ async def run_creator_check():
             logger.info(
                 f"[creator_check] {creator.get('creator_name') or creator['creator_url']} +{added} 新帖"
             )
-            # 用户级飞书/企微推送：博主新发就告警
+            # 单博主推送开关：用户在 dashboard 关掉的话，本次新帖只入库不推送
+            push_enabled = int(creator.get("push_enabled") if creator.get("push_enabled") is not None else 1)
+            if not push_enabled:
+                logger.info(f"[creator_check] {creator.get('creator_name')} 推送已关闭，仅入库")
+                continue
             wecom_url, feishu_url, chat_id = _channels(uid)
             if wecom_url or feishu_url or chat_id:
                 try:
@@ -914,6 +989,11 @@ async def run_trending_monitor(platform: Optional[str] = None, user_id: Optional
         uid = tu["id"]
         keywords_raw = (tu.get("trending_keywords") or "").strip()
         if not keywords_raw:
+            continue
+        # 用户级抓取频率：未到点跳过该用户（手动触发 user_id != None 时不过滤）
+        user_interval = int(tu.get("trending_interval_minutes") or 0)
+        if user_id is None and not await _user_should_run(uid, "trending", user_interval):
+            logger.debug(f"[trending] uid={uid} paced skip (interval={user_interval}min)")
             continue
         keywords = [k.strip() for k in keywords_raw.replace("，", ",").split(",") if k.strip()]
         min_likes = int(tu.get("trending_min_likes") or 1000)

@@ -108,12 +108,39 @@ INSERT OR IGNORE INTO monitor_settings VALUES ('trending_keywords', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('trending_min_likes', '1000');
 INSERT OR IGNORE INTO monitor_settings VALUES ('trending_enrich_desc', '1');
 INSERT OR IGNORE INTO monitor_settings VALUES ('trending_enrich_concurrency', '3');
+-- 是否优先走浏览器扩展通道（用户自己浏览器跑搜索，零封号风险）
+-- '1' = 用户在线扩展时优先走扩展，没扩展时跳过
+-- '0' = 永远走 cookie 账号通道（旧行为，封号风险）
+-- 'auto' = 用户在线扩展时走扩展，否则回退 cookie（混合）
+INSERT OR IGNORE INTO monitor_settings VALUES ('trending_via_extension', 'auto');
 -- Deprecated 2026-04: 观测帖子改为永远走匿名（app_share 通道），无需 cookie 兜底。
 -- 留 key 不删避免 SELECT 报错；新部署不会再读它。
 INSERT OR IGNORE INTO monitor_settings VALUES ('observe_use_cookie_fallback', '0');
 -- 第三方数据源（公众号 SaaS 集成）：填好后 mp 抓取自动走第三方 API 拿阅读数等
 INSERT OR IGNORE INTO monitor_settings VALUES ('newrank_api_key', '');
 INSERT OR IGNORE INTO monitor_settings VALUES ('newrank_api_base', 'https://api.newrank.cn');
+
+-- 浏览器扩展任务持久化队列。
+-- RPC 同步派单是常态；这张表用于：
+--   1. 离线时排队（用户扩展不在线，任务挂起，上线时调度器扫表派发）
+--   2. 失败重试（最多 3 次）
+--   3. 审计 / 任务历史
+CREATE TABLE IF NOT EXISTS ext_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    payload TEXT NOT NULL,            -- JSON
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | running | done | failed
+    result TEXT,                       -- JSON
+    error TEXT,
+    retries INTEGER DEFAULT 0,
+    max_retries INTEGER DEFAULT 3,
+    created_at INTEGER DEFAULT (strftime('%s','now')),
+    started_at INTEGER,
+    completed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_ext_tasks_pending ON ext_tasks(status, user_id);
+CREATE INDEX IF NOT EXISTS idx_ext_tasks_user ON ext_tasks(user_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS trending_posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -681,12 +708,22 @@ async def _migrate(db):
     # CookieBridge 浏览器扩展同步 cookie 的时间戳与来源
     await _ensure_column(db, "monitor_accounts", "cookie_synced_at", "TEXT DEFAULT ''")
     await _ensure_column(db, "monitor_accounts", "cookie_synced_via", "TEXT DEFAULT ''")
+    # remix v2：多张参考图（向后兼容，老任务仍用 ref_image_idx/ref_image_url 单值字段）
+    # 新任务：ref_image_idxs/urls 存 JSON list；worker 用 list 长度判断走多图逻辑
+    await _ensure_column(db, "remix_tasks", "ref_image_idxs", "TEXT DEFAULT ''")
+    await _ensure_column(db, "remix_tasks", "ref_image_urls", "TEXT DEFAULT ''")
     # 博主追新健康度 + 未读：让列表能区分"挂了 / 卡 cookie / 有新内容"
     await _ensure_column(db, "monitor_creators", "last_check_status", "TEXT DEFAULT 'unknown'")
     await _ensure_column(db, "monitor_creators", "last_check_error",  "TEXT DEFAULT ''")
     await _ensure_column(db, "monitor_creators", "last_post_at",      "TEXT DEFAULT ''")
     await _ensure_column(db, "monitor_creators", "unread_count",      "INTEGER DEFAULT 0")
     await _ensure_column(db, "monitor_creators", "last_seen_at",      "TEXT DEFAULT ''")
+    # P9: 每博主单独可配的推送 + 频率（覆盖全局 1h 默认）
+    await _ensure_column(db, "monitor_creators", "push_enabled",      "INTEGER DEFAULT 1")
+    await _ensure_column(db, "monitor_creators", "fetch_interval_minutes", "INTEGER DEFAULT 60")
+    # 博主头像 / 简介（卡片展示用）
+    await _ensure_column(db, "monitor_creators", "avatar_url",        "TEXT DEFAULT ''")
+    await _ensure_column(db, "monitor_creators", "last_post_title",   "TEXT DEFAULT ''")
     # post grouping: 'own' = my posts, 'observe' = others' posts (legacy)
     await _ensure_column(db, "monitor_posts", "post_type", "TEXT DEFAULT 'observe'")
     # Track per-post fetch outcome so the UI can flag XHS-locked / deleted notes.
@@ -1434,7 +1471,10 @@ async def delete_creator(creator_id: int, user_id: Optional[int] = None) -> None
         await db.commit()
 
 
-async def update_creator_check(creator_id: int, last_post_id: str = "", creator_name: str = "") -> None:
+async def update_creator_check(
+    creator_id: int, last_post_id: str = "", creator_name: str = "",
+    avatar_url: str = "", last_post_title: str = "",
+) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         sets = ["last_check_at=datetime('now','localtime')"]
         vals: list = []
@@ -1442,9 +1482,39 @@ async def update_creator_check(creator_id: int, last_post_id: str = "", creator_
             sets.append("last_post_id=?"); vals.append(last_post_id)
         if creator_name:
             sets.append("creator_name=?"); vals.append(creator_name)
+        if avatar_url:
+            sets.append("avatar_url=?"); vals.append(avatar_url)
+        if last_post_title:
+            sets.append("last_post_title=?"); vals.append(last_post_title)
         vals.append(creator_id)
         await db.execute(f"UPDATE monitor_creators SET {','.join(sets)} WHERE id=?", vals)
         await db.commit()
+
+
+async def update_creator_settings(
+    creator_id: int, *, user_id: int,
+    push_enabled: Optional[bool] = None,
+    fetch_interval_minutes: Optional[int] = None,
+) -> bool:
+    """更新博主的 per-creator 设置。返回是否找到并更新。"""
+    sets: list = []
+    vals: list = []
+    if push_enabled is not None:
+        sets.append("push_enabled=?"); vals.append(1 if push_enabled else 0)
+    if fetch_interval_minutes is not None:
+        # 5min 下限：再低没意义且抓取本身耗时 ~30s
+        v = max(5, min(int(fetch_interval_minutes), 1440))
+        sets.append("fetch_interval_minutes=?"); vals.append(v)
+    if not sets:
+        return False
+    vals.extend([creator_id, user_id])
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            f"UPDATE monitor_creators SET {','.join(sets)} WHERE id=? AND user_id=?",
+            vals,
+        )
+        await db.commit()
+        return (cur.rowcount or 0) > 0
 
 
 async def mark_creator_status(
@@ -1803,6 +1873,115 @@ async def delete_alert(alert_id: int, user_id: Optional[int] = None):
 
 # ── Trending Posts ───────────────────────────────────────────────────────────
 
+# ── 扩展任务队列（ext_tasks）────────────────────────────────────────────
+
+async def ext_task_create(
+    *, user_id: int, task_type: str, payload: dict, max_retries: int = 3,
+) -> int:
+    """新建一个 pending 任务，返回 id。"""
+    import json as _json
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO ext_tasks (user_id, type, payload, max_retries) VALUES (?, ?, ?, ?)",
+            (int(user_id), task_type, _json.dumps(payload, ensure_ascii=False), max_retries),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def ext_task_mark_running(task_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE ext_tasks SET status='running', started_at=strftime('%s','now') WHERE id=?",
+            (task_id,),
+        )
+        await db.commit()
+
+
+async def ext_task_mark_done(task_id: int, result: Optional[dict] = None) -> None:
+    import json as _json
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE ext_tasks SET status='done', result=?, completed_at=strftime('%s','now') WHERE id=?",
+            (_json.dumps(result, ensure_ascii=False) if result is not None else None, task_id),
+        )
+        await db.commit()
+
+
+async def ext_task_mark_failed(task_id: int, error: str) -> None:
+    """失败：retries+1，到 max_retries 标 failed，否则回到 pending 等下次。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT retries, max_retries FROM ext_tasks WHERE id=?", (task_id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return
+        retries, max_r = row[0] or 0, row[1] or 3
+        new_retries = retries + 1
+        new_status = "failed" if new_retries >= max_r else "pending"
+        await db.execute(
+            "UPDATE ext_tasks SET status=?, retries=?, error=?, completed_at=strftime('%s','now') WHERE id=?",
+            (new_status, new_retries, (error or "")[:500], task_id),
+        )
+        await db.commit()
+
+
+async def ext_task_get_pending(user_id: Optional[int] = None, limit: int = 50) -> List[Dict]:
+    """取 pending 任务（FIFO）。可选按 user_id 过滤。"""
+    sql = "SELECT * FROM ext_tasks WHERE status='pending'"
+    params: list = []
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params.append(int(user_id))
+    sql += " ORDER BY id ASC LIMIT ?"
+    params.append(limit)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    import json as _json
+    for r in rows:
+        try:
+            r["payload"] = _json.loads(r["payload"]) if r.get("payload") else {}
+        except Exception:
+            r["payload"] = {}
+    return rows
+
+
+async def ext_task_cleanup_done(older_than_days: int = 7) -> int:
+    """清理 N 天前的 done/failed 任务，返回删除数。"""
+    cutoff = f"strftime('%s','now') - {older_than_days * 86400}"
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            f"DELETE FROM ext_tasks WHERE status IN ('done','failed') AND completed_at < {cutoff}",
+        )
+        await db.commit()
+        return cur.rowcount or 0
+
+
+async def ext_task_running_timeout(timeout_sec: int = 300) -> int:
+    """把超时（>5min 没完成）的 running 任务回退到 pending，返回处理数。"""
+    cutoff = f"strftime('%s','now') - {timeout_sec}"
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            f"UPDATE ext_tasks SET status='pending' WHERE status='running' AND started_at < {cutoff}",
+        )
+        await db.commit()
+        return cur.rowcount or 0
+
+
+async def ext_task_list_recent(user_id: int, limit: int = 50) -> List[Dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, type, status, retries, error, created_at, completed_at "
+            "FROM ext_tasks WHERE user_id=? ORDER BY id DESC LIMIT ?",
+            (int(user_id), limit),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
 async def add_or_update_trending_post(
     note_id: str, title: str, desc_text: str, note_url: str,
     xsec_token: str, liked_count: int, collected_count: int,
@@ -1876,6 +2055,30 @@ async def get_trending_posts(
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+async def clear_trending_posts(
+    user_id: Optional[int] = None, platform: Optional[str] = None,
+) -> int:
+    """清空热门内容。返回删除的行数。
+
+    user_id=None：清所有用户（admin 全局清空）。
+    user_id=N：仅清该用户范围内的（可叠加 platform 过滤）。
+    """
+    sql = "DELETE FROM trending_posts"
+    where, params = [], []
+    if user_id is not None:
+        where.append("user_id=?")
+        params.append(user_id)
+    if platform:
+        where.append("platform=?")
+        params.append(platform)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(sql, params)
+        await db.commit()
+        return cur.rowcount or 0
 
 
 async def update_trending_desc(
@@ -2420,16 +2623,31 @@ async def create_remix_task(
     post_url: str, post_title: str = "", post_desc: str = "",
     platform: str = "xhs",
     ref_image_url: str = "", ref_image_idx: int = 0,
+    ref_image_urls: Optional[List[str]] = None,
+    ref_image_idxs: Optional[List[int]] = None,
     count: int = 1, size: str = "",
 ) -> int:
+    """创建 remix 任务。
+
+    多图（v2，新建议）：传 ref_image_urls + ref_image_idxs（list）。
+    单图（v1，向后兼容）：传 ref_image_url + ref_image_idx。
+    两组字段都会写入，worker 优先读 list 字段；若 list 为空 fallback 单值字段。
+    """
+    import json as _json
+    idxs_json = _json.dumps(ref_image_idxs) if ref_image_idxs else ""
+    urls_json = _json.dumps(ref_image_urls or []) if ref_image_urls else ""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO remix_tasks
                (user_id, status, post_url, post_title, post_desc, platform,
-                ref_image_url, ref_image_idx, count, done_count, items_json, size)
-               VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?)""",
+                ref_image_url, ref_image_idx,
+                ref_image_urls, ref_image_idxs,
+                count, done_count, items_json, size)
+               VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?)""",
             (user_id, post_url, post_title, post_desc, platform,
-             ref_image_url, ref_image_idx, count, size),
+             ref_image_url, ref_image_idx,
+             urls_json, idxs_json,
+             count, size),
         )
         await db.commit()
         return cur.lastrowid or 0
@@ -2803,3 +3021,36 @@ async def cursor_sort_by_last_run(
         return (burned, info["last_run_at"])
 
     return sorted(candidate_keys, key=_sort_key)
+
+
+# ── 用户级抓取节奏（per-user pacing）─────────────────────────────────────────
+# 复用 crawl_cursor 表存 last_run_at，避免新增表。
+# task='user_pace'，key=f"{kind}:{user_id}"，kind ∈ {'monitor', 'trending'}
+
+async def get_user_pace_last_run(user_id: int, kind: str) -> Optional[str]:
+    """返回用户该 kind 上次跑的时间戳（ISO）。从未跑过 → None。"""
+    key = f"{kind}:{user_id}"
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT last_run_at FROM crawl_cursor WHERE task='user_pace' AND key=?",
+            (key,),
+        ) as cur:
+            row = await cur.fetchone()
+            if not row or not row[0]:
+                return None
+            return row[0]
+
+
+async def mark_user_pace_run(user_id: int, kind: str) -> None:
+    """记录用户该 kind 这一次跑的时间。每次跑完用户对应任务后调一次。"""
+    key = f"{kind}:{user_id}"
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO crawl_cursor(task, key, status, last_run_at) "
+            "VALUES ('user_pace', ?, 'done', ?) "
+            "ON CONFLICT(task, key) DO UPDATE SET "
+            "  status='done', last_run_at=excluded.last_run_at",
+            (key, now_iso),
+        )
+        await db.commit()
