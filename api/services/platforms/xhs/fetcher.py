@@ -1,318 +1,205 @@
-import re
-import json
-import random
-import logging
+"""
+XHS 平台实现：包装现有 monitor_fetcher（详情）和 trending_fetcher（搜索）。
+
+为什么是 wrapper 而不是 import 重写：
+  现有两个 fetcher 已经经过大量线上验证、风控调优、token 失效处理等。
+  抽象层只负责调度，不重写底层抓取逻辑。
+"""
+from __future__ import annotations
+
 import asyncio
-import httpx
-import humps
-from urllib.parse import urlparse, parse_qs, unquote
-from typing import Any, Dict, Optional
+import logging
+import re
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse, parse_qs
+
+from ..base import Platform
+from ... import monitor_fetcher, trending_fetcher
 
 logger = logging.getLogger(__name__)
 
 
-from .platforms._ua_pool import random_desktop_ua, DESKTOP_UAS
+class XHSPlatform(Platform):
+    name = "xhs"
+    label = "小红书"
+    url_hints = ["xiaohongshu.com", "xhslink.com"]
 
-# 默认 UA：保留单一值给老调用，新代码用 _request_headers() 拿随机 UA
-_UA = DESKTOP_UAS[0]
-
-
-def _request_headers() -> dict:
-    return {
-        "User-Agent": random_desktop_ua(),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Referer": "https://www.xiaohongshu.com/",
-    }
-
-
-# 向后兼容：旧 _BASE_HEADERS 引用（被 verify_proxy_chain.py 等内部脚本依赖）
-_BASE_HEADERS = {
-    "User-Agent": _UA,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    "Referer": "https://www.xiaohongshu.com/",
-}
-
-
-def _parse_count(value) -> int:
-    if value is None:
-        return 0
-    s = str(value).replace(",", "").strip()
-    if not s or s in ("", "0"):
-        return 0
-    if s.endswith("万"):
-        try:
-            return int(float(s[:-1]) * 10000)
-        except ValueError:
-            return 0
-    try:
-        return int(float(s))
-    except ValueError:
-        return 0
-
-
-def _extract_from_html(note_id: str, html: str) -> Optional[Dict]:
-    if "noteDetailMap" not in html:
-        # Login wall, captcha, or "笔记不存在" page — no detail map at all.
-        if "登录" in html and "扫码" in html:
-            logger.warning(f"[fetcher] {note_id}: response is the login wall (need cookie)")
-        elif "笔记不存在" in html or "已删除" in html or "无法查看" in html:
-            logger.warning(f"[fetcher] {note_id}: note appears to be deleted or private")
-        else:
-            logger.warning(f"[fetcher] {note_id}: noteDetailMap missing, HTML preview: {html[:200]!r}")
-        return None
-    matches = re.findall(r"window\.__INITIAL_STATE__=(\{.*?\})</script>", html, re.DOTALL)
-    if not matches:
-        logger.warning(f"[fetcher] {note_id}: __INITIAL_STATE__ regex did not match")
-        return None
-    try:
-        state_raw = matches[0].replace("undefined", '""')
-        state = humps.decamelize(json.loads(state_raw))
-        note = state["note"]["note_detail_map"][note_id]["note"]
-    except (KeyError, json.JSONDecodeError, IndexError) as e:
-        logger.warning(f"[fetcher] {note_id}: state parse failed ({type(e).__name__}: {e})")
-        return None
-
-    interact = note.get("interact_info", {})
-    raw_title = note.get("title") or ""
-    raw_desc  = note.get("desc") or ""
-
-    # Image list — detail page exposes higher-res URLs than search.
-    images: list = []
-    for img in (note.get("image_list") or []):
-        if not isinstance(img, dict):
-            continue
-        info_list = img.get("info_list") or []
-        picked = ""
-        for info in info_list:
-            if info.get("image_scene") == "WB_DFT":
-                picked = info.get("url", "")
-                break
-        if not picked and info_list:
-            picked = info_list[0].get("url", "")
-        if not picked:
-            picked = img.get("url", "") or img.get("url_default", "")
-        if picked:
-            images.append(picked)
-
-    # Cover (rare to differ from images[0], but normalize anyway)
-    cover = note.get("cover") or {}
-    cover_url = ""
-    if isinstance(cover, dict):
-        cover_url = (cover.get("url_default") or cover.get("url_pre")
-                     or cover.get("url") or "")
-
-    # Video URL — only present on video notes.
-    video_url = ""
-    note_type = note.get("type") or "normal"
-    if note_type == "video":
-        video = note.get("video") or {}
-        media = (video.get("media") or {}) if isinstance(video, dict) else {}
-        stream = (media.get("stream") or {}) if isinstance(media, dict) else {}
-        # Try several quality keys: h264 (most common) > h265 > av1
-        for key in ("h264", "h265", "av1"):
-            arr = stream.get(key)
-            if isinstance(arr, list) and arr:
-                first = arr[0]
-                if isinstance(first, dict):
-                    video_url = first.get("master_url") or first.get("backup_urls", [""])[0] or ""
-                    if video_url:
-                        break
-
-    return {
-        "title": (raw_title or raw_desc)[:200] if (raw_title or raw_desc) else "",
-        "desc":  raw_desc[:5000],
-        "liked_count": _parse_count(interact.get("liked_count")),
-        "collected_count": _parse_count(interact.get("collected_count")),
-        "comment_count": _parse_count(interact.get("comment_count")),
-        "share_count": _parse_count(interact.get("share_count")),
-        "cover_url": cover_url,
-        "images": images,
-        "video_url": video_url,
-        "note_type": note_type,
-    }
-
-
-async def resolve_xhs_creator_url(raw_url: str) -> Optional[str]:
-    """把任意小红书博主链接（含短链 xhslink.com / 完整主页）规范化成
-    https://www.xiaohongshu.com/user/profile/{user_id} 形式。
-
-    短链需要 follow redirect。失败返回 None。
-    返回的 URL **不带 xsec_token**（token 有时效；fetcher 会用账号 cookie 兜底访问）。
-    """
-    link = (raw_url or "").strip()
-    if not link:
-        return None
-
-    # 已是规范主页 URL：剥掉 query 直接返回
-    if "/user/profile/" in link and "xiaohongshu.com" in link:
-        m = re.search(r"/user/profile/([^/?#]+)", link)
-        if m:
-            return f"https://www.xiaohongshu.com/user/profile/{m.group(1)}"
-        return None
-
-    # 短链 / 其它形态：follow redirect 拿到真实 URL
-    try:
-        async with httpx.AsyncClient(
-            follow_redirects=True, max_redirects=10, timeout=15,
-        ) as client:
-            resp = await client.get(link, headers=_request_headers())
-            final_url = str(resp.url)
-            html_body = resp.text or ""
-    except Exception as e:
-        logger.warning(f"[creator] follow redirect failed for {link}: {e}")
-        return None
-
-    logger.info(f"[creator] {link} -> {final_url}")
-
-    # 路径 1：URL 已含 /user/profile/{id}
-    m = re.search(r"/user/profile/([^/?#]+)", final_url)
-    if m:
-        return f"https://www.xiaohongshu.com/user/profile/{m.group(1)}"
-
-    # 路径 2：跳到登录墙，从 redirectPath 取
-    parsed = urlparse(final_url)
-    if parsed.path.startswith("/login"):
-        from urllib.parse import unquote
-        redirect_path = parse_qs(parsed.query).get("redirectPath", [""])[0]
-        if redirect_path:
-            actual = unquote(redirect_path)
-            m = re.search(r"/user/profile/([^/?#]+)", actual)
-            if m:
-                return f"https://www.xiaohongshu.com/user/profile/{m.group(1)}"
-
-    # 路径 3：短链落地的 HTML 里嵌入 user_id（小红书有时用 JS 跳转）
-    m = re.search(r"/user/profile/([0-9a-fA-F]{24})", html_body)
-    if m:
-        return f"https://www.xiaohongshu.com/user/profile/{m.group(1)}"
-    # 兜底：HTML 里 userId 字段
-    m = re.search(r'"userId"\s*:\s*"([0-9a-fA-F]{24})"', html_body)
-    if m:
-        return f"https://www.xiaohongshu.com/user/profile/{m.group(1)}"
-
-    logger.warning(f"[creator] cannot extract user_id from {final_url}")
-    return None
-
-
-async def resolve_short_link(short_url: str) -> Optional[Dict]:
-    """Follow xhslink.com redirect and extract note_id + xsec_token."""
-    try:
-        async with httpx.AsyncClient(
-            follow_redirects=True, max_redirects=10, timeout=15
-        ) as client:
-            resp = await client.get(short_url, headers=_request_headers())
-            final_url = str(resp.url)
-    except Exception:
-        return None
-
-    parsed = urlparse(final_url)
-    params = parse_qs(parsed.query)
-
-    # Redirected to login page — real URL is in redirectPath param
-    if parsed.path.startswith("/login"):
-        redirect_path = params.get("redirectPath", [""])[0]
-        if not redirect_path:
+    async def resolve_url(self, raw_url: str) -> Optional[Dict[str, Any]]:
+        link = (raw_url or "").strip()
+        if not link:
             return None
-        actual_url = unquote(redirect_path)
-        parsed = urlparse(actual_url)
-        params = parse_qs(parsed.query)
 
-    parts = parsed.path.strip("/").split("/")
-    # Accept both /explore/{id} and /discovery/item/{id}
-    if len(parts) < 2 or parts[0] not in ("explore",) and not (len(parts) >= 3 and parts[:2] == ["discovery", "item"]):
-        return None
+        # 短链或非 xhs 域名（例如微信复制出来的纯 ID 串）走短链 resolver
+        if "xhslink.com" in link or "xiaohongshu.com" not in link:
+            info = await monitor_fetcher.resolve_short_link(link)
+            if not info:
+                return None
+        else:
+            parsed = urlparse(link)
+            params = parse_qs(parsed.query)
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) < 2 or parts[0] != "explore":
+                return None
+            info = {
+                "note_id": parts[1],
+                "xsec_token": params.get("xsec_token", [""])[0],
+                # 强制 app_share，公开通道
+                "xsec_source": "app_share",
+                "note_url": link,
+            }
 
-    note_id = parts[-1]
-    xsec_token = params.get("xsec_token", [""])[0]
-    xsec_source = params.get("xsec_source", ["app_share"])[0]
+        # 不管是哪种来源，xsec_source 都强制 app_share（实测稳定）
+        info["xsec_source"] = "app_share"
+        return {
+            "platform": self.name,
+            "post_id": info["note_id"],
+            "url": info["note_url"],
+            "xsec_token": info.get("xsec_token", ""),
+            "xsec_source": info["xsec_source"],
+        }
 
-    return {
-        "note_id": note_id,
-        "xsec_token": xsec_token,
-        "xsec_source": xsec_source,
-        "note_url": f"https://www.xiaohongshu.com/explore/{note_id}?xsec_token={xsec_token}&xsec_source={xsec_source}",
-    }
+    async def fetch_detail(
+        self, post: Dict[str, Any], account: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
+        return await monitor_fetcher.fetch_note_metrics(
+            note_id=post.get("note_id") or post.get("post_id"),
+            xsec_token=post.get("xsec_token", ""),
+            xsec_source=post.get("xsec_source", "app_share"),
+            cookie=post.get("account_cookie"),
+            account=account,
+        )
 
+    async def search_trending(
+        self, keyword: str, account: Dict[str, Any], min_likes: int = 0,
+    ) -> List[Dict[str, Any]]:
+        # 现有签名：(keyword, account, min_likes)
+        return await trending_fetcher.search_trending_notes(keyword, account, min_likes)
 
-async def fetch_note_metrics(
-    note_id: str,
-    xsec_token: str,
-    xsec_source: str,
-    cookie: Optional[str] = None,
-    account: Optional[Dict[str, Any]] = None,
-) -> tuple:
-    """Fetch note metrics by parsing the note HTML page.
+    async def fetch_creator_posts(
+        self, creator_url: str, account: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """抓 XHS 博主主页发布列表。
 
-    Returns (metrics_dict_or_None, status). Status is one of:
-      'ok'              — got valid metrics
-      'login_required'  — XHS 302 to /login (this note is gated by XHS)
-      'deleted'         — note no longer exists
-      'error'           — request failed / unparseable HTML / other
+        URL 形如 https://www.xiaohongshu.com/user/profile/{user_id}（可带 ?xsec_token=...）。
+        实现：用账号 cookie 在 Playwright 里加载主页，拦截 user_posted API。
+        XHS 主页未登录会跳登录墙，必须带 cookie。
+        """
+        if not account or not account.get("cookie"):
+            logger.warning("[xhs] creator追新 需要带 cookie 的账号")
+            return []
+        if (account.get("platform") or "xhs") != "xhs":
+            logger.warning(f"[xhs] creator account platform={account.get('platform')} 非小红书")
+            return []
 
-    `account` takes precedence: when supplied, its cookie / user_agent / proxy_url
-    are applied. `cookie` kept for backward compat when no account record exists.
-    """
-    url = (
-        f"https://www.xiaohongshu.com/explore/{note_id}"
-        f"?xsec_token={xsec_token}&xsec_source={xsec_source}"
-    )
-    headers = _request_headers()
-    proxy: Optional[str] = None
+        from ...account_browser import open_account_context
 
-    if account:
-        acc_cookie = account.get("cookie") or cookie
-        if acc_cookie:
-            headers["Cookie"] = acc_cookie
-        ua = (account.get("user_agent") or "").strip()
-        if ua:
-            headers["User-Agent"] = ua
-        # effective_proxy_url：socks5+鉴权会被转成本地 http://127.0.0.1:port
-        from . import proxy_forwarder
-        eff = proxy_forwarder.effective_proxy_url(account)
-        if eff:
-            proxy = eff
-    elif cookie:
-        headers["Cookie"] = cookie
+        # 解析 user_id（备用：构造主页 URL 用）
+        uid_match = re.search(r"/user/profile/([^/?#]+)", creator_url or "")
+        user_id = uid_match.group(1) if uid_match else ""
 
-    await asyncio.sleep(random.uniform(1.0, 2.5))
+        collected: List[Dict[str, Any]] = []
+        creator_name = ""
 
-    try:
-        client_kwargs: Dict[str, Any] = {"timeout": 20}
-        if proxy:
-            client_kwargs["proxy"] = proxy
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code in (301, 302, 303, 307, 308):
-                location = resp.headers.get("location", "")
-                if "/login" in location:
-                    logger.warning(f"[fetcher] {note_id}: 302 → login wall (XHS gated)")
-                    return None, "login_required"
-                # /404 或 URL 包含 errorCode= 说明笔记不存在/已删除/私密/平台屏蔽
-                # XHS 常见错误码：-510001 = 内容不存在；其它 -5* 段都属于不可访问
-                if "/404" in location or "errorCode=" in location:
-                    logger.warning(f"[fetcher] {note_id}: 302 → 404 page (note deleted/private/blocked)")
-                    return None, "deleted"
-                logger.warning(f"[fetcher] {note_id}: unexpected {resp.status_code} → {location[:80]}")
-                return None, "error"
-            if resp.status_code == 404:
-                logger.warning(f"[fetcher] {note_id}: HTTP 404 (note deleted)")
-                return None, "deleted"
-            if resp.status_code != 200:
-                logger.warning(
-                    f"[fetcher] {note_id}: HTTP {resp.status_code} "
-                    f"(final url: {resp.url})"
+        async with open_account_context(account) as (_browser, context):
+            page = await context.new_page()
+
+            async def on_response(response):
+                url = response.url or ""
+                # 主接口：/api/sns/web/v1/user_posted
+                # 兜底：/api/sns/web/v1/feed 偶尔用于补全；search/notes 不会出现在博主页
+                if ("user_posted" not in url) or response.status != 200:
+                    return
+                try:
+                    body = await response.json()
+                except Exception:
+                    return
+                data = body.get("data") or {}
+                notes = data.get("notes") or []
+                nonlocal creator_name
+                for note in notes:
+                    if not isinstance(note, dict):
+                        continue
+                    nid = note.get("note_id") or note.get("id")
+                    if not nid:
+                        continue
+                    tok = note.get("xsec_token") or ""
+                    user = note.get("user") or {}
+                    if not creator_name:
+                        creator_name = (
+                            user.get("nick_name")
+                            or user.get("nickname")
+                            or user.get("name")
+                            or ""
+                        )
+                    title = (
+                        note.get("display_title")
+                        or note.get("title")
+                        or ""
+                    )
+                    # 时间字段在 user_posted 里通常没有；feed 接口才有 time，这里给 0
+                    ts = note.get("time") or note.get("create_time") or 0
+                    try:
+                        published_at = int(ts) if ts else 0
+                    except (TypeError, ValueError):
+                        published_at = 0
+                    collected.append({
+                        "post_id": str(nid),
+                        "url": (
+                            f"https://www.xiaohongshu.com/explore/{nid}"
+                            f"?xsec_token={tok}&xsec_source=app_share"
+                        ),
+                        "title": title[:200],
+                        "creator_name": creator_name,
+                        "published_at": published_at,
+                        "xsec_token": tok,
+                    })
+
+            page.on("response", on_response)
+
+            try:
+                # 先访问首页让 cookie 生效
+                await page.goto(
+                    "https://www.xiaohongshu.com/explore",
+                    wait_until="domcontentloaded",
+                    timeout=15000,
                 )
-                return None, "error"
-            metrics = _extract_from_html(note_id, resp.text)
-            if metrics is None:
-                # _extract_from_html already logged the cause; map to a status
-                if "登录" in resp.text and "扫码" in resp.text:
-                    return None, "login_required"
-                if "笔记不存在" in resp.text or "已删除" in resp.text:
-                    return None, "deleted"
-                return None, "error"
-            return metrics, "ok"
-    except Exception as e:
-        logger.warning(f"[fetcher] {note_id}: request failed ({type(e).__name__}: {e})")
-        return None, "error"
+                await asyncio.sleep(2)
+                # 主页 URL：用户给的 creator_url 优先，如果只有 user_id 就构造一个
+                target = (creator_url or "").strip()
+                if not target.startswith("http"):
+                    if user_id:
+                        target = f"https://www.xiaohongshu.com/user/profile/{user_id}"
+                    else:
+                        logger.warning(f"[xhs] creator URL 无法解析: {creator_url}")
+                        return []
+                try:
+                    async with page.expect_response(
+                        lambda r: "user_posted" in r.url and r.status == 200,
+                        timeout=20000,
+                    ):
+                        await page.goto(target, wait_until="domcontentloaded", timeout=15000)
+                except Exception:
+                    # 兜底：导航完成但没等到 user_posted（可能是懒加载），滚一下再等
+                    await page.mouse.wheel(0, 800)
+                    await asyncio.sleep(3)
+                else:
+                    await asyncio.sleep(2)
+            except Exception as e:
+                logger.warning(f"[xhs] creator '{creator_url}' 加载失败: {e}")
+
+            # 没拿到任何 note 时检测一下登录墙
+            if not collected:
+                try:
+                    body_text = await page.evaluate(
+                        "() => document.body.innerText.slice(0, 200)"
+                    )
+                    if "登录后查看" in body_text or "扫码登录" in body_text:
+                        logger.warning(
+                            f"[xhs] account '{account.get('name')}' cookie 似乎已失效，"
+                            f"博主主页跳登录墙。请重新扫码登录。"
+                        )
+                except Exception:
+                    pass
+
+        logger.info(f"[xhs] creator='{creator_url}' fetched {len(collected)} posts")
+        return collected

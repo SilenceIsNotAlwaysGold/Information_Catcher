@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Upload, Settings, LogOut, TrendingUp,
   ShieldCheck, Music2, Newspaper, ChevronDown, ChevronRight,
   FileText, Users, Moon, Sun, X, Sparkles, Link2, SlidersHorizontal, Server,
-  Image as ImageIcon,
+  Image as ImageIcon, Wand2,
 } from "lucide-react";
 import { Button } from "@nextui-org/button";
 import { Tooltip } from "@nextui-org/tooltip";
@@ -71,7 +71,8 @@ const baseNavItems: NavItem[] = [
   ...buildPlatformItems("mp"),
 
   { key: "import",      href: "/dashboard/import",                icon: <Upload size={20} />,    label: "数据导入",   module: "common" },
-  { key: "tools-image", href: "/dashboard/tools/product-image",   icon: <ImageIcon size={20} />, label: "商品图工具", module: "common" },
+  { key: "tools-image", href: "/dashboard/tools/product-image",   icon: <ImageIcon size={20} />, label: "商品图（自创）", module: "common" },
+  { key: "tools-remix", href: "/dashboard/tools/product-remix",   icon: <Wand2 size={20} />,     label: "作品仿写",       module: "common" },
   { key: "settings",    href: "/dashboard/profile",               icon: <Settings size={20} />,  label: "个人设置",   module: "common" },
 ];
 

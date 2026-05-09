@@ -14,6 +14,7 @@ from . import comment_fetcher
 from . import cookie_health
 from . import platforms as platform_registry
 from . import image_upload_worker
+from . import remix_worker
 
 logger = logging.getLogger(__name__)
 
@@ -980,6 +981,12 @@ async def start_scheduler():
     scheduler.add_job(
         image_upload_worker.run_batch, "interval", minutes=1,
         id="image_upload_worker", replace_existing=True,
+    )
+    # 仿写任务 worker：每 10 秒扫一次，一次取一条 pending 任务跑完。
+    # max_instances=1 防止两次心跳之间任务还没跑完就被重复触发。
+    scheduler.add_job(
+        remix_worker.run_once, "interval", seconds=10,
+        id="remix_worker", replace_existing=True, max_instances=1,
     )
     scheduler.start()
     logger.info(f"[scheduler] started — interval={interval}min, report={report_time}")

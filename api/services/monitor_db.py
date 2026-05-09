@@ -310,6 +310,32 @@ CREATE INDEX IF NOT EXISTS idx_image_gen_user_time ON image_gen_history(user_id,
 -- 无 partial index：image_gen_history 数据量小，list_pending_image_uploads
 -- 每次 LIMIT 5 全表扫足够。partial index 在老表上还没 upload_status 列时
 -- 会建索引失败，复杂度不值得。
+
+-- 仿写任务：粘贴小红书/抖音作品 → 异步生成 N 套（图 + 文案）
+-- worker 跑 pending 任务，每完成一套写一行 image_gen_history（batch_id="remix:{task_id}"）
+-- items_json：实时进度展示用，[{idx, image_url, title, body, error}, ...]
+CREATE TABLE IF NOT EXISTS remix_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    -- pending（队列中）/ running（处理中）/ done（完成）/ error（失败）/ cancelled
+    status TEXT DEFAULT 'pending',
+    post_url TEXT DEFAULT '',
+    post_title TEXT DEFAULT '',
+    post_desc TEXT DEFAULT '',
+    platform TEXT DEFAULT 'xhs',
+    ref_image_url TEXT DEFAULT '',
+    ref_image_idx INTEGER DEFAULT 0,
+    count INTEGER DEFAULT 1,
+    done_count INTEGER DEFAULT 0,
+    items_json TEXT DEFAULT '[]',
+    error TEXT DEFAULT '',
+    size TEXT DEFAULT '',
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_remix_tasks_user_time ON remix_tasks(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_remix_tasks_status ON remix_tasks(status);
 """
 
 
@@ -2165,3 +2191,111 @@ async def delete_image_history(record_id: int, user_id: Optional[int] = None) ->
         cur = await db.execute(f"DELETE FROM image_gen_history {where}", args)
         await db.commit()
         return (cur.rowcount or 0) > 0
+
+
+# ── Remix Tasks（仿写异步任务） ───────────────────────────────────────────────
+
+async def create_remix_task(
+    *, user_id: Optional[int],
+    post_url: str, post_title: str = "", post_desc: str = "",
+    platform: str = "xhs",
+    ref_image_url: str = "", ref_image_idx: int = 0,
+    count: int = 1, size: str = "",
+) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO remix_tasks
+               (user_id, status, post_url, post_title, post_desc, platform,
+                ref_image_url, ref_image_idx, count, done_count, items_json, size)
+               VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?)""",
+            (user_id, post_url, post_title, post_desc, platform,
+             ref_image_url, ref_image_idx, count, size),
+        )
+        await db.commit()
+        return cur.lastrowid or 0
+
+
+async def get_remix_task(task_id: int) -> Optional[Dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM remix_tasks WHERE id=?", (task_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def list_remix_tasks(
+    user_id: Optional[int] = None, limit: int = 30,
+) -> List[Dict]:
+    where = "WHERE user_id=?" if user_id is not None else ""
+    args = (user_id,) if user_id is not None else ()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT * FROM remix_tasks {where} "
+            f"ORDER BY created_at DESC LIMIT ?",
+            (*args, limit),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def claim_pending_remix_task() -> Optional[Dict]:
+    """原子取一条 pending 任务并标记 running。返回该任务（或 None）。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            "SELECT * FROM remix_tasks WHERE status='pending' "
+            "ORDER BY id ASC LIMIT 1",
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            await db.commit()
+            return None
+        await db.execute(
+            "UPDATE remix_tasks SET status='running', "
+            "started_at=datetime('now','localtime') WHERE id=?",
+            (row["id"],),
+        )
+        await db.commit()
+        return dict(row)
+
+
+async def update_remix_task_progress(
+    task_id: int, *, items_json: str, done_count: int,
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE remix_tasks SET items_json=?, done_count=? WHERE id=?",
+            (items_json, done_count, task_id),
+        )
+        await db.commit()
+
+
+async def finish_remix_task(
+    task_id: int, *, status: str = "done", error: str = "",
+) -> None:
+    """status: done / error。设置 finished_at。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE remix_tasks "
+            "SET status=?, error=?, finished_at=datetime('now','localtime') "
+            "WHERE id=?",
+            (status, (error or "")[:500], task_id),
+        )
+        await db.commit()
+
+
+async def delete_remix_task(task_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM remix_tasks WHERE id=?", (task_id,))
+        await db.commit()
+
+
+async def has_pending_remix_tasks() -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM remix_tasks WHERE status='pending' LIMIT 1",
+        ) as cur:
+            return (await cur.fetchone()) is not None
