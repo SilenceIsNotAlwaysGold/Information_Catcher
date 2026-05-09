@@ -145,6 +145,8 @@ export default function ProductImagePage() {
   const [imagesPerSet, setImagesPerSet] = useState<number>(1);
   // 同时生成配套文案（标题 + 正文）：默认开，AI 基于当前 prompt + 平台调性写一份
   const [captionEnabled, setCaptionEnabled] = useState<boolean>(true);
+  // 工作模式：product = 商品图（自创内容），remix = 作品仿写（保主体换背景）
+  const [mode, setMode] = useState<"product" | "remix">("product");
 
   // 恢复：组件挂载时从 localStorage 读回上次状态
   useEffect(() => {
@@ -165,6 +167,7 @@ export default function ProductImagePage() {
       if (typeof d.sets === "number" && d.sets >= 1) setSets(d.sets);
       if (typeof d.imagesPerSet === "number" && d.imagesPerSet >= 1) setImagesPerSet(d.imagesPerSet);
       if (typeof d.captionEnabled === "boolean") setCaptionEnabled(d.captionEnabled);
+      if (d.mode === "product" || d.mode === "remix") setMode(d.mode);
     } catch {}
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -177,7 +180,7 @@ export default function ProductImagePage() {
       localStorage.setItem(PERSIST_KEY, JSON.stringify({
         subject, selectedScenes, selectedStyle, selectedPlatform,
         promptLanguage, wizardExtras, wizardPrompts, prompt, negativePrompt, selectedPromptIdx,
-        sets, imagesPerSet, captionEnabled,
+        sets, imagesPerSet, captionEnabled, mode,
       }));
     } catch {}
   }, [subject, selectedScenes, selectedStyle, selectedPlatform,
@@ -303,21 +306,47 @@ export default function ProductImagePage() {
       setSourcePostTitle(title);
       setSourcePostDesc(desc);
 
-      // 把文案拼成给图像模型用的中文 brief：标题作为主旨，正文截一段做场景描述
-      const brief = [
-        title && `主旨：${title}`,
-        desc && `内容/场景：${desc.slice(0, 280)}`,  // 截 280 字够 prompt 用，太长 token 浪费
-        "",
-        "请基于上述笔记的内容主旨，生成一张匹配该笔记调性的商品图：商品作为画面主体，",
-        "光线、构图、背景与正文场景一致；高质量，专业商品摄影。",
-      ].filter(Boolean).join("\n");
-      setPrompt(brief);
+      // 仿写模式：自动把封面图设为参考图（图生图模式才能保留主体）
+      const cover = (data.cover_b64 || "").trim();
+      if (mode === "remix" && cover) {
+        setRefImageB64(cover);
+        setRefImagePreview(`data:image/jpeg;base64,${cover}`);
+        setRefImageName(`${data.platform_label || "作品"} 封面 · ${title.slice(0, 16)}`);
+      }
+
+      if (mode === "remix") {
+        // 仿写模式 prompt 留空，让 AI 在 set-plan 阶段基于参考图分析后生成「换背景」prompt
+        // 这里只放一个引导提示让用户能看出 prompt 来源
+        setPrompt(
+          [
+            "（作品仿写模式）",
+            title && `原作品标题：${title}`,
+            desc && `原作品正文：${desc.slice(0, 200)}`,
+            "",
+            "AI 会保持原图主体（人物姿态/商品/构图）不变，按下方套数生成不同背景的版本。",
+          ].filter(Boolean).join("\n"),
+        );
+      } else {
+        // 商品图模式：把文案作为商品场景描述
+        const brief = [
+          title && `主旨：${title}`,
+          desc && `内容/场景：${desc.slice(0, 280)}`,
+          "",
+          "请基于上述笔记的内容主旨，生成一张匹配该笔记调性的商品图：商品作为画面主体，",
+          "光线、构图、背景与正文场景一致；高质量，专业商品摄影。",
+        ].filter(Boolean).join("\n");
+        setPrompt(brief);
+      }
 
       // 默认按平台预选尺寸，让生成出来的图直接能发同平台
       if (!genSize && data.platform === "xhs") setGenSize("864x1152");
       else if (!genSize && data.platform === "douyin") setGenSize("720x1280");
 
-      toastOk(`已加载文案：${title.slice(0, 24) || data.post_id}`);
+      toastOk(
+        mode === "remix"
+          ? `已加载封面+文案：${title.slice(0, 24) || data.post_id}（封面已设为参考图）`
+          : `已加载文案：${title.slice(0, 24) || data.post_id}`,
+      );
     } catch (e: any) {
       toastErr(`抓取异常：${e?.message || e}`);
     } finally {
@@ -608,7 +637,8 @@ export default function ProductImagePage() {
     const plan: SetPlan[] = [];
     if (captionEnabled) {
       try {
-        toastOk(`AI 仿写 ${sets} 套 × ${imagesPerSet} 张差异化方案...`);
+        const modeLabel = mode === "remix" ? "换背景仿写" : "差异化";
+        toastOk(`AI ${modeLabel} ${sets} 套 × ${imagesPerSet} 张方案...`);
         const r = await fetch(API("/generate-set-plan"), {
           method: "POST", headers,
           body: JSON.stringify({
@@ -619,6 +649,7 @@ export default function ProductImagePage() {
             source_post_url: postUrlInput.trim() || undefined,
             source_post_title: sourcePostTitle || undefined,
             source_post_desc: sourcePostDesc || undefined,
+            mode,
           }),
         });
         const data = await r.json().catch(() => ({}));
@@ -814,10 +845,54 @@ export default function ProductImagePage() {
             <Chip size="sm" variant="flat" color="secondary">Beta</Chip>
           </h1>
           <p className="text-sm text-default-500 mt-1">
-            Prompt 向导一键生成描述词，支持上传商品主体图进行参考图生成。
+            {mode === "product"
+              ? "商品图模式：填商品描述 / 上传商品图，AI 生成多角度多场景的商品图。"
+              : "作品仿写模式：粘贴同行爆款，保留原图主体（人物/动作/构图），AI 帮你换 N 套不同背景。"}
           </p>
         </div>
       </div>
+
+      {/* 模式切换：商品图（自创）vs 作品仿写（保主体换背景） */}
+      <div className="flex gap-2 p-1 bg-default-100 rounded-lg w-fit">
+        <button
+          type="button"
+          onClick={() => setMode("product")}
+          className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+            mode === "product"
+              ? "bg-white text-primary shadow-sm"
+              : "text-default-600 hover:text-default-800"
+          }`}
+        >
+          🎨 商品图（自创）
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("remix")}
+          className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+            mode === "remix"
+              ? "bg-white text-primary shadow-sm"
+              : "text-default-600 hover:text-default-800"
+          }`}
+        >
+          🪄 作品仿写（换背景）
+        </button>
+      </div>
+
+      {/* 仿写模式额外说明 */}
+      {mode === "remix" && (
+        <div className="flex items-start gap-2 text-sm bg-secondary/5 border border-secondary/30 rounded-lg p-3">
+          <AlertCircle size={16} className="mt-0.5 shrink-0 text-secondary-600" />
+          <div className="text-default-700 leading-relaxed">
+            <b>仿写流程：</b>
+            <ol className="list-decimal list-inside mt-1 space-y-0.5 text-xs text-default-600">
+              <li>下方「从作品 URL 加载文案」区粘贴同行爆款链接 → 自动拉封面图作为参考图</li>
+              <li>勾选下方「同时生成配套文案」（默认开）</li>
+              <li>套数 = 你想要多少种背景版本（每套是一种全新场景）</li>
+              <li>点生成 → AI 保持原图主体（人物/动作/商品），只换背景</li>
+            </ol>
+          </div>
+        </div>
+      )}
 
       {/* 配置状态 */}
       <Card className={cfg.has_key ? "border-success/30" : "border-warning/30"}>

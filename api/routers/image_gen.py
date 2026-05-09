@@ -93,8 +93,11 @@ class GenerateSetPlanRequest(BaseModel):
     """让 AI 一次生成 N 套 × M 张差异化方案。
 
     每套返回 {title, body, image_prompts: [M 条不同视角的 prompt]}。
-    套与套之间：主题/卖点不同（避免矩阵号被识别）；
-    套内 M 张：主体一致但镜头/构图/前景不同（避免轮播 9 张一模一样）。
+
+    mode：
+      - product（商品图）：每套主题/卖点全不同，镜头/构图全不同
+      - remix（作品仿写）：保持原作品主体一致（人物动作/商品/构图），
+        每套只换背景 / 场景 / 光线 / 时间 / 天气
     """
     base_prompt: str
     sets: int = 1
@@ -103,6 +106,7 @@ class GenerateSetPlanRequest(BaseModel):
     source_post_url: Optional[str] = ""
     source_post_title: Optional[str] = ""
     source_post_desc: Optional[str] = ""
+    mode: Optional[str] = "product"  # product | remix
 
 
 # ── Endpoints ───────────────────────────────────────────────────────────────
@@ -533,14 +537,17 @@ async def _generate_caption_variants(
     platform: str = "xhs",
     source_title: str = "",
     source_desc: str = "",
+    mode: str = "product",
 ) -> tuple[List[dict], str]:
     """让 AI 一次生成 N 套 × M 张差异化方案。
 
     返回 ([{title, body, image_prompts: [M 条]}, ...], error)。
 
-    两层差异化：
-      套间：title/body/角度 完全不同（避免矩阵号被风控）
-      套内：image_prompts 是 M 条不同视角的 prompt（主体一致，镜头/构图/前景不同）
+    mode：
+      - product：套间 title/body/角度全不同；套内 image_prompts 镜头/构图不同
+      - remix：保持原作品主体（人物动作/商品/构图）一致；
+               套间换不同的背景方向（咖啡店 / 户外 / 夜景 / ...）；
+               套内 M 张是同一背景的不同细节角度
     """
     if n_variants < 1:
         return [], "n_variants 必须 ≥ 1"
@@ -552,31 +559,70 @@ async def _generate_caption_variants(
         return [], "AI 服务未配置（ai_base_url / ai_api_key）"
 
     brief = _CAPTION_PLATFORM_BRIEFS.get(platform, _CAPTION_PLATFORM_BRIEFS["xhs"])
-    system_prompt = (
-        f"你是专业的内容创作者。为同一个产品/选题生成 {n_variants} 套笔记，每套含 "
-        f"{images_per_set} 张差异化的配图描述。\n\n"
-        f"两层差异化要求：\n"
-        f"1. **套与套之间**：title / body 必须**完全不同的角度**（亲身经历、对比测评、"
-        f"干货清单、提问钩子、反差体验等），避免被识别为矩阵号搬运。\n"
-        f"2. **每套内 {images_per_set} 张**：image_prompts 是 {images_per_set} 个 prompt，"
-        f"必须**保持商品主体一致**（同一产品/同一服务），但**镜头、构图、前景物、"
-        f"光线、机位、人物动作要明显不同**（特写 vs 全景；俯拍 vs 平视；"
-        f"主体单独 vs 加配饰；正面 vs 侧面；白天 vs 夜晚；室内 vs 户外 等）。\n\n"
-        + brief
-        + f"\n严格按 JSON 输出（必须有 {n_variants} 个 variant，每个的 image_prompts "
-        + f"长度必须 ≥ {images_per_set}）：\n"
-        + '{"variants": [{"title": "...", "body": "...", "image_prompts": ['
-        + ', '.join(['"prompt_' + str(i+1) + '"' for i in range(min(images_per_set, 3))])
-        + (', ...]' if images_per_set > 3 else ']')
-        + '}, ...]}'
-    )
-    user_msg = (
-        f"原图片 / 商品场景 prompt：\n{base_prompt}\n\n"
-        + (f"参考来源标题：{source_title}\n" if source_title else "")
-        + (f"参考来源正文（前 300 字）：{source_desc[:300]}\n" if source_desc else "")
-        + f"\n请生成 {n_variants} 套 × {images_per_set} 张的方案。"
-        + f"image_prompts 用英文写更稳，每条都要明确视觉差异（不要复制粘贴）。"
-    )
+
+    if mode == "remix":
+        # 作品仿写：保持原作品主体不变，只换背景/场景
+        system_prompt = (
+            f"你是专业的「内容仿写」创作者，用户已经选定一个**爆款作品作为模板**，"
+            f"你要为它生成 {n_variants} 套不同的「换背景」版本，每套含 "
+            f"{images_per_set} 张配图描述。\n\n"
+            f"**核心约束（最关键）：保持原作品的主体元素不变**——\n"
+            f"  • 人物姿态 / 表情 / 动作 / 服装风格保持一致\n"
+            f"  • 商品 / 道具的形态、颜色、构图位置不变\n"
+            f"  • 整体画面构图、人/物比例不变\n\n"
+            f"**只允许变化的元素**：\n"
+            f"  • 背景场景（咖啡店、户外街道、海边、家居室内、办公室、酒店大堂、夜市…）\n"
+            f"  • 光线 / 时段（晨光、正午、黄昏、夜间）\n"
+            f"  • 天气 / 氛围（晴天、阴天、雨天、雾、雪）\n"
+            f"  • 季节 / 装饰（圣诞、夏日、新年）\n\n"
+            f"两层差异化：\n"
+            f"1. **套与套之间**：换不同方向的背景（套1-咖啡店、套2-户外公园、套3-室内阳光房…）。"
+            f"title/body 描述同一产品在不同场景的体验差异，让读者感觉「同一作者在不同地方都用这个产品」。\n"
+            f"2. **每套内 {images_per_set} 张**：同一背景下的不同角度（推近/拉远、左右切换），"
+            f"主体保持一致，背景细节微调。\n\n"
+            + brief
+            + f"\n严格按 JSON 输出（{n_variants} 个 variant）：\n"
+            + '{"variants": [{"title": "...", "body": "...", "image_prompts": ['
+            + ', '.join(['"prompt_' + str(i+1) + '"' for i in range(min(images_per_set, 3))])
+            + (', ...]' if images_per_set > 3 else ']')
+            + ']}, ...]}\n'
+            + "image_prompts 用英文写，每条 prompt 必须以「Same subject as reference image, "
+            + "preserve pose/composition/products. Change ONLY background to: ...」开头。"
+        )
+        user_msg = (
+            f"原作品场景 prompt（基于参考图分析得出）：\n{base_prompt}\n\n"
+            + (f"原作品标题：{source_title}\n" if source_title else "")
+            + (f"原作品正文（前 300 字）：{source_desc[:300]}\n" if source_desc else "")
+            + f"\n请生成 {n_variants} 套换背景版本，每套 {images_per_set} 张。"
+            + "记住：主体不变，只换背景。"
+        )
+    else:
+        # 商品图（默认）：套间套内全维度差异化
+        system_prompt = (
+            f"你是专业的内容创作者。为同一个产品/选题生成 {n_variants} 套笔记，每套含 "
+            f"{images_per_set} 张差异化的配图描述。\n\n"
+            f"两层差异化要求：\n"
+            f"1. **套与套之间**：title / body 必须**完全不同的角度**（亲身经历、对比测评、"
+            f"干货清单、提问钩子、反差体验等），避免被识别为矩阵号搬运。\n"
+            f"2. **每套内 {images_per_set} 张**：image_prompts 是 {images_per_set} 个 prompt，"
+            f"必须**保持商品主体一致**（同一产品/同一服务），但**镜头、构图、前景物、"
+            f"光线、机位、人物动作要明显不同**（特写 vs 全景；俯拍 vs 平视；"
+            f"主体单独 vs 加配饰；正面 vs 侧面；白天 vs 夜晚；室内 vs 户外 等）。\n\n"
+            + brief
+            + f"\n严格按 JSON 输出（必须有 {n_variants} 个 variant，每个的 image_prompts "
+            + f"长度必须 ≥ {images_per_set}）：\n"
+            + '{"variants": [{"title": "...", "body": "...", "image_prompts": ['
+            + ', '.join(['"prompt_' + str(i+1) + '"' for i in range(min(images_per_set, 3))])
+            + (', ...]' if images_per_set > 3 else ']')
+            + '}, ...]}'
+        )
+        user_msg = (
+            f"原图片 / 商品场景 prompt：\n{base_prompt}\n\n"
+            + (f"参考来源标题：{source_title}\n" if source_title else "")
+            + (f"参考来源正文（前 300 字）：{source_desc[:300]}\n" if source_desc else "")
+            + f"\n请生成 {n_variants} 套 × {images_per_set} 张的方案。"
+            + f"image_prompts 用英文写更稳，每条都要明确视觉差异（不要复制粘贴）。"
+        )
 
     url = f"{ai_base_url.rstrip('/')}/chat/completions"
     payload = {
@@ -667,6 +713,7 @@ async def generate_set_plan(
         platform=req.target_platform or "xhs",
         source_title=(req.source_post_title or "").strip(),
         source_desc=(req.source_post_desc or "").strip(),
+        mode=(req.mode or "product"),
     )
     if err:
         return {"error": err}
@@ -875,7 +922,13 @@ async def fetch_post_cover(
         )
 
     if not metrics:
-        return {"error": f"作品抓取失败（status={status}），可能被风控或链接已失效"}
+        # 按状态给具体原因，方便用户判断是 Pulse 问题还是源链接问题
+        reason_map = {
+            "deleted": "笔记已被作者删除 / 设为仅自己可见 / 被平台屏蔽（XHS 跳转 404，errorCode=-510001）。请换一篇能在浏览器无痕窗口正常打开的链接。",
+            "login_required": "该链接需要登录态才能访问（XHS 跳转登录页）。这种 token（如来自 pc_user / 个人主页）通常只在登录浏览器内有效，建议复制爆款笔记的「分享」链接，分享链接的 xsec_source=app_share，匿名可访问。",
+            "error": "抓取失败，可能被风控或链接已失效（也可能是临时网络问题，过几分钟重试）。",
+        }
+        return {"error": reason_map.get(status, f"作品抓取失败（status={status}）")}
 
     cover_url = metrics.get("cover_url") or ""
     images = metrics.get("images") or []

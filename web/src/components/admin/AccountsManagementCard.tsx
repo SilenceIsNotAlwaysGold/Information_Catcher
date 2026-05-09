@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
-import { Input } from "@nextui-org/input";
+import { Input, Textarea } from "@nextui-org/input";
 import { Chip } from "@nextui-org/chip";
 import { Divider } from "@nextui-org/divider";
 import { Tooltip } from "@nextui-org/tooltip";
@@ -69,6 +69,10 @@ export function AccountsManagementCard({ token }: { token: string | null }) {
     setEditForm((f) => ({ ...f, [k]: v }));
 
   const qrModal = useDisclosure();
+  const importModal = useDisclosure();
+  const [importCookie, setImportCookie] = useState("");
+  const [importUserAgent, setImportUserAgent] = useState("");
+  const [importing, setImporting] = useState(false);
   const [qrSessionId, setQrSessionId] = useState<string | null>(null);
   const [qrImage, setQrImage] = useState<string>("");
   const [qrStatus, setQrStatus] = useState<string>("idle");
@@ -162,6 +166,48 @@ export function AccountsManagementCard({ token }: { token: string | null }) {
         setQrStatus("failed");
         setQrError(e?.message || String(e));
       }
+    }
+  };
+
+  const submitImportCookie = async () => {
+    const name = accountForm.name.trim();
+    const cookie = importCookie.trim();
+    if (!name) { toastErr("请填写账号名称"); return; }
+    if (!cookie) { toastErr("Cookie 不能为空"); return; }
+    setImporting(true);
+    try {
+      const r = await fetch(API("/accounts"), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          name,
+          cookie,
+          proxy_url: accountForm.proxy_url || "",
+          user_agent: importUserAgent.trim() || "",
+          fp_browser_type: "builtin",
+          platform: accountForm.platform || "xhs",
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        toastErr(`添加失败：${data?.detail || `HTTP ${r.status}`}`);
+        return;
+      }
+      toastOk("账号已导入，正在检查 Cookie 健康度...");
+      importModal.onClose();
+      setImportCookie("");
+      setImportUserAgent("");
+      setAccountForm(emptyAccountForm);
+      await load();
+      // 自动检查 cookie 健康度（让用户立刻看到是否有效）
+      if (data?.id) {
+        try { await fetch(API(`/accounts/${data.id}/check-cookie`), { method: "POST", headers }); } catch {}
+        await load();
+      }
+    } catch (e: any) {
+      toastErr(`导入异常：${e?.message || e}`);
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -372,16 +418,26 @@ export function AccountsManagementCard({ token }: { token: string | null }) {
               value={accountForm.proxy_url}
               onValueChange={(v) => setAccountForm((f) => ({ ...f, proxy_url: v }))}
             />
-            <Button
-              color="primary"
-              startContent={<QrCode size={15} />}
-              isDisabled={!accountForm.name.trim() || accountForm.platform !== "xhs"}
-              onPress={startQrLogin}
-            >
-              扫码登录（仅小红书）
-            </Button>
+            <div className="flex gap-2 flex-wrap">
+              <Button
+                color="primary"
+                startContent={<QrCode size={15} />}
+                isDisabled={!accountForm.name.trim() || accountForm.platform !== "xhs"}
+                onPress={startQrLogin}
+              >
+                扫码登录（仅小红书）
+              </Button>
+              <Button
+                color="secondary"
+                variant="flat"
+                isDisabled={!accountForm.name.trim()}
+                onPress={importModal.onOpen}
+              >
+                导入 Cookie（任意平台）
+              </Button>
+            </div>
             <p className="text-xs text-default-400">
-              抖音 / 公众号：先随便填一个临时 cookie 添加进来（比如 <code>web_session=tmp</code>），然后点「编辑」录入正式 cookie。
+              抖音 / 公众号没有扫码登录入口，从浏览器 F12 → Application → Cookies 复制完整 cookie 字符串，粘贴到「导入 Cookie」即可。
             </p>
           </div>
         </CardBody>
@@ -415,6 +471,79 @@ export function AccountsManagementCard({ token }: { token: string | null }) {
             {(qrStatus === "failed" || qrStatus === "expired") && (
               <Button color="primary" onPress={startQrLogin}>重新扫码</Button>
             )}
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* 导入 Cookie Modal — 三平台通用 */}
+      <Modal isOpen={importModal.isOpen} onClose={importModal.onClose} size="2xl">
+        <ModalContent>
+          <ModalHeader className="flex flex-col gap-1">
+            <span>导入 Cookie · {PLATFORM_LABELS[(accountForm.platform || "xhs") as PlatformKey]}</span>
+            <span className="text-xs text-default-500 font-normal">
+              账号「{accountForm.name || "未命名"}」 / 平台「{accountForm.platform || "xhs"}」
+              {accountForm.proxy_url && " / 已配代理"}
+            </span>
+          </ModalHeader>
+          <ModalBody className="space-y-3">
+            <div className="text-xs text-default-500 leading-relaxed bg-default-50 rounded p-3 space-y-2">
+              <div><b>怎么拿 Cookie：</b></div>
+              {accountForm.platform === "xhs" && (
+                <ol className="list-decimal list-inside space-y-1">
+                  <li>浏览器登录 <code>www.xiaohongshu.com</code></li>
+                  <li>F12 → Application → Cookies → <code>https://www.xiaohongshu.com</code></li>
+                  <li>**关键 cookie**：<code>web_session</code>（必须有）+ <code>a1</code> <code>webId</code> <code>xsecappid</code> 等</li>
+                  <li>右键导出全部 / 用 EditThisCookie 插件导出，或手动复制每行成 <code>name=value;</code> 格式</li>
+                </ol>
+              )}
+              {accountForm.platform === "douyin" && (
+                <ol className="list-decimal list-inside space-y-1">
+                  <li>浏览器登录 <code>www.douyin.com</code></li>
+                  <li>F12 → Application → Cookies → <code>https://www.douyin.com</code></li>
+                  <li>**关键 cookie**：<code>sessionid</code> <code>sessionid_ss</code>（必须有）+ <code>ttwid</code> <code>passport_csrf_token</code> 等</li>
+                  <li>用 EditThisCookie / Cookie-Editor 插件导出更稳，手动会漏字段</li>
+                </ol>
+              )}
+              {accountForm.platform === "mp" && (
+                <ol className="list-decimal list-inside space-y-1">
+                  <li>浏览器登录 <code>mp.weixin.qq.com</code></li>
+                  <li>F12 → Application → Cookies → <code>https://mp.weixin.qq.com</code></li>
+                  <li>**关键 cookie**：<code>slave_user</code> <code>slave_sid</code> <code>data_bizuin</code> <code>data_ticket</code> <code>wxuin</code> 等（缺一不可）</li>
+                  <li>公众号 cookie 字段多，建议用插件一次性导出全部</li>
+                </ol>
+              )}
+              <div className="text-warning-700 mt-2">
+                ⚠️ Cookie 含登录凭证，仅你自己能看到 / 用，不会泄露给其他用户。失效后自动告警。
+              </div>
+            </div>
+
+            <Textarea
+              label="Cookie 字符串"
+              labelPlacement="outside"
+              placeholder="key1=value1; key2=value2; key3=value3"
+              minRows={6}
+              value={importCookie}
+              onValueChange={setImportCookie}
+              classNames={{ input: "font-mono text-xs" }}
+            />
+            <Input
+              label="User-Agent（可选，建议跟你的浏览器一致）"
+              labelPlacement="outside"
+              placeholder="Mozilla/5.0 (Macintosh; ...) AppleWebKit/... Chrome/..."
+              value={importUserAgent}
+              onValueChange={setImportUserAgent}
+            />
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="flat" onPress={importModal.onClose}>取消</Button>
+            <Button
+              color="primary"
+              isLoading={importing}
+              onPress={submitImportCookie}
+              isDisabled={!accountForm.name.trim() || !importCookie.trim() || importing}
+            >
+              导入并检查 Cookie
+            </Button>
           </ModalFooter>
         </ModalContent>
       </Modal>

@@ -528,13 +528,28 @@ async def add_creator(
             status_code=400,
             detail="无法识别平台。请提供博主主页 URL（小红书/抖音）或公众号名称（公众号请明确指定 platform=mp）",
         )
+
+    # 规范化 URL：xhs 短链（xhslink.com）必须 follow redirect 提取 user_id，
+    # 否则 fetch_creator_posts 拿短链直接 goto 拿不到 user_posted API
+    creator_url = req.creator_url.strip()
+    if plat.name == "xhs":
+        from ..services.monitor_fetcher import resolve_xhs_creator_url
+        resolved = await resolve_xhs_creator_url(creator_url)
+        if not resolved:
+            raise HTTPException(
+                status_code=400,
+                detail="无法解析小红书博主主页 URL。请直接复制博主页 URL（含 /user/profile/）"
+                       "或分享出来的短链 https://xhslink.com/o/...",
+            )
+        creator_url = resolved
+
     cid = await db.add_creator(
         user_id=current_user["id"],
         platform=plat.name,
-        creator_url=req.creator_url.strip(),
+        creator_url=creator_url,
         creator_name=req.creator_name or "",
     )
-    return {"ok": True, "id": cid, "platform": plat.name}
+    return {"ok": True, "id": cid, "platform": plat.name, "creator_url": creator_url}
 
 
 @router.delete("/creators/{creator_id}", summary="取消订阅")

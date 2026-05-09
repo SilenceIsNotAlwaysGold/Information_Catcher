@@ -134,6 +134,67 @@ def _extract_from_html(note_id: str, html: str) -> Optional[Dict]:
     }
 
 
+async def resolve_xhs_creator_url(raw_url: str) -> Optional[str]:
+    """把任意小红书博主链接（含短链 xhslink.com / 完整主页）规范化成
+    https://www.xiaohongshu.com/user/profile/{user_id} 形式。
+
+    短链需要 follow redirect。失败返回 None。
+    返回的 URL **不带 xsec_token**（token 有时效；fetcher 会用账号 cookie 兜底访问）。
+    """
+    link = (raw_url or "").strip()
+    if not link:
+        return None
+
+    # 已是规范主页 URL：剥掉 query 直接返回
+    if "/user/profile/" in link and "xiaohongshu.com" in link:
+        m = re.search(r"/user/profile/([^/?#]+)", link)
+        if m:
+            return f"https://www.xiaohongshu.com/user/profile/{m.group(1)}"
+        return None
+
+    # 短链 / 其它形态：follow redirect 拿到真实 URL
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True, max_redirects=10, timeout=15,
+        ) as client:
+            resp = await client.get(link, headers=_request_headers())
+            final_url = str(resp.url)
+            html_body = resp.text or ""
+    except Exception as e:
+        logger.warning(f"[creator] follow redirect failed for {link}: {e}")
+        return None
+
+    logger.info(f"[creator] {link} -> {final_url}")
+
+    # 路径 1：URL 已含 /user/profile/{id}
+    m = re.search(r"/user/profile/([^/?#]+)", final_url)
+    if m:
+        return f"https://www.xiaohongshu.com/user/profile/{m.group(1)}"
+
+    # 路径 2：跳到登录墙，从 redirectPath 取
+    parsed = urlparse(final_url)
+    if parsed.path.startswith("/login"):
+        from urllib.parse import unquote
+        redirect_path = parse_qs(parsed.query).get("redirectPath", [""])[0]
+        if redirect_path:
+            actual = unquote(redirect_path)
+            m = re.search(r"/user/profile/([^/?#]+)", actual)
+            if m:
+                return f"https://www.xiaohongshu.com/user/profile/{m.group(1)}"
+
+    # 路径 3：短链落地的 HTML 里嵌入 user_id（小红书有时用 JS 跳转）
+    m = re.search(r"/user/profile/([0-9a-fA-F]{24})", html_body)
+    if m:
+        return f"https://www.xiaohongshu.com/user/profile/{m.group(1)}"
+    # 兜底：HTML 里 userId 字段
+    m = re.search(r'"userId"\s*:\s*"([0-9a-fA-F]{24})"', html_body)
+    if m:
+        return f"https://www.xiaohongshu.com/user/profile/{m.group(1)}"
+
+    logger.warning(f"[creator] cannot extract user_id from {final_url}")
+    return None
+
+
 async def resolve_short_link(short_url: str) -> Optional[Dict]:
     """Follow xhslink.com redirect and extract note_id + xsec_token."""
     try:
@@ -227,6 +288,11 @@ async def fetch_note_metrics(
                 if "/login" in location:
                     logger.warning(f"[fetcher] {note_id}: 302 → login wall (XHS gated)")
                     return None, "login_required"
+                # /404 或 URL 包含 errorCode= 说明笔记不存在/已删除/私密/平台屏蔽
+                # XHS 常见错误码：-510001 = 内容不存在；其它 -5* 段都属于不可访问
+                if "/404" in location or "errorCode=" in location:
+                    logger.warning(f"[fetcher] {note_id}: 302 → 404 page (note deleted/private/blocked)")
+                    return None, "deleted"
                 logger.warning(f"[fetcher] {note_id}: unexpected {resp.status_code} → {location[:80]}")
                 return None, "error"
             if resp.status_code == 404:
