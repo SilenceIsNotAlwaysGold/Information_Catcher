@@ -559,92 +559,98 @@ async def delete_creator(
     return {"ok": True}
 
 
-@router.post("/creators/{creator_id}/check", summary="立刻抓取博主新发帖（手动触发）")
+@router.post("/creators/{creator_id}/check", summary="立刻抓取博主新发帖（手动触发，走扩展通道）")
 async def check_creator(
     creator_id: int,
     current_user: dict = Depends(get_current_user),
 ):
+    """通过浏览器扩展立刻抓取该博主主页，新帖入「我的关注」分组。
+
+    前提：用户已安装并连接 TrendPulse Helper 扩展，且浏览器已登录对应平台。
+    """
+    from ..services import extension_dispatcher
+
+    user_id = int(current_user["id"])
     creators = await db.list_creators(user_id=_scope_uid(current_user))
     creator = next((c for c in creators if c["id"] == creator_id), None)
     if not creator:
         raise HTTPException(status_code=404, detail="博主不存在")
-    plat = platform_registry.get_platform(creator["platform"])
-    if not plat:
-        raise HTTPException(status_code=400, detail="未知平台")
-    # 账号策略（2026-05 调整）：
-    #   - XHS 现已支持三路抓取（HTML / signed API / Playwright），第一路无需 cookie
-    #   - 抖音目前仍需 cookie 才能拉博主主页 user_posted
-    #   策略：有账号就传，没账号就传 None，让 fetcher 自己决定能不能 fallback
-    use_account = None
-    if creator["platform"] in ("douyin", "xhs"):
-        accs = await db.get_accounts(
-            include_secrets=True, user_id=current_user["id"],
-            platform=creator["platform"],
-        )
-        use_account = next((a for a in accs if a.get("cookie")), None)
-        # 抖音 fetcher 没账号会直接返回空，提前给个友好提示节省一次往返
-        if not use_account and creator["platform"] == "douyin":
-            raise HTTPException(
-                status_code=400,
-                detail="抖音追新需要先添加一个含 cookie 的账号（暂未支持无登录抓取）",
-            )
-    try:
-        posts = await plat.fetch_creator_posts(creator["creator_url"], account=use_account)
-    except NotImplementedError as e:
-        await db.mark_creator_status(creator_id, "error", "平台抓取未实现")
-        raise HTTPException(
-            status_code=501,
-            detail=f"{creator['platform']} 博主追新尚未实现。当前订阅记录已保存，等实现后自动启用。",
-        )
-    except Exception as e:
-        await db.mark_creator_status(creator_id, "error", str(e))
-        raise HTTPException(status_code=502, detail=f"抓取失败：{e}")
 
-    # 没账号 + 抓回 0 帖：HTML 路线 SSR 数据为空，提示加 cookie（不报错，让用户自决）
-    if not posts and not use_account and creator["platform"] == "xhs":
+    platform_name = creator["platform"] or "xhs"
+    if platform_name not in ("xhs", "douyin"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"暂不支持 {platform_name} 平台的博主追新",
+        )
+
+    if not extension_dispatcher.has_online_extension(user_id):
+        raise HTTPException(
+            status_code=503,
+            detail="未检测到在线浏览器扩展。请先安装 TrendPulse Helper 扩展，并在浏览器登录目标平台。",
+        )
+
+    # 通过扩展派发任务
+    if platform_name == "xhs":
+        res = await extension_dispatcher.dispatch_xhs_creator_posts(
+            user_id=user_id, url=creator["creator_url"],
+            timeout_ms=25000, overall_timeout=60.0,
+        )
+    else:
+        res = await extension_dispatcher.dispatch_douyin_creator_posts(
+            user_id=user_id, url=creator["creator_url"],
+            timeout_ms=25000, overall_timeout=60.0,
+        )
+
+    if not res.get("ok"):
+        # error 是稳定 code（captcha_required / login_required / ...），
+        # detail 是已翻译的中文提示。落库存原始 code 方便筛查，前端用 detail。
+        raw = (res.get("error") or "")[:200]
+        msg = res.get("detail") or raw or "扩展返回空结果"
+        # 风控类错误归类为 cookie_invalid，正常 error 归 error
+        status = "cookie_invalid" if raw in ("captcha_required", "login_required") else "error"
+        await db.mark_creator_status(creator_id, status, raw or "扩展返回失败")
+        raise HTTPException(status_code=502, detail=msg)
+
+    posts = res.get("posts") or []
+    last_post_id = creator.get("last_post_id") or ""
+
+    # 抓 0 帖 + 已经追过：可能用户没在该浏览器登录该平台
+    if not posts and last_post_id:
         await db.mark_creator_status(
-            creator_id, "no_account",
-            "无账号 cookie：尝试无登录 HTML 直拉，但小红书未给出 SSR 数据。"
-            "添加一个小红书账号（扫码登录）后追新会更稳定。",
+            creator_id, "ext_login_required",
+            "扩展已连接但抓取返回 0 帖，请确认浏览器已登录该平台",
         )
         return {
             "ok": True, "fetched": 0, "added": 0,
-            "warning": "本次未拿到帖子。建议添加一个小红书账号（扫码登录）后稳定追新。",
+            "warning": f"本次未拿到帖子。请确认浏览器已登录{('小红书' if platform_name == 'xhs' else '抖音')}。",
         }
-    # 把新帖子加到该用户的「我的关注」分组
+
+    # 入库 + 计 unread
     new_count = 0
-    last_post_id = creator.get("last_post_id") or ""
     newest = last_post_id
     for p in posts:
         pid = p.get("post_id")
         if not pid:
             continue
         if pid == last_post_id:
-            break  # 增量到这里就停
-        # 加到 monitor_posts
+            break
         await db.add_post(
             note_id=pid, title=p.get("title") or "",
             short_url=p.get("url") or "", note_url=p.get("url") or "",
             xsec_token=p.get("xsec_token", ""), xsec_source="app_share",
             account_id=None, post_type="own",
-            user_id=current_user["id"],
-            platform=plat.name,
+            user_id=user_id,
+            platform=platform_name,
         )
         new_count += 1
         if not newest:
             newest = pid
+
     await db.update_creator_check(
         creator_id, last_post_id=newest,
         creator_name=(posts[0].get("creator_name", "") if posts else ""),
     )
-    # 健康度 + 未读：跟 scheduler 路径同语义
-    if not posts and use_account and use_account.get("cookie") and last_post_id:
-        await db.mark_creator_status(
-            creator_id, "cookie_invalid",
-            "抓取返回 0 帖，cookie 可能失效",
-        )
-    else:
-        await db.mark_creator_status(creator_id, "ok")
+    await db.mark_creator_status(creator_id, "ok")
     if new_count:
         await db.add_creator_unread(creator_id, new_count)
     return {"ok": True, "fetched": len(posts), "added": new_count}
@@ -704,20 +710,32 @@ async def check_live(
     live_id: int,
     current_user: dict = Depends(get_current_user),
 ):
+    from ..services import extension_dispatcher
+    user_id = int(current_user["id"])
     lives = await db.list_lives(user_id=_scope_uid(current_user))
     live = next((l for l in lives if l["id"] == live_id), None)
     if not live:
         raise HTTPException(status_code=404, detail="直播订阅不存在")
-    accs = await db.get_accounts(
-        include_secrets=True, user_id=current_user["id"], platform="douyin",
+    if not extension_dispatcher.has_online_extension(user_id):
+        raise HTTPException(
+            status_code=503,
+            detail="未检测到在线浏览器扩展。请先安装 TrendPulse Helper 扩展，并在浏览器登录抖音。",
+        )
+    res = await extension_dispatcher.dispatch_douyin_live_status(
+        user_id=user_id, live_url=live["room_url"],
     )
-    account = next((a for a in accs if a.get("cookie")), None)
-    if not account:
-        raise HTTPException(status_code=400, detail="需要先添加一个抖音账号（含 cookie）")
-    from ..services.platforms.douyin import live_fetcher
-    state = await live_fetcher.fetch_live_state(live["room_url"], account)
-    if not state:
-        raise HTTPException(status_code=502, detail="未抓到直播间状态（可能未开播）")
+    if not res.get("ok"):
+        raise HTTPException(
+            status_code=502,
+            detail=f"未抓到直播间状态：{res.get('error', '')[:200] or '可能未开播'}",
+        )
+    state = {
+        "online": res.get("online_count", 0),
+        "title": res.get("title", ""),
+        "streamer_name": "",
+        "room_id": "",
+        "gifts": [],
+    }
     import json as _json
     await db.update_live_check(
         live_id,

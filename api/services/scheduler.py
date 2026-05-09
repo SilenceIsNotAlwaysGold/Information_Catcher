@@ -411,11 +411,13 @@ async def run_monitor():
 
 
 async def run_own_comments_check():
-    """独立轮询绑定了 account_id 的「我的帖子」组的评论。
+    """轮询「我的帖子」评论 — 走浏览器扩展通道。
 
-    跟 _check_post 内的 alert-driven 拉评论不同，这个任务定期主动拉，
-    第一时间发现新评论（时效性比靠涨幅触发好得多）。
+    扩展用用户已登录的浏览器抓评论，零封号风险。
+    没在线扩展的用户：跳过该轮，等用户连上再跑。
     """
+    from . import extension_dispatcher
+
     settings = await db.get_all_settings()
     if settings.get("own_comments_enabled", "1") != "1":
         return
@@ -423,27 +425,53 @@ async def run_own_comments_check():
         return
 
     posts = await db.get_active_posts()
-    own_posts = [p for p in posts if p.get("account_id") and (p.get("platform") or "xhs") in ("xhs", "douyin")]
+    own_posts = [
+        p for p in posts
+        if p.get("account_id") and (p.get("platform") or "xhs") in ("xhs", "douyin")
+    ]
     if not own_posts:
         return
-    logger.info(f"[own_comments] checking {len(own_posts)} 我的帖子")
+    logger.info(f"[own_comments] checking {len(own_posts)} 我的帖子 via extension")
 
     from . import auth_service
+    online_cache: dict = {}
     new_total = 0
+
+    def _has_ext(uid):
+        if uid not in online_cache:
+            online_cache[uid] = extension_dispatcher.has_online_extension(uid)
+        return online_cache[uid]
+
     for post in own_posts:
+        uid = post.get("user_id")
+        if not _has_ext(uid):
+            continue  # 该用户没装扩展，跳过本轮
+        platform_name = post.get("platform") or "xhs"
         try:
-            account = await db.get_account(post["account_id"])
-            if not account or account.get("cookie_status") == "expired":
+            if platform_name == "xhs":
+                res = await extension_dispatcher.dispatch_xhs_fetch_comments(
+                    user_id=uid, note_id=post["note_id"],
+                    xsec_token=post.get("xsec_token", ""),
+                )
+            else:  # douyin
+                res = await extension_dispatcher.dispatch_douyin_fetch_comments(
+                    user_id=uid, aweme_id=post["note_id"],
+                )
+            if not res.get("ok"):
+                await db.log_fetch(
+                    platform=platform_name, task_type="comment", status="error",
+                    account_id=None, note_id=post["note_id"],
+                    note=res.get("error", "")[:200],
+                )
                 continue
-            raw_comments = await comment_fetcher.fetch_note_comments(
-                post["note_id"], post.get("xsec_token", ""), account, max_count=20,
-            )
-            new_comments = await db.add_note_comments(post["note_id"], raw_comments)
+
+            # 入库 + 取新增列表
+            raw = res.get("comments") or []
+            new_comments = await db.add_note_comments(post["note_id"], raw)
             if not new_comments:
                 continue
             new_total += len(new_comments)
-            # 推送给该用户
-            uid = post.get("user_id")
+
             u = auth_service.get_user_by_id(uid) if uid else {}
             wecom = (u or {}).get("wecom_webhook_url", "")
             feishu = (u or {}).get("feishu_webhook_url", "")
@@ -456,45 +484,42 @@ async def run_own_comments_check():
                     feishu_chat_id=chat,
                 )
             await db.log_fetch(
-                platform=post.get("platform") or "xhs",
-                task_type="comment", status="ok",
-                account_id=post["account_id"], note_id=post["note_id"],
-                note=f"new={len(new_comments)}",
+                platform=platform_name, task_type="comment", status="ok",
+                account_id=None, note_id=post["note_id"],
+                note=f"new={len(new_comments)} via=extension",
             )
         except Exception as e:
             logger.error(f"[own_comments] error on {post['note_id']}: {e}")
             await db.log_fetch(
-                platform="xhs", task_type="comment", status="error",
-                account_id=post.get("account_id"), note_id=post["note_id"],
+                platform=platform_name, task_type="comment", status="error",
+                account_id=None, note_id=post["note_id"],
                 note=str(e)[:200],
             )
     if new_total:
-        logger.info(f"[own_comments] 新增 {new_total} 条评论")
+        logger.info(f"[own_comments] 新增 {new_total} 条评论 via extension")
 
 
 async def run_creator_check():
-    """博主订阅追新：定时遍历 monitor_creators，把新发的帖子拉进监控列表。
+    """博主订阅追新：通过浏览器扩展拉博主主页，新帖入监控列表。
 
-    断点续爬：按 crawl_cursor 表排序，先跑"上次执行最早"的 creator，
-    某 creator 连续失败 5 次降权到队尾（熔断）。崩溃恢复后从断点续上。
+    完全走扩展通道（用户在自己浏览器里登录 → 扩展拦截 user_posted/aweme/post API）。
+    没有在线扩展时跳过该用户的所有 creator，标记 'no_extension' 状态等待用户安装。
     """
+    from . import extension_dispatcher
+
     creators = await db.list_creators()
     if not creators:
         return
-    # 排序 creator：上次跑得最早的优先
     creator_by_key = {f"creator:{c['id']}": c for c in creators}
     sorted_keys = await db.cursor_sort_by_last_run(
         "creator", list(creator_by_key.keys()),
     )
     logger.info(
-        f"[creator_check] checking {len(creators)} creators (cursor-ordered)"
+        f"[creator_check] checking {len(creators)} creators via extension (cursor-ordered)"
     )
 
-    # 每个用户的抖音/XHS 账号缓存（追新需要登录账号）
-    douyin_accounts_by_uid: dict = {}
-    xhs_accounts_by_uid: dict = {}
-    # 用户级推送渠道缓存（飞书 chat_id / webhook、企微 webhook）
     user_channels: dict = {}
+    online_cache: dict = {}  # user_id → bool 缓存当轮的在线扩展状态
     from . import auth_service as _auth
 
     def _channels(uid):
@@ -509,77 +534,63 @@ async def run_creator_check():
         user_channels[uid] = ch
         return ch
 
+    def _has_ext(uid):
+        if uid not in online_cache:
+            online_cache[uid] = extension_dispatcher.has_online_extension(uid)
+        return online_cache[uid]
+
     for ck in sorted_keys:
         creator = creator_by_key[ck]
-        plat = platform_registry.get_platform(creator.get("platform") or "xhs")
-        if not plat:
-            continue
+        platform_name = creator.get("platform") or "xhs"
         uid = creator.get("user_id")
 
-        account = None
-        if creator.get("platform") == "douyin":
-            if uid not in douyin_accounts_by_uid:
-                accs = await db.get_accounts(
-                    include_secrets=True, user_id=uid, platform="douyin",
-                )
-                douyin_accounts_by_uid[uid] = next(
-                    (a for a in accs if a.get("cookie")), None,
-                )
-            account = douyin_accounts_by_uid.get(uid)
-            if not account:
-                await db.mark_creator_status(
-                    creator["id"], "no_account", "无可用抖音账号 cookie",
-                )
-                continue
-        elif creator.get("platform") == "xhs":
-            if uid not in xhs_accounts_by_uid:
-                accs = await db.get_accounts(
-                    include_secrets=True, user_id=uid, platform="xhs",
-                )
-                xhs_accounts_by_uid[uid] = next(
-                    (a for a in accs if a.get("cookie")), None,
-                )
-            account = xhs_accounts_by_uid.get(uid)
-            if not account:
-                await db.mark_creator_status(
-                    creator["id"], "no_account", "无可用小红书账号 cookie",
-                )
-                continue
-        # 账号 cookie 状态硬过期就别用（fast path 走 risk control）
-        if account and account.get("cookie_status") == "expired":
+        if not _has_ext(uid):
             await db.mark_creator_status(
-                creator["id"], "cookie_invalid",
-                f"账号 '{account.get('name')}' cookie 已失效",
+                creator["id"], "no_extension",
+                "需要安装并连接 Pulse Helper 浏览器扩展，登录平台账号即可",
             )
             continue
 
         await db.cursor_mark_running("creator", ck)
         try:
-            posts = await plat.fetch_creator_posts(creator["creator_url"], account=account)
-        except NotImplementedError:
-            await db.cursor_mark_failed("creator", ck, "platform NotImplementedError")
-            await db.mark_creator_status(creator["id"], "error", "平台抓取未实现")
-            continue
+            if platform_name == "xhs":
+                res = await extension_dispatcher.dispatch_xhs_creator_posts(
+                    user_id=uid, url=creator["creator_url"],
+                    timeout_ms=25000, overall_timeout=60.0,
+                )
+            elif platform_name == "douyin":
+                res = await extension_dispatcher.dispatch_douyin_creator_posts(
+                    user_id=uid, url=creator["creator_url"],
+                    timeout_ms=25000, overall_timeout=60.0,
+                )
+            else:
+                await db.cursor_mark_failed("creator", ck, f"unknown platform {platform_name}")
+                await db.mark_creator_status(creator["id"], "error", f"暂不支持的平台 {platform_name}")
+                continue
         except Exception as e:
-            logger.error(f"[creator_check] {creator['creator_url']} error: {e}")
+            logger.error(f"[creator_check] {creator['creator_url']} dispatch error: {e}")
             await db.cursor_mark_failed("creator", ck, str(e))
             await db.mark_creator_status(creator["id"], "error", str(e))
             continue
 
-        # 抓回 0 帖且账号已带 cookie：大概率 cookie 失效（XHS 跳登录墙）
-        # 如果是首次订阅（last_post_id 为空），给条警告但不打 cookie_invalid
+        if not res.get("ok"):
+            raw = (res.get("error") or "")[:200]
+            msg = (res.get("detail") or raw or "扩展返回失败")[:200]
+            await db.cursor_mark_failed("creator", ck, raw or "fail")
+            # 风控类错误归类为 cookie_invalid 让前端显示对应的提示
+            status = "cookie_invalid" if raw in ("captcha_required", "login_required") else "error"
+            await db.mark_creator_status(creator["id"], status, msg)
+            continue
+
+        posts = res.get("posts") or []
         last_post_id = creator.get("last_post_id") or ""
-        if not posts and account and account.get("cookie"):
-            if last_post_id:
-                # 之前抓到过，现在 0 帖更可疑 → 标失效
-                await db.mark_creator_status(
-                    creator["id"], "cookie_invalid",
-                    "抓取返回 0 帖，cookie 可能失效或博主主页无内容",
-                )
-            else:
-                await db.mark_creator_status(
-                    creator["id"], "error", "首次抓取返回 0 帖",
-                )
+
+        # 抓回 0 帖：如果之前已经抓到过，可能是用户没在该浏览器登录该平台
+        if not posts and last_post_id:
+            await db.mark_creator_status(
+                creator["id"], "ext_login_required",
+                "扩展已连接但抓取返回 0 帖，请确认浏览器已登录该平台",
+            )
             await db.cursor_mark_done("creator", ck)
             continue
 
@@ -599,7 +610,7 @@ async def run_creator_check():
                     xsec_token=p.get("xsec_token", ""), xsec_source="app_share",
                     account_id=None, post_type="own",
                     user_id=uid,
-                    platform=plat.name,
+                    platform=platform_name,
                 )
                 added += 1
                 new_posts.append(p)
@@ -630,7 +641,7 @@ async def run_creator_check():
                             or (new_posts[0].get("creator_name") if new_posts else "")
                             or creator.get("creator_url", "")
                         ),
-                        platform=plat.name,
+                        platform=platform_name,
                         posts=new_posts,
                         feishu_chat_id=chat_id,
                     )
@@ -639,38 +650,47 @@ async def run_creator_check():
 
 
 async def run_live_check():
-    """直播间监控 v1：每个 live 拉一次 enter API；在线人数涨幅超阈值告警。"""
+    """直播间监控：通过浏览器扩展拉直播间状态（在线人数 / 主播信息）。
+
+    扩展跑在用户自己浏览器里，零封号风险。
+    """
+    from . import extension_dispatcher
+
     lives = await db.list_lives()
     if not lives:
         return
-    logger.info(f"[live_check] checking {len(lives)} live rooms")
+    logger.info(f"[live_check] checking {len(lives)} live rooms via extension")
 
-    from .platforms.douyin import live_fetcher
     from . import auth_service
     import json as _json
 
-    douyin_accs_by_uid: dict = {}
+    online_cache: dict = {}
+
+    def _has_ext(uid):
+        if uid not in online_cache:
+            online_cache[uid] = extension_dispatcher.has_online_extension(uid)
+        return online_cache[uid]
 
     for live in lives:
         uid = live.get("user_id")
-        if uid not in douyin_accs_by_uid:
-            accs = await db.get_accounts(
-                include_secrets=True, user_id=uid, platform="douyin",
-            )
-            douyin_accs_by_uid[uid] = next(
-                (a for a in accs if a.get("cookie")), None,
-            )
-        account = douyin_accs_by_uid.get(uid)
-        if not account:
+        if not _has_ext(uid):
             continue
 
         try:
-            state = await live_fetcher.fetch_live_state(live["room_url"], account)
+            res = await extension_dispatcher.dispatch_douyin_live_status(
+                user_id=uid, live_url=live["room_url"],
+            )
         except Exception as e:
-            logger.error(f"[live_check] {live['room_url']} error: {e}")
+            logger.error(f"[live_check] {live['room_url']} dispatch error: {e}")
             continue
-        if not state:
+        if not res or not res.get("ok"):
             continue
+        state = {
+            "online": res.get("online_count", 0),
+            "gifts": [],
+            "streamer_name": "",
+            "room_id": "",
+        }
 
         prev_online = int(live.get("last_online") or 0)
         new_online = int(state.get("online") or 0)
@@ -704,74 +724,47 @@ async def run_live_check():
 
 
 async def run_cookie_health_check():
-    """Cookie 健康度探针（按租户分发推送）。
+    """Deprecated: Pulse 已切扩展通道，cookie 不再驱动抓取流程。"""
+    return
 
-    流程：
-      1) 遍历所有 active 账号 → 调 cookie_health.check_cookie 拿到 valid/expired/unknown
-      2) 写回 cookie_status + cookie_last_check
-      3) 把「这次新转 expired」的账号按 user_id 分桶
-         - 普通用户桶：用该用户在 users 表里配置的 wecom/feishu webhook
-         - 共享池桶（is_shared=1，user_id 缺失/为 0）：fallback 到 settings 的全局 webhook
-      4) 每桶单独发一次 notify_cookie_expired，避免把 A 用户的过期账号推给 B 用户
+
+async def run_ext_task_retry():
+    """扩展任务重试 + 超时清理 worker。
+
+    每次跑：
+      1. 把 running 超过 5 分钟还没 ack 的任务回退到 pending
+      2. 取 pending 任务，按 user_id 分组，对在线扩展派发
+      3. 派完写回 done / failed
+      4. 顺便清理 7 天前的 done/failed 任务
     """
-    from . import auth_service
+    from . import extension_dispatcher
+    from ..routers.extension import registry
 
-    settings = await db.get_all_settings()
-    global_wecom  = settings.get("webhook_url", "")
-    global_feishu = settings.get("feishu_webhook_url", "")
+    # 1. 超时回退
+    timed_out = await db.ext_task_running_timeout(timeout_sec=300)
+    if timed_out:
+        logger.info(f"[ext-retry] reset {timed_out} stuck running tasks → pending")
 
-    accounts = await db.get_accounts(include_secrets=True)
-    # newly_expired_by_uid：键 None 留给共享池/无主账号 → 走全局 webhook
-    newly_expired_by_uid: dict = {}
-
-    for acc in accounts:
-        if not acc.get("is_active"):
-            continue
-        prev = acc.get("cookie_status") or "unknown"
-        new_status = await cookie_health.check_cookie(acc)
-        await db.update_cookie_status(acc["id"], new_status)
-        logger.info(f"[cookie_check] {acc.get('name')}: {prev} -> {new_status}")
-
-        if new_status == "expired" and prev != "expired":
-            display = acc.get("name") or f"#{acc['id']}"
-            uid = acc.get("user_id")
-            # 共享池 / 老数据（user_id=0 或 NULL）统一归到 None 桶
-            if acc.get("is_shared") or not uid:
-                bucket_key = None
-            else:
-                bucket_key = int(uid)
-            newly_expired_by_uid.setdefault(bucket_key, []).append(display)
-
-    if not newly_expired_by_uid:
-        return
-
-    user_cache: dict = {}
-    for uid, names in newly_expired_by_uid.items():
-        if uid is None:
-            wecom = global_wecom
-            feishu = global_feishu
-            chat = ""
-        else:
-            if uid not in user_cache:
-                user_cache[uid] = auth_service.get_user_by_id(uid) or {}
-            u = user_cache[uid]
-            wecom = u.get("wecom_webhook_url", "") or ""
-            feishu = u.get("feishu_webhook_url", "") or ""
-            chat = u.get("feishu_chat_id", "") or ""
-
-        wecom_sent = 0
-        feishu_sent = 0
-        if wecom or feishu or chat:
+    # 2. 取 pending 任务，最多 100 条
+    pending = await db.ext_task_get_pending(limit=100)
+    if pending:
+        for task in pending:
+            uid = task["user_id"]
+            if registry.online_count(uid) == 0:
+                continue  # 用户没在线扩展，下轮再说
+            await db.ext_task_mark_running(task["id"])
             try:
-                await notifier.notify_cookie_expired(wecom, feishu, names, feishu_chat_id=chat)
-                wecom_sent = 1 if wecom else 0
-                feishu_sent = 1 if (feishu or chat) else 0
+                ws_task = {"id": str(task["id"]), "type": task["type"], "payload": task["payload"]}
+                result = await registry.dispatch(uid, ws_task, timeout=90.0)
+                await db.ext_task_mark_done(task["id"], result)
             except Exception as e:
-                logger.warning(f"[cookie_check] notify error tenant={uid}: {e}")
-        logger.info(
-            f"[cookie_check] tenant={uid} expired={names} "
-            f"→ wecom_sent={wecom_sent} feishu_sent={feishu_sent}"
-        )
+                await db.ext_task_mark_failed(task["id"], str(e))
+                logger.warning(f"[ext-retry] task#{task['id']} ({task['type']}) failed: {e}")
+
+    # 3. 清理老任务（每次跑都清，反正是 cheap operation）
+    cleaned = await db.ext_task_cleanup_done(older_than_days=7)
+    if cleaned:
+        logger.info(f"[ext-retry] cleaned {cleaned} old done/failed tasks")
 
 
 async def run_daily_report():
@@ -903,7 +896,12 @@ async def run_trending_monitor(platform: Optional[str] = None, user_id: Optional
     if platform:
         platform = platform.lower()
         accounts = [a for a in accounts if (a.get("platform") or "xhs").lower() == platform]
-    if not accounts:
+
+    # 扩展通道开关：'1' 强制走扩展、'0' 强制走 cookie、'auto' 优先扩展回退 cookie
+    via_ext_mode = (settings.get("trending_via_extension") or "auto").lower()
+    from . import extension_dispatcher
+
+    if not accounts and via_ext_mode == "0":
         logger.warning(
             f"[trending] no active accounts configured (platform={platform or 'all'}), skipping"
         )
@@ -935,6 +933,45 @@ async def run_trending_monitor(platform: Optional[str] = None, user_id: Optional
 
         for idx, keyword in enumerate(keyword_order):
             cursor_key = f"trending:{uid}:{keyword}"
+
+            # 优先尝试扩展通道（'1' 强制 / 'auto' 当用户有在线扩展时）
+            use_ext = False
+            if via_ext_mode == "1":
+                use_ext = True
+            elif via_ext_mode == "auto" and extension_dispatcher.has_online_extension(uid):
+                use_ext = True
+
+            if use_ext:
+                ext_platform = "xhs"  # 当前扩展只实现了 xhs.search；douyin 在 P4 落地后扩展这里
+                if platform and platform != ext_platform:
+                    # 用户手动指定了非 xhs 平台 → 扩展暂不支持，跳过
+                    continue
+                await db.cursor_mark_running("trending", cursor_key)
+                import time as _t
+                _t0 = _t.perf_counter()
+                try:
+                    res = await extension_dispatcher.dispatch_xhs_search(
+                        user_id=uid, keyword=keyword, min_likes=min_likes,
+                        timeout_ms=30000, pages=2, overall_timeout=90.0,
+                    )
+                    _ms = int((_t.perf_counter() - _t0) * 1000)
+                    await db.log_fetch(
+                        platform=ext_platform, task_type="trending",
+                        status="ok" if res.get("ok") else "error",
+                        latency_ms=_ms,
+                        account_id=None,
+                        note=f"user={uid} kw={keyword} via=extension captured={res.get('captured', 0)} new={res.get('inserted', 0)} err={res.get('error','')[:120]}",
+                    )
+                    await db.cursor_mark_done("trending", cursor_key)
+                except Exception as e:
+                    logger.error(f"[trending-ext] user={uid} keyword='{keyword}' error: {e}")
+                    await db.cursor_mark_failed("trending", cursor_key, str(e))
+                continue  # 扩展通道处理完进入下一个 keyword
+
+            # 走原 cookie 账号通道
+            if not accounts:
+                logger.debug(f"[trending] user={uid} kw={keyword} no online extension, no cookie account; skip")
+                continue
             account = accounts[idx % len(accounts)]
             acc_platform = (account.get("platform") or "xhs").lower()
             plat = platform_registry.get_platform(acc_platform)
@@ -1144,12 +1181,17 @@ async def start_scheduler():
     # 直播间状态轮询（每 5 分钟）
     scheduler.add_job(run_live_check, "interval", minutes=5,
                       id="live_check", replace_existing=True)
-    # Cookie 健康度探针：每 6 小时跑一次，按 user_id 分桶推送 webhook。
-    # 间隔不能太短，否则探测请求本身可能触发风控；6h 兼顾及时性 + 安全性。
+    # Cookie 健康度探针：已废弃（Pulse 已全面切扩展通道）。
+    try:
+        scheduler.remove_job("cookie_health")
+    except Exception:
+        pass
+
+    # 扩展任务重试 + 超时清理：每分钟跑一次
+    # 主要场景：扩展离线时排队的任务，扩展上线后被这个 worker 派发
     scheduler.add_job(
-        run_cookie_health_check,
-        CronTrigger(hour="*/6", minute=0, timezone="Asia/Shanghai"),
-        id="cookie_health", replace_existing=True,
+        run_ext_task_retry, "interval", minutes=1,
+        id="ext_task_retry", replace_existing=True, max_instances=1,
     )
     # 商品图异步上传到七牛：每 1 分钟跑一次，每次最多 3 张
     # 监控任务跟它在一台机器上抢出向带宽（这台 ECS ~5Mbps），所以频率/批量都设保守
