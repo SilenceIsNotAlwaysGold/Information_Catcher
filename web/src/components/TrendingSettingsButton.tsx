@@ -37,6 +37,7 @@ export function TrendingSettingsButton() {
   const [enabled, setEnabled] = useState(false);
   const [keywords, setKeywords] = useState("");
   const [minLikes, setMinLikes] = useState<string>("1000");
+  const [maxPerKeyword, setMaxPerKeyword] = useState<string>("30");
 
   const load = async () => {
     if (!token) return;
@@ -48,6 +49,7 @@ export function TrendingSettingsButton() {
       setEnabled(d.trending_enabled === "1" || d.trending_enabled === true);
       setKeywords(d.trending_keywords || "");
       setMinLikes(String(d.trending_min_likes || 1000));
+      setMaxPerKeyword(String(d.trending_max_per_keyword || 30));
     } catch (e: any) {
       toastErr(`读取设置失败：${e?.message || e}`);
     } finally {
@@ -68,6 +70,10 @@ export function TrendingSettingsButton() {
         trending_enabled: enabled,
         trending_keywords: keywords.trim(),
         trending_min_likes: Math.max(1, parseInt(minLikes || "1000")),
+        trending_max_per_keyword: Math.max(
+          1,
+          Math.min(200, parseInt(maxPerKeyword || "30") || 30),
+        ),
       };
       const r = await fetch(API("/settings"), {
         method: "PUT", headers, body: JSON.stringify(payload),
@@ -104,7 +110,7 @@ export function TrendingSettingsButton() {
           <ModalBody className="space-y-4">
             <p className="text-xs text-default-400">
               这些设置只影响你自己的热门池：你的关键词、你的阈值、你的抓取触发。
-              账号 cookie 池由管理员统一维护，所有用户共享。
+              抓取通过你自己的浏览器扩展执行（请先安装 TrendPulse Helper 并登录平台）。
             </p>
 
             <div className="flex items-center justify-between">
@@ -142,6 +148,18 @@ export function TrendingSettingsButton() {
               onValueChange={setMinLikes}
               isDisabled={loading}
               description="点赞数低于该值的帖子直接过滤掉"
+            />
+
+            <Input
+              label="单关键词单次抓取数量"
+              labelPlacement="outside"
+              type="number"
+              min={1}
+              max={200}
+              value={maxPerKeyword}
+              onValueChange={setMaxPerKeyword}
+              isDisabled={loading}
+              description="每个关键词每次定时任务抓多少篇（1-200，默认 30；浏览器单次最多约 100，超过会按页数 cap）"
             />
           </ModalBody>
           <ModalFooter>

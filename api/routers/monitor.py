@@ -1134,6 +1134,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     base["trending_keywords"] = me.get("trending_keywords", "") or ""
     base["trending_enabled"] = "1" if me.get("trending_enabled") else "0"
     base["trending_min_likes"] = str(me.get("trending_min_likes") or 1000)
+    base["trending_max_per_keyword"] = str(me.get("trending_max_per_keyword") or 30)
     return base
 
 
@@ -1157,12 +1158,14 @@ async def update_settings(
     # 2026-05 多租户：trending 配置（keywords / enabled / min_likes）改为 per-user，
     # 不再写到全局 monitor_settings；trending_account_ids 仍然全局（admin 配共享池）。
     if (req.trending_keywords is not None or req.trending_enabled is not None
-            or req.trending_min_likes is not None):
+            or req.trending_min_likes is not None
+            or req.trending_max_per_keyword is not None):
         auth_service.update_user_trending(
             current_user["id"],
             keywords=req.trending_keywords,
             enabled=req.trending_enabled,
             min_likes=req.trending_min_likes,
+            max_per_keyword=req.trending_max_per_keyword,
         )
 
     simple_fields = [

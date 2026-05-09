@@ -234,9 +234,10 @@ async def extension_recommended_version() -> Dict[str, Any]:
 class XhsSearchRequest(BaseModel):
     keyword: str
     min_likes: int = 0
+    max_results: int = 30           # 想抓多少篇（1-200，超过 100 会被扩展端 5 页 cap）
     timeout_ms: int = 25000
-    pages: int = 2
-    timeout: float = 60.0  # 整体调度超时（秒）
+    timeout: float = 60.0           # 整体调度超时（秒）
+    pages: Optional[int] = None     # 兼容老调用；不传时按 max_results 自动算
 
 
 @router.post("/run_xhs_search")
@@ -257,6 +258,7 @@ async def run_xhs_search(
         user_id=user_id,
         keyword=body.keyword.strip(),
         min_likes=body.min_likes,
+        max_results=body.max_results,
         timeout_ms=body.timeout_ms,
         pages=body.pages,
         overall_timeout=body.timeout,
@@ -281,6 +283,7 @@ async def run_douyin_search(
         user_id=user_id,
         keyword=body.keyword.strip(),
         min_likes=body.min_likes,
+        max_results=body.max_results,
         timeout_ms=body.timeout_ms,
         pages=body.pages,
         overall_timeout=body.timeout,

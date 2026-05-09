@@ -38,30 +38,66 @@ def online_count(user_id: int) -> int:
 # 翻译成用户友好的中文提示。增加新 code 时同步更新这张表。
 _ERROR_CODE_MESSAGES = {
     "captcha_required": (
-        "触发了平台滑块验证。请在浏览器里打开该平台手动通过一次滑块（任意页面操作即可），"
-        "通常 5–10 分钟后再重试就能恢复。"
+        "触发了平台滑块验证。请在浏览器手动通过一次滑块后重试。"
     ),
     "login_required": (
         "浏览器未登录该平台（已被跳转到登录页）。请在浏览器登录账号后重试。"
     ),
     "no_response_captured": (
-        "未捕获到目标接口响应（可能已触发风控或网络异常）。建议降低任务频率，"
-        "或在浏览器手动浏览几分钟后再试。"
+        "未捕获到目标接口响应。可能页面没正常加载，请重试一次。"
     ),
     "no online extension": (
         "未检测到在线浏览器扩展。请先安装 TrendPulse Helper 并保持浏览器登录。"
     ),
 }
 
+# 警告高频任务的阈值：同一 user × type 在 N 秒内调用 K 次以上，translate 时附加频率提示
+_HIGH_FREQ_WINDOW_SEC = 60
+_HIGH_FREQ_THRESHOLD = 5
+# (user_id, task_type) → list[unix_ts]
+_recent_calls: Dict = {}
 
-def translate_error(raw: str) -> str:
-    """把 raw error code 转成中文用户提示。未识别的 code 原样返回。"""
+
+def _is_high_freq(user_id: Optional[int], task_type: str) -> bool:
+    """判断该用户该任务类型是否在最近窗口内调用过于频繁（超阈值）。
+
+    每次调用都先把窗口外的旧时间戳清掉，再检查长度。无 user_id 时不限速。
+    """
+    if user_id is None:
+        return False
+    import time as _time
+    key = (int(user_id), str(task_type or ""))
+    now = _time.time()
+    history = _recent_calls.setdefault(key, [])
+    # GC 旧的
+    while history and now - history[0] > _HIGH_FREQ_WINDOW_SEC:
+        history.pop(0)
+    history.append(now)
+    return len(history) > _HIGH_FREQ_THRESHOLD
+
+
+def translate_error(
+    raw: str,
+    *,
+    user_id: Optional[int] = None,
+    task_type: str = "",
+) -> str:
+    """把 raw error code 翻译成中文。
+
+    只在「同一用户同一任务类型 1 分钟内连点超过 5 次」时才追加「降低频率」提示，
+    避免每个手动操作都被无谓劝退。
+    """
     if not raw:
         return "抓取失败（未知原因）"
-    # registry 失败时可能返 'task xxx timeout after Ns'，归到 no_response
+    code = raw.strip()
     if "timeout" in raw.lower():
-        return f"扩展抓取超时（{raw}）。建议稍后重试或降低任务频率。"
-    return _ERROR_CODE_MESSAGES.get(raw.strip(), raw)
+        msg = "扩展抓取超时，请稍后重试。"
+    else:
+        msg = _ERROR_CODE_MESSAGES.get(code, raw)
+
+    if _is_high_freq(user_id, task_type):
+        msg += "（最近调用很频繁，建议稍微放慢节奏避免触发风控）"
+    return msg
 
 
 async def dispatch_xhs_search(
@@ -69,11 +105,16 @@ async def dispatch_xhs_search(
     user_id: int,
     keyword: str,
     min_likes: int = 0,
+    max_results: int = 30,           # 用户配的"想抓多少篇"
     timeout_ms: int = 30000,
-    pages: int = 2,
     overall_timeout: float = 90.0,
+    pages: Optional[int] = None,     # 兼容老调用；不传则按 max_results 自动算
 ) -> Dict[str, Any]:
     """通过扩展派 1 次 XHS 关键词搜索，结果落 trending_posts。
+
+    `max_results` 控制目标抓取数量：每页约 18-20 张，pages = ceil(N/18)，
+    单次最多 5 页（扩展端 hard cap）→ 单关键词上限约 100 张。
+    抓回来后按 max_results 截断，多余的直接丢弃。
 
     返回:
       {"ok": True, "captured": N, "inserted": M, "updated": K, "raw_hits": ...}
@@ -81,6 +122,12 @@ async def dispatch_xhs_search(
     """
     if not has_online_extension(user_id):
         return {"ok": False, "stage": "no_online_extension", "error": "no online extension", "detail": translate_error("no online extension")}
+
+    max_results = max(1, min(int(max_results or 30), 200))
+    if pages is None:
+        # 每页 18 张估算，多 1 页 buffer，硬上限 6（扩展会 clamp 到 5）
+        import math
+        pages = min(6, max(1, math.ceil(max_results / 18) + 1))
 
     task = {
         "id": uuid.uuid4().hex,
@@ -99,6 +146,9 @@ async def dispatch_xhs_search(
         return {"ok": False, "stage": "dispatch", "error": str(e), "detail": translate_error(str(e))}
 
     notes = (result or {}).get("notes") or []
+    # 按用户配的目标数量截断
+    if len(notes) > max_results:
+        notes = notes[:max_results]
     inserted, updated = await ingest_xhs_notes(user_id=user_id, keyword=keyword, notes=notes)
     return {
         "ok": True,
@@ -106,6 +156,7 @@ async def dispatch_xhs_search(
         "inserted": inserted,
         "updated": updated,
         "raw_hits": (result or {}).get("raw_hits", 0),
+        "target_max": max_results,
     }
 
 
@@ -114,13 +165,19 @@ async def dispatch_douyin_search(
     user_id: int,
     keyword: str,
     min_likes: int = 0,
+    max_results: int = 30,
     timeout_ms: int = 30000,
-    pages: int = 2,
     overall_timeout: float = 90.0,
+    pages: Optional[int] = None,
 ) -> Dict[str, Any]:
     """通过扩展派 1 次抖音关键词搜索 (P4 阶段实现)。"""
     if not has_online_extension(user_id):
         return {"ok": False, "stage": "no_online_extension", "error": "no online extension", "detail": translate_error("no online extension")}
+
+    max_results = max(1, min(int(max_results or 30), 200))
+    if pages is None:
+        import math
+        pages = min(6, max(1, math.ceil(max_results / 18) + 1))
 
     task = {
         "id": uuid.uuid4().hex,
@@ -139,6 +196,8 @@ async def dispatch_douyin_search(
         return {"ok": False, "stage": "dispatch", "error": str(e), "detail": translate_error(str(e))}
 
     notes = (result or {}).get("notes") or []
+    if len(notes) > max_results:
+        notes = notes[:max_results]
     inserted, updated = await ingest_douyin_notes(user_id=user_id, keyword=keyword, notes=notes)
     return {
         "ok": True,
@@ -146,6 +205,7 @@ async def dispatch_douyin_search(
         "inserted": inserted,
         "updated": updated,
         "raw_hits": (result or {}).get("raw_hits", 0),
+        "target_max": max_results,
     }
 
 

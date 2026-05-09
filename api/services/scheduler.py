@@ -917,6 +917,7 @@ async def run_trending_monitor(platform: Optional[str] = None, user_id: Optional
             continue
         keywords = [k.strip() for k in keywords_raw.replace("，", ",").split(",") if k.strip()]
         min_likes = int(tu.get("trending_min_likes") or 1000)
+        max_per_keyword = int(tu.get("trending_max_per_keyword") or 30)
 
         # 该用户的推送渠道（chat_id 优先，webhook 兜底）
         full_user = auth_service.get_user_by_id(uid) or {}
@@ -952,7 +953,8 @@ async def run_trending_monitor(platform: Optional[str] = None, user_id: Optional
                 try:
                     res = await extension_dispatcher.dispatch_xhs_search(
                         user_id=uid, keyword=keyword, min_likes=min_likes,
-                        timeout_ms=30000, pages=2, overall_timeout=90.0,
+                        max_results=max_per_keyword,
+                        timeout_ms=30000, overall_timeout=90.0,
                     )
                     _ms = int((_t.perf_counter() - _t0) * 1000)
                     await db.log_fetch(
@@ -1175,8 +1177,9 @@ async def start_scheduler():
     # 我的帖子的评论独立轮询（跟监控间隔一致；带 cookie 才有效，没绑账号会自动跳过）
     scheduler.add_job(run_own_comments_check, "interval", minutes=interval,
                       id="own_comments_check", replace_existing=True)
-    # 博主订阅追新（每 6 小时一次）
-    scheduler.add_job(run_creator_check, "interval", hours=6,
+    # 博主订阅追新：扩展通道（用户自己浏览器跑，零封号风险），可较高频
+    # 之前 cookie 通道时设成 6h 是为防风控，现在切扩展通道后放到 1h 一次
+    scheduler.add_job(run_creator_check, "interval", hours=1,
                       id="creator_check", replace_existing=True)
     # 直播间状态轮询（每 5 分钟）
     scheduler.add_job(run_live_check, "interval", minutes=5,

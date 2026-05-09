@@ -104,6 +104,9 @@ def init_user_db():
     _ensure_column(cursor, "users", "trending_keywords",   "TEXT DEFAULT ''")
     _ensure_column(cursor, "users", "trending_enabled",    "INTEGER DEFAULT 0")
     _ensure_column(cursor, "users", "trending_min_likes",  "INTEGER DEFAULT 1000")
+    # 单关键词单次抓取的目标数量（默认 30；admin 可设到 200，普通用户 1-100）
+    # 后端会按此值算 pages = ceil(N/18)，抓完 truncate 到 N 条
+    _ensure_column(cursor, "users", "trending_max_per_keyword", "INTEGER DEFAULT 30")
 
     # 飞书 OAuth 自动绑定（每个用户独立的群 + 多维表格）
     # access_token 约 2h 过期，refresh_token 约 30 天；30 天内静默 refresh，超期需重新 OAuth
@@ -345,6 +348,7 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "       COALESCE(trending_keywords,'')   AS trending_keywords, "
         "       COALESCE(trending_enabled,0)     AS trending_enabled, "
         "       COALESCE(trending_min_likes,1000) AS trending_min_likes, "
+        "       COALESCE(trending_max_per_keyword,30) AS trending_max_per_keyword, "
         "       COALESCE(feishu_open_id,'')                   AS feishu_open_id, "
         "       COALESCE(feishu_user_access_token,'')         AS feishu_user_access_token, "
         "       COALESCE(feishu_refresh_token,'')             AS feishu_refresh_token, "
@@ -387,6 +391,7 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "trending_keywords":  row["trending_keywords"] or "",
         "trending_enabled":   bool(row["trending_enabled"]),
         "trending_min_likes": int(row["trending_min_likes"] or 1000),
+        "trending_max_per_keyword": int(row["trending_max_per_keyword"] or 30),
         "feishu_open_id":                   row["feishu_open_id"] or "",
         "feishu_user_access_token":         row["feishu_user_access_token"] or "",
         "feishu_refresh_token":             row["feishu_refresh_token"] or "",
@@ -433,8 +438,9 @@ def update_user_trending(
     keywords: Optional[str] = None,
     enabled: Optional[bool] = None,
     min_likes: Optional[int] = None,
+    max_per_keyword: Optional[int] = None,
 ) -> None:
-    """用户更新自己的 trending 配置（关键词、是否启用、点赞阈值）。"""
+    """用户更新自己的 trending 配置（关键词、是否启用、点赞阈值、单次抓取数量）。"""
     fields, values = [], []
     if keywords is not None:
         fields.append("trending_keywords = ?"); values.append(keywords)
@@ -442,6 +448,9 @@ def update_user_trending(
         fields.append("trending_enabled = ?"); values.append(1 if enabled else 0)
     if min_likes is not None:
         fields.append("trending_min_likes = ?"); values.append(int(min_likes))
+    if max_per_keyword is not None:
+        fields.append("trending_max_per_keyword = ?")
+        values.append(max(1, min(int(max_per_keyword), 200)))  # 硬上限 200
     if not fields:
         return
     values.append(user_id)
@@ -459,7 +468,8 @@ def list_users_with_trending() -> list:
     cur.execute(
         "SELECT id, username, "
         "       COALESCE(trending_keywords,'')   AS trending_keywords, "
-        "       COALESCE(trending_min_likes,1000) AS trending_min_likes "
+        "       COALESCE(trending_min_likes,1000) AS trending_min_likes, "
+        "       COALESCE(trending_max_per_keyword,30) AS trending_max_per_keyword "
         "FROM users WHERE COALESCE(trending_enabled,0)=1 AND COALESCE(is_active,1)=1"
     )
     rows = cur.fetchall()
