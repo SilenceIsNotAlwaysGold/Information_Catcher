@@ -5,7 +5,6 @@ import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
 import { Input } from "@nextui-org/input";
 import { Chip } from "@nextui-org/chip";
-import { Progress } from "@nextui-org/progress";
 import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
 } from "@nextui-org/modal";
@@ -162,12 +161,18 @@ export function PlanUsageCard() {
                       : `${u.used} / ${u.quota} ${it.suffix}`}
                   </span>
                 </div>
-                <Progress
-                  value={pct}
-                  size="sm"
-                  color={usageColor(pct, unlimited)}
-                  className="max-w-full"
-                />
+                {/* 原生进度条：避免 @nextui-org/progress 子包 tree-shaking 问题 */}
+                <div className="w-full h-1.5 bg-default-200 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-300 ${
+                      usageColor(pct, unlimited) === "danger" ? "bg-danger" :
+                      usageColor(pct, unlimited) === "warning" ? "bg-warning" :
+                      usageColor(pct, unlimited) === "success" ? "bg-success" :
+                      "bg-primary"
+                    }`}
+                    style={{ width: unlimited ? "100%" : `${pct}%` }}
+                  />
+                </div>
                 {!unlimited && pct >= 80 && (
                   <p className="text-xs text-warning-600 mt-1 flex items-center gap-1">
                     <AlertCircle size={12} />

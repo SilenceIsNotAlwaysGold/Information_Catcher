@@ -1,12 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { Card, CardBody } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
 import { Input } from "@nextui-org/input";
 import { Chip } from "@nextui-org/chip";
 import { Spinner } from "@nextui-org/spinner";
-import { ScrollShadow } from "@nextui-org/scroll-shadow";
 import { History, RefreshCw, ChevronDown, ChevronUp } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastErr } from "@/lib/toast";
@@ -139,8 +138,8 @@ export default function AdminAuditPage() {
                 </thead>
                 <tbody>
                   {items.map((l) => (
-                    <>
-                      <tr key={l.id} className="border-b border-divider/50 hover:bg-default-50">
+                    <Fragment key={l.id}>
+                      <tr className="border-b border-divider/50 hover:bg-default-50">
                         <td className="py-2 pr-2 text-xs text-default-500 whitespace-nowrap">
                           {l.created_at}
                         </td>
@@ -165,23 +164,23 @@ export default function AdminAuditPage() {
                         </td>
                       </tr>
                       {expanded.has(l.id) && (
-                        <tr key={`${l.id}-meta`} className="border-b border-divider/50 bg-default-50">
+                        <tr className="border-b border-divider/50 bg-default-50">
                           <td colSpan={6} className="py-2 px-3">
-                            <ScrollShadow className="max-h-64">
+                            <div className="max-h-64 overflow-y-auto">
                               <pre className="text-xs whitespace-pre-wrap break-all text-default-600">
                                 {(() => {
                                   try { return JSON.stringify(JSON.parse(l.metadata), null, 2); }
                                   catch { return l.metadata; }
                                 })()}
                               </pre>
-                            </ScrollShadow>
+                            </div>
                             {l.user_agent && (
                               <p className="text-xs text-default-400 mt-2 truncate">UA: {l.user_agent}</p>
                             )}
                           </td>
                         </tr>
                       )}
-                    </>
+                    </Fragment>
                   ))}
                   {items.length === 0 && !loading && (
                     <tr><td colSpan={6} className="py-12 text-center text-default-400">无记录</td></tr>

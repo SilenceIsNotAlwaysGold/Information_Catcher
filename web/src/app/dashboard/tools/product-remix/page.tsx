@@ -6,7 +6,8 @@ import { Button } from "@nextui-org/button";
 import { Input, Textarea } from "@nextui-org/input";
 import { Spinner } from "@nextui-org/spinner";
 import { Chip } from "@nextui-org/chip";
-import { Progress } from "@nextui-org/progress";
+// 进度条用原生 div + Tailwind 实现，避开 @nextui-org/progress 子包的
+// tree-shaking 边界问题（曾导致 Progress 组件运行时为 undefined → React #130）。
 import {
   Wand2, AlertCircle, Link2, Check, Download, Copy, RefreshCcw, Trash2,
 } from "lucide-react";
@@ -457,20 +458,39 @@ export default function ProductRemixPage() {
             <Button size="sm" variant="flat" onPress={closeActive}>关闭</Button>
           </CardHeader>
           <CardBody className="space-y-4">
-            <Progress
-              value={activeTask.done_count}
-              maxValue={activeTask.count}
-              color={activeTask.status === "error" ? "danger" : "secondary"}
-              size="sm"
-              showValueLabel
-              label={
-                activeTask.status === "done"
-                  ? "全部完成"
-                  : activeTask.status === "error"
-                    ? "任务失败"
-                    : "生成中…"
-              }
-            />
+            {/* 进度条（原生实现，避免 NextUI Progress 子包打包问题） */}
+            <div>
+              <div className="flex justify-between text-xs text-default-600 mb-1">
+                <span>
+                  {activeTask.status === "done"
+                    ? "全部完成"
+                    : activeTask.status === "error"
+                      ? "任务失败"
+                      : "生成中…"}
+                </span>
+                <span>
+                  {activeTask.count > 0
+                    ? Math.round(activeTask.done_count * 100 / activeTask.count)
+                    : 0}%
+                </span>
+              </div>
+              <div className="w-full h-2 bg-default-200 rounded-full overflow-hidden">
+                <div
+                  className={`h-full transition-all duration-300 ${
+                    activeTask.status === "error"
+                      ? "bg-danger"
+                      : activeTask.status === "done"
+                        ? "bg-success"
+                        : "bg-secondary"
+                  }`}
+                  style={{
+                    width: `${activeTask.count > 0
+                      ? Math.min(100, activeTask.done_count * 100 / activeTask.count)
+                      : 0}%`,
+                  }}
+                />
+              </div>
+            </div>
             {activeTask.error && (
               <div className="flex items-start gap-2 text-sm text-danger bg-danger/10 rounded-lg p-3">
                 <AlertCircle size={15} className="mt-0.5 shrink-0" />
