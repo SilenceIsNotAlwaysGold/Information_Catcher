@@ -251,3 +251,4 @@ certs/
 # Playwright MCP recording
 .playwright-mcp/
 
+.deploy.env
