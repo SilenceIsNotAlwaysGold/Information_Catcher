@@ -9,7 +9,7 @@ import { Tooltip } from "@nextui-org/tooltip";
 import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
 } from "@nextui-org/modal";
-import { Plus, RefreshCw } from "lucide-react";
+import { Plus, RefreshCw, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { CreatorRow, PlatformKey, PLATFORM_LABEL } from "./types";
 import { toastOk, toastErr } from "@/lib/toast";
@@ -191,6 +191,9 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
                 if (c.last_post_at)  tipLines.push(`最近发帖：${c.last_post_at.slice(5, 16)}`);
                 if (c.last_check_error) tipLines.push(`错误：${c.last_check_error}`);
 
+                // 标签文本：creator_name 优先，URL 作 fallback；URL 太长截断防 chip 撑爆
+                const rawLabel = c.creator_name || c.creator_url;
+                const label = rawLabel.length > 28 ? rawLabel.slice(0, 26) + "…" : rawLabel;
                 return (
                   <Tooltip key={c.id} content={
                     <div className="text-xs whitespace-pre-line max-w-xs">
@@ -198,15 +201,25 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
                     </div>
                   }>
                     <Chip size="sm" variant="dot" color={color}
-                      onClose={() => unfollow(c.id)}
                       endContent={
-                        <Button size="sm" variant="light" isIconOnly
-                          onPress={() => checkOne(c.id)}
-                          className="ml-1 min-w-0 w-5 h-5">
-                          <RefreshCw size={11} />
-                        </Button>
+                        <span className="flex items-center gap-0.5 ml-1">
+                          <Button size="sm" variant="light" isIconOnly
+                            onPress={() => checkOne(c.id)}
+                            className="min-w-0 w-5 h-5"
+                            aria-label="立刻刷新">
+                            <RefreshCw size={11} />
+                          </Button>
+                          <Button size="sm" variant="light" isIconOnly color="danger"
+                            onPress={() => unfollow(c.id)}
+                            className="min-w-0 w-5 h-5"
+                            aria-label="取消订阅">
+                            <X size={12} />
+                          </Button>
+                        </span>
                       }>
-                      {c.creator_name || c.creator_url}
+                      <span className="truncate inline-block max-w-[14rem] align-middle">
+                        {label}
+                      </span>
                       {unread > 0 && (
                         <span className="ml-1 px-1.5 py-px rounded-full bg-success-100 text-success-700 text-[10px] font-semibold">
                           {unread} 新
