@@ -48,6 +48,12 @@ async def lifespan(app: FastAPI):
     yield
     monitor_scheduler.scheduler.shutdown(wait=False)
     await proxy_forwarder.stop_all()
+    # 关闭常驻 XHS 签名服务
+    try:
+        from .services.platforms.xhs.sign_service import shutdown_sign_service
+        await shutdown_sign_service()
+    except Exception:
+        pass
 
 
 app = FastAPI(
