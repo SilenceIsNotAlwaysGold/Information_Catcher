@@ -527,19 +527,31 @@ async def add_creator(
             detail="无法识别平台。请提供博主主页 URL（小红书/抖音）或公众号名称（公众号请明确指定 platform=mp）",
         )
 
-    # 规范化 URL：xhs 短链（xhslink.com）必须 follow redirect 提取 user_id，
-    # 否则 fetch_creator_posts 拿短链直接 goto 拿不到 user_posted API
+    # 规范化 URL：
+    #   1. 标准博主主页 URL（含 /user/profile/{uid}）→ **原样保留**，包括 xsec_token
+    #      query 参数。扩展打开 tab 时 SPA 需要 xsec_token 才会发 user_posted。
+    #   2. 短链（xhslink.com）→ follow redirect 提取 user_id（短链落地页通常带 token）
     creator_url = req.creator_url.strip()
     if plat.name == "xhs":
-        from ..services.monitor_fetcher import resolve_xhs_creator_url
-        resolved = await resolve_xhs_creator_url(creator_url)
-        if not resolved:
-            raise HTTPException(
-                status_code=400,
-                detail="无法解析小红书博主主页 URL。请直接复制博主页 URL（含 /user/profile/）"
-                       "或分享出来的短链 https://xhslink.com/o/...",
-            )
-        creator_url = resolved
+        import re
+        if "/user/profile/" in creator_url:
+            # 标准 URL，直接保留原始（含 xsec_token）
+            if not re.search(r"/user/profile/[a-zA-Z0-9]{20,}", creator_url):
+                raise HTTPException(
+                    status_code=400,
+                    detail="博主 URL 格式不正确，应包含 /user/profile/<24位 user_id>",
+                )
+        else:
+            # 短链：尝试 resolve
+            from ..services.monitor_fetcher import resolve_xhs_creator_url
+            resolved = await resolve_xhs_creator_url(creator_url)
+            if not resolved:
+                raise HTTPException(
+                    status_code=400,
+                    detail="无法解析小红书博主 URL。请直接从浏览器地址栏复制博主主页 "
+                           "URL（含 /user/profile/ 和 xsec_token），或粘贴 https://xhslink.com/o/... 短链。",
+                )
+            creator_url = resolved
 
     cid = await db.add_creator(
         user_id=current_user["id"],
@@ -1609,7 +1621,7 @@ async def fetch_trending_content(
             if status == "login_required":
                 raise HTTPException(
                     status_code=400,
-                    detail="该帖子需要登录态。请先安装并连接 Pulse Helper 浏览器扩展，浏览器登录小红书后重试。",
+                    detail="该帖子需要登录态。请先安装并连接 TrendPulse Helper 浏览器扩展，浏览器登录小红书后重试。",
                 )
             raise HTTPException(status_code=400, detail=f"抓取失败：{status}")
 

@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>TrendPulse Helper</title>
+  <style>
+    body {
+      width: 320px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+      margin: 0;
+      padding: 12px;
+      font-size: 13px;
+      color: #222;
+      background: #fafafa;
+    }
+    h1 {
+      font-size: 14px;
+      margin: 0 0 10px 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #c5cad1;
+      flex: 0 0 8px;
+    }
+    .dot.on { background: #16a34a; }
+    .dot.off { background: #ef4444; }
+    label {
+      display: block;
+      margin: 8px 0 3px;
+      color: #555;
+      font-size: 12px;
+    }
+    input[type="text"], input[type="password"] {
+      width: 100%;
+      padding: 6px 8px;
+      box-sizing: border-box;
+      border: 1px solid #d0d4dc;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+    .row {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    button {
+      padding: 6px 12px;
+      border: 1px solid #d0d4dc;
+      background: white;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    button.primary {
+      background: #2563eb;
+      color: white;
+      border-color: #2563eb;
+    }
+    button.primary:hover { background: #1d4ed8; }
+    button:hover { background: #f0f3f8; }
+    .tasks {
+      margin-top: 12px;
+      max-height: 180px;
+      overflow-y: auto;
+      border: 1px solid #e5e7eb;
+      border-radius: 4px;
+      background: white;
+    }
+    .task {
+      padding: 6px 8px;
+      border-bottom: 1px solid #f1f3f6;
+      font-size: 11px;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .task:last-child { border-bottom: none; }
+    .task .type { font-weight: 500; flex: 1; }
+    .task .status {
+      padding: 1px 6px;
+      border-radius: 8px;
+      font-size: 10px;
+    }
+    .status.done { background: #dcfce7; color: #166534; }
+    .status.failed { background: #fee2e2; color: #991b1b; }
+    .status.running { background: #fef3c7; color: #92400e; }
+    .meta {
+      font-size: 11px;
+      color: #888;
+      margin-top: 6px;
+    }
+    .empty {
+      padding: 16px;
+      text-align: center;
+      color: #999;
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <h1>
+    <span id="status-dot" class="dot"></span>
+    <span>TrendPulse Helper</span>
+    <button id="detach" style="margin-left:auto;background:transparent;border:none;color:#2563eb;font-size:11px;cursor:pointer;padding:0;text-decoration:underline">独立窗口</button>
+    <span id="status-text" style="margin-left:8px;font-weight:normal;font-size:11px;color:#666">未连接</span>
+  </h1>
+
+  <label>服务器地址</label>
+  <input type="text" id="server-url" placeholder="http://127.0.0.1:8080" />
+
+  <label>Token</label>
+  <input type="password" id="token" placeholder="在 TrendPulse 仪表盘 → 我的浏览器扩展 获取" />
+
+  <div class="row">
+    <button class="primary" id="save">保存并连接</button>
+    <button id="reconnect">重连</button>
+    <button id="disconnect">断开</button>
+  </div>
+
+  <div class="meta">最近任务</div>
+  <div class="tasks" id="task-list">
+    <div class="empty">暂无任务</div>
+  </div>
+
+  <!-- 版本信息 + 升级提示 -->
+  <div id="update-banner" style="display:none; margin-top:10px; padding:8px 10px; background:#fff7ed; border:1px solid #fdba74; border-radius:6px; font-size:11px; color:#9a3412;"></div>
+  <div style="margin-top:10px; text-align:center; color:#94a3b8; font-size:10px;">
+    <span id="ext-version">v—</span>
+    <span style="margin:0 4px;">·</span>
+    <a id="dashboard-link" href="#" target="_blank" style="color:#94a3b8; text-decoration:none;">仪表盘</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -204,6 +204,29 @@ async def extension_status(current_user: dict = Depends(get_current_user)) -> Di
     }
 
 
+# 公开端点：扩展启动时拉一次，对比本地 manifest.version 决定是否提示升级。
+# 不需要鉴权（version 不是敏感信息），扩展启动即查询。
+@router.get("/version")
+async def extension_recommended_version() -> Dict[str, Any]:
+    """返回服务端推荐的扩展版本（直接读仓库的 extension/manifest.json）。
+
+    流程：每次发新版只需 bump manifest.json 里的 version，重新部署后端，
+    用户的 popup 启动时拉这个端点 → 比对本地 → 显示橙色更新提示。
+    """
+    import json
+    from pathlib import Path
+    manifest_path = Path(__file__).parent.parent.parent / "extension" / "manifest.json"
+    try:
+        data = json.loads(manifest_path.read_text())
+        return {
+            "recommended": data.get("version", ""),
+            "name": data.get("name", "TrendPulse Helper"),
+            "minimum_chrome": data.get("minimum_chrome_version", ""),
+        }
+    except Exception:
+        return {"recommended": "", "name": "TrendPulse Helper"}
+
+
 # ========================================================================
 # 业务任务: XHS 关键词搜索（同步派单 + 入库）
 # ========================================================================
@@ -228,7 +251,7 @@ async def run_xhs_search(
     if not body.keyword.strip():
         raise HTTPException(status_code=400, detail="keyword required")
     if not extension_dispatcher.has_online_extension(user_id):
-        raise HTTPException(status_code=503, detail="no online extension; please install Pulse Helper and login first")
+        raise HTTPException(status_code=503, detail="no online extension; please install TrendPulse Helper and login first")
 
     return await extension_dispatcher.dispatch_xhs_search(
         user_id=user_id,

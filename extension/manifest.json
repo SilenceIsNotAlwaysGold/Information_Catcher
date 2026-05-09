@@ -1,0 +1,89 @@
+{
+  "manifest_version": 3,
+  "name": "TrendPulse Helper",
+  "version": "0.2.0",
+  "description": "TrendPulse 浏览器助手 - 在你已登录的浏览器里执行小红书/抖音搜索与博主追新任务，规避封号风险。",
+  "minimum_chrome_version": "111",
+
+  "permissions": [
+    "storage",
+    "scripting",
+    "tabs",
+    "alarms",
+    "notifications"
+  ],
+  "host_permissions": [
+    "*://*.xiaohongshu.com/*",
+    "*://xhslink.com/*",
+    "*://*.douyin.com/*",
+    "*://*.iesdouyin.com/*",
+    "*://creator.xiaohongshu.com/*",
+    "*://creator.douyin.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://*/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "TrendPulse Helper"
+  },
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": ["inject/page_hook.js"],
+      "matches": [
+        "*://*.xiaohongshu.com/*",
+        "*://*.douyin.com/*"
+      ]
+    }
+  ],
+
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.xiaohongshu.com/*",
+        "*://*.douyin.com/*"
+      ],
+      "js": ["inject/page_hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["*://*.xiaohongshu.com/*"],
+      "js": ["content/xhs.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": ["*://*.douyin.com/*"],
+      "js": ["content/douyin.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": ["*://creator.xiaohongshu.com/*"],
+      "js": ["content/publish_xhs.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": ["*://creator.douyin.com/*"],
+      "js": ["content/publish_douyin.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
