@@ -32,7 +32,9 @@ class FetchPostRequest(BaseModel):
 
 class CreateRemixTaskRequest(BaseModel):
     post_url: str
-    ref_image_idx: int = 0       # 选第几张图作为参考（默认封面）
+    # 多图（v2）：选哪几张作参考。优先用这个；空时 fallback ref_image_idx
+    ref_image_idxs: Optional[List[int]] = None
+    ref_image_idx: int = 0       # v1 向后兼容
     count: int = 5               # 1–30 套
     size: Optional[str] = None   # 留空用配置默认
 
@@ -165,9 +167,23 @@ async def create_remix_task(
     if not (req.post_url or "").strip():
         raise HTTPException(status_code=400, detail="post_url 必填")
     count = max(1, min(int(req.count or 1), 30))
-    ref_idx = max(0, int(req.ref_image_idx or 0))
 
-    # 配额检查：今日仿写套数（admin 不限）
+    # 选哪几张作为参考：v2 多选（ref_image_idxs）优先，v1 单选（ref_image_idx）兜底
+    raw_idxs = req.ref_image_idxs if req.ref_image_idxs else [int(req.ref_image_idx or 0)]
+    # 去重并保序，且都 >= 0
+    seen: set = set()
+    ref_idxs: List[int] = []
+    for i in raw_idxs:
+        v = max(0, int(i))
+        if v in seen:
+            continue
+        seen.add(v)
+        ref_idxs.append(v)
+    if not ref_idxs:
+        ref_idxs = [0]
+
+    # 配额检查：每套图数 = len(ref_idxs)，套数 = count，总用量 = count * len(ref_idxs)
+    # 仍按"套数"扣（用户感知一致），实际生图调用次数翻倍
     await quota_service.check_or_raise(current_user, "daily_remix_sets", delta=count)
 
     # 立刻先解析一次，验证可达 + 拿参考图 URL，避免任务跑起来才发现链接挂了
@@ -200,9 +216,9 @@ async def create_remix_task(
     if not imgs:
         raise HTTPException(status_code=400, detail="该作品没有图片可作为参考")
 
-    if ref_idx >= len(imgs):
-        ref_idx = 0
-    ref_url = imgs[ref_idx]
+    # 越界的 idx 截掉；如果一个都不剩兜底成 [0]
+    ref_idxs = [i for i in ref_idxs if i < len(imgs)] or [0]
+    ref_urls = [imgs[i] for i in ref_idxs]
 
     user_id = current_user.get("id") if current_user else None
     task_id = await monitor_db.create_remix_task(
@@ -211,19 +227,27 @@ async def create_remix_task(
         post_title=metrics.get("title") or "",
         post_desc=(metrics.get("desc") or "")[:1000],
         platform=plat.name,
-        ref_image_url=ref_url,
-        ref_image_idx=ref_idx,
+        # 单值字段（兼容老 worker 路径）：取第一张
+        ref_image_url=ref_urls[0],
+        ref_image_idx=ref_idxs[0],
+        # 多图字段（v2 主路径）
+        ref_image_urls=ref_urls,
+        ref_image_idxs=ref_idxs,
         count=count,
         size=(req.size or "").strip(),
     )
 
-    # 用量计数（按提交套数；任务失败也算消耗，因为已经占用了 worker 资源）
     try:
         await quota_service.record_usage(user_id, "remix_sets", delta=count)
     except Exception as e:
         logger.warning(f"[remix] record_usage failed: {e}")
 
-    return {"task_id": task_id, "status": "pending", "count": count}
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "count": count,
+        "refs_per_set": len(ref_idxs),
+    }
 
 
 @router.get("/remix-tasks/{task_id}", summary="查询仿写任务进度 + 结果")

@@ -116,18 +116,17 @@ async def _generate_caption(
         return "", content[:1500], ""
 
 
-async def _gen_one_set(
+async def _gen_one_image(
     client: httpx.AsyncClient, *, base_url: str, api_key: str, model: str,
-    size: str, ref_bytes: bytes, set_idx: int, total: int,
-    post_title: str, post_desc: str, user_id: Optional[int] = None,
+    size: str, ref_bytes: bytes, user_id: Optional[int] = None,
 ) -> dict:
-    """生成一套：1 张图 + 1 篇文案。返回 {idx, image_url, title, body, error}。"""
-    prompt = REMIX_PROMPT_EN  # 用英文 prompt，多数图像模型对英文更稳
+    """对一张参考图调一次 edits，返回 {image_url, image_b64, error}。"""
+    prompt = REMIX_PROMPT_EN
     auth_headers = {"Authorization": f"Bearer {api_key}"}
 
     images = None
     last_err = ""
-    for attempt in range(2):  # 最多 2 次（首发 + 1 次重试）
+    for attempt in range(2):
         result, err = await call_edits(
             client, base_url=base_url, model=model, prompt=prompt,
             n=1, size=size, img_bytes=ref_bytes, headers=auth_headers,
@@ -139,49 +138,91 @@ async def _gen_one_set(
         await asyncio.sleep(1.5)
 
     if not images:
-        return {"idx": set_idx, "image_url": "", "title": "", "body": "",
-                "error": f"图片生成失败：{last_err}"}
+        return {"image_url": "", "image_b64": "", "error": f"图片生成失败：{last_err}"}
 
     img = images[0]
-    image_url = ""
     image_b64 = img.get("b64") or ""
+    image_url = ""
 
-    # 优先本地存储；没本地配置就同步上传七牛
     local_ready = await local_storage.is_configured()
     qiniu_ready = await qiniu_uploader.is_configured()
-
     if image_b64 and local_ready:
-        lurl, lerr = await local_storage.upload_b64(image_b64, user_id=user_id)
+        lurl, _ = await local_storage.upload_b64(image_b64, user_id=user_id)
         if lurl:
             image_url = lurl
     if not image_url and image_b64 and qiniu_ready:
-        qurl, qerr = await qiniu_uploader.upload_b64(image_b64, user_id=user_id)
+        qurl, _ = await qiniu_uploader.upload_b64(image_b64, user_id=user_id)
         if qurl:
             image_url = qurl
     if not image_url:
         image_url = img.get("url") or ""
 
-    # 文案：失败也不挂任务，记下来即可
+    return {"image_url": image_url, "image_b64": image_b64, "error": ""}
+
+
+async def _gen_one_set(
+    client: httpx.AsyncClient, *, base_url: str, api_key: str, model: str,
+    size: str, refs_bytes: list, set_idx: int, total: int,
+    post_title: str, post_desc: str, user_id: Optional[int] = None,
+) -> dict:
+    """生成一套：K 张图（每张参考图各换一次背景） + 1 篇文案。
+
+    返回 {idx, images:[{url, b64, error}], image_url(=images[0].url, 兼容老前端),
+          title, body, error}。
+    """
+    images: list = []
+    for ref_bytes in refs_bytes:
+        single = await _gen_one_image(
+            client, base_url=base_url, api_key=api_key, model=model,
+            size=size, ref_bytes=ref_bytes, user_id=user_id,
+        )
+        images.append(single)
+
+    # 文案：基于源作品改写，失败也不挂
     title, body, cerr = await _generate_caption(
         post_title=post_title, post_desc=post_desc,
         set_idx=set_idx, n_total=total,
     )
 
+    succeeded = [im for im in images if im.get("image_url")]
+    primary = succeeded[0] if succeeded else (images[0] if images else {})
+    item_error = ""
+    if not succeeded:
+        # 全部图都失败
+        errs = [im.get("error", "") for im in images if im.get("error")]
+        item_error = "; ".join(errs)[:200] or "本套所有图均生成失败"
+    elif len(succeeded) < len(images):
+        item_error = f"部分失败（成功 {len(succeeded)}/{len(images)}）"
+
     return {
         "idx": set_idx,
-        "image_url": image_url,
-        "image_b64": image_b64,  # 给 history 写入用，前端响应时不会带这个
+        "images": images,           # 多张：每个 {image_url, image_b64, error}
+        "image_url": primary.get("image_url", ""),  # 兼容老前端：第一张
         "title": title,
         "body": body,
-        "error": cerr,
+        "error": item_error or cerr,
     }
 
 
 async def _process_task(task: dict) -> None:
     task_id = task["id"]
     user_id = task.get("user_id")
-    ref_url = (task.get("ref_image_url") or "").strip()
-    if not ref_url:
+
+    # 解析参考图列表：v2 优先用 ref_image_urls(JSON)，v1 fallback 单值字段
+    ref_urls: list = []
+    raw_urls = (task.get("ref_image_urls") or "").strip()
+    if raw_urls:
+        try:
+            parsed = json.loads(raw_urls)
+            if isinstance(parsed, list):
+                ref_urls = [str(u) for u in parsed if u]
+        except Exception:
+            ref_urls = []
+    if not ref_urls:
+        single = (task.get("ref_image_url") or "").strip()
+        if single:
+            ref_urls = [single]
+    if not ref_urls:
         await monitor_db.finish_remix_task(task_id, status="error", error="参考图 URL 为空")
         return
 
@@ -193,18 +234,25 @@ async def _process_task(task: dict) -> None:
         await monitor_db.finish_remix_task(task_id, status="error",
                                             error="图像 API 未配置")
         return
-
-    # 模型不支持 image edits（n>1）也无所谓，我们一次本来就只调 n=1
     _ = max_per_batch_for(model)
 
     size = (task.get("size") or "").strip() or cfg_size
     count = max(1, min(int(task.get("count") or 1), 30))
 
-    ref_bytes = await _download_ref_image(ref_url)
-    if not ref_bytes:
-        await monitor_db.finish_remix_task(task_id, status="error",
-                                            error=f"参考图下载失败：{ref_url}")
+    # 并发下载所有参考图
+    refs_bytes_with_idx: list = []
+    for idx, url in enumerate(ref_urls):
+        b = await _download_ref_image(url)
+        if b is None:
+            logger.warning(f"[remix_worker] ref #{idx} download failed: {url[:80]}")
+            continue
+        refs_bytes_with_idx.append((idx, b))
+    if not refs_bytes_with_idx:
+        await monitor_db.finish_remix_task(
+            task_id, status="error", error=f"全部 {len(ref_urls)} 张参考图都下载失败",
+        )
         return
+    refs_bytes = [b for (_, b) in refs_bytes_with_idx]
 
     items: list[dict] = []
     timeout = httpx.Timeout(180.0, connect=30.0)
@@ -213,7 +261,7 @@ async def _process_task(task: dict) -> None:
             try:
                 item = await _gen_one_set(
                     client, base_url=base_url, api_key=api_key, model=model,
-                    size=size, ref_bytes=ref_bytes,
+                    size=size, refs_bytes=refs_bytes,
                     set_idx=i, total=count,
                     post_title=task.get("post_title") or "",
                     post_desc=task.get("post_desc") or "",
@@ -221,27 +269,33 @@ async def _process_task(task: dict) -> None:
                 )
             except Exception as e:
                 logger.exception(f"[remix_worker] task {task_id} set {i} crash: {e}")
-                item = {"idx": i, "image_url": "", "title": "", "body": "",
+                item = {"idx": i, "images": [], "image_url": "",
+                        "title": "", "body": "",
                         "error": f"内部异常：{e}"}
 
-            # 写历史（成功的才写，方便后续同步飞书）
-            if item.get("image_url"):
-                qiniu_ready = await qiniu_uploader.is_configured()
-                local_ready = await local_storage.is_configured()
-                upload_status = "pending" if (local_ready and qiniu_ready) else (
-                    "uploaded" if qiniu_ready and not local_ready else "skipped"
-                )
+            # 写历史：套号 i 下，每张成功的图占一行（in_set_idx 1..K）
+            qiniu_ready = await qiniu_uploader.is_configured()
+            local_ready = await local_storage.is_configured()
+            upload_status = "pending" if (local_ready and qiniu_ready) else (
+                "uploaded" if qiniu_ready and not local_ready else "skipped"
+            )
+            in_set = 0
+            for sub in (item.get("images") or []):
+                if not sub.get("image_url"):
+                    continue
+                in_set += 1
                 try:
                     await monitor_db.add_image_history(
                         user_id=user_id,
                         prompt=REMIX_PROMPT_EN,
                         size=size, model=model,
-                        set_idx=i, in_set_idx=1,
-                        local_url=item.get("image_url", ""),
-                        qiniu_url=item.get("image_url", ""),
+                        set_idx=i, in_set_idx=in_set,
+                        local_url=sub.get("image_url", ""),
+                        qiniu_url=sub.get("image_url", ""),
                         upload_status=upload_status,
-                        generated_title=item.get("title", ""),
-                        generated_body=item.get("body", ""),
+                        # 文案只在第一张写，避免一套同一篇文案被重复存
+                        generated_title=item.get("title", "") if in_set == 1 else "",
+                        generated_body=item.get("body", "") if in_set == 1 else "",
                         batch_id=f"remix:{task_id}",
                         source_post_url=task.get("post_url") or "",
                         source_post_title=task.get("post_title") or "",
@@ -250,8 +304,13 @@ async def _process_task(task: dict) -> None:
                 except Exception as e:
                     logger.warning(f"[remix_worker] write history failed: {e}")
 
-            # 进度更新（前端轮询拿这个）；image_b64 不进 db
+            # 进度（image_b64 不进 db；嵌套结构里也剥掉）
             public_item = {k: v for k, v in item.items() if k != "image_b64"}
+            if "images" in public_item:
+                public_item["images"] = [
+                    {kk: vv for kk, vv in (sub or {}).items() if kk != "image_b64"}
+                    for sub in public_item["images"]
+                ]
             items.append(public_item)
             try:
                 await monitor_db.update_remix_task_progress(
@@ -261,7 +320,6 @@ async def _process_task(task: dict) -> None:
             except Exception as e:
                 logger.warning(f"[remix_worker] update progress failed: {e}")
 
-    # 全跑完
     failed = sum(1 for it in items if it.get("error") and not it.get("image_url"))
     if failed == count:
         await monitor_db.finish_remix_task(task_id, status="error",

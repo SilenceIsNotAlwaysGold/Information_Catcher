@@ -33,8 +33,15 @@ type FetchedPost = {
   post_url: string;
 };
 
+type RemixSubImage = {
+  image_url: string;
+  error?: string;
+};
 type RemixItem = {
   idx: number;
+  // v2：一套含多张图（每张参考图各换一次背景）
+  images?: RemixSubImage[];
+  // v1 兼容：单张
   image_url: string;
   title: string;
   body: string;
@@ -73,10 +80,24 @@ export default function ProductRemixPage() {
   const [postUrl, setPostUrl] = useState("");
   const [fetching, setFetching] = useState(false);
   const [post, setPost] = useState<FetchedPost | null>(null);
-  const [refIdx, setRefIdx] = useState(0);
+  // v2：参考图多选（默认选第 1 张）
+  const [refIdxs, setRefIdxs] = useState<number[]>([0]);
 
   // ── 步骤 2：提交参数 ────────────────────────────────────────────────────
   const [count, setCount] = useState(5);
+
+  // 切换勾选某一张图作参考；保持点击顺序作为生成顺序
+  const toggleRef = (i: number) => {
+    setRefIdxs((prev) => {
+      const has = prev.includes(i);
+      if (has) {
+        // 取消最后一张要兜底回 [0]
+        const next = prev.filter((x) => x !== i);
+        return next.length ? next : [0];
+      }
+      return [...prev, i];
+    });
+  };
 
   // ── 持久化 ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -102,7 +123,7 @@ export default function ProductRemixPage() {
     if (!url) { toastErr("请粘贴小红书或抖音作品链接"); return; }
     setFetching(true);
     setPost(null);
-    setRefIdx(0);
+    setRefIdxs([0]);
     try {
       const r = await fetch(IMAGE_API("/fetch-post-cover"), {
         method: "POST",
@@ -153,7 +174,9 @@ export default function ProductRemixPage() {
         headers,
         body: JSON.stringify({
           post_url: post.post_url,
-          ref_image_idx: refIdx,
+          ref_image_idxs: refIdxs,
+          // 兼容字段：第一张作为旧 ref_image_idx
+          ref_image_idx: refIdxs[0] ?? 0,
           count,
         }),
       });
@@ -340,32 +363,60 @@ export default function ProductRemixPage() {
             </div>
           </CardHeader>
           <CardBody className="space-y-4">
-            {/* 缩略图条：选哪张图作参考 */}
+            {/* 缩略图条：多选作参考 */}
             <div className="space-y-2">
-              <p className="text-sm text-default-700">选一张作为参考（AI 仿照该图的风格出 N 套）</p>
-              <div className="flex gap-2 overflow-x-auto pb-2">
-                {post.images.map((u, i) => (
-                  <button
-                    key={i}
-                    type="button"
-                    onClick={() => setRefIdx(i)}
-                    className={`shrink-0 w-24 aspect-[3/4] rounded-md overflow-hidden border-2 transition-all ${
-                      refIdx === i
-                        ? "border-secondary ring-2 ring-secondary/30"
-                        : "border-divider hover:border-secondary/50"
-                    }`}
-                  >
-                    {/* data:URL 直接渲染；fallback 的原 CDN URL 才走 proxy */}
-                    <img
-                      src={u.startsWith("data:") ? u : proxyUrl(u)}
-                      alt={`图 ${i + 1}`}
-                      className="w-full h-full object-cover"
-                    />
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-default-700">
+                  选哪几张作参考（每张都会单独换风格）
+                </p>
+                <div className="flex gap-2 text-xs">
+                  <button type="button"
+                    className="text-secondary hover:underline"
+                    onClick={() => setRefIdxs(post.images.map((_, i) => i))}>
+                    全选
                   </button>
-                ))}
+                  <span className="text-default-300">·</span>
+                  <button type="button"
+                    className="text-default-500 hover:underline"
+                    onClick={() => setRefIdxs([0])}>
+                    只选封面
+                  </button>
+                </div>
+              </div>
+              <div className="flex gap-2 overflow-x-auto pb-2">
+                {post.images.map((u, i) => {
+                  const order = refIdxs.indexOf(i); // -1 = 未选
+                  const selected = order >= 0;
+                  return (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => toggleRef(i)}
+                      className={`relative shrink-0 w-24 aspect-[3/4] rounded-md overflow-hidden border-2 transition-all ${
+                        selected
+                          ? "border-secondary ring-2 ring-secondary/30"
+                          : "border-divider hover:border-secondary/50 opacity-70"
+                      }`}
+                    >
+                      <img
+                        src={u.startsWith("data:") ? u : proxyUrl(u)}
+                        alt={`图 ${i + 1}`}
+                        className="w-full h-full object-cover"
+                      />
+                      {selected && (
+                        <span className="absolute top-1 right-1 bg-secondary text-white text-[10px] font-bold rounded-full w-5 h-5 flex items-center justify-center shadow">
+                          {order + 1}
+                        </span>
+                      )}
+                      <span className="absolute bottom-0 left-0 right-0 bg-black/40 text-white text-[10px] py-0.5 text-center">
+                        图 {i + 1}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
               <p className="text-xs text-default-400">
-                第 1 张通常是封面。点击其它图切换参考图。
+                已选 <b className="text-secondary">{refIdxs.length}</b> 张作主体图。每张图都会被 AI 单独换风格生成新版本。
               </p>
             </div>
 
@@ -394,7 +445,9 @@ export default function ProductRemixPage() {
 
             {/* 套数 */}
             <div className="space-y-2">
-              <p className="text-sm text-default-700">想要几套？（每套 = 1 张图 + 1 篇新文案）</p>
+              <p className="text-sm text-default-700">
+                想要几套？（每套 = <b className="text-secondary">{refIdxs.length}</b> 张换风格图 + 1 篇新文案）
+              </p>
               <div className="flex flex-wrap gap-2">
                 {COUNT_PRESETS.map((c) => (
                   <button
@@ -502,28 +555,57 @@ export default function ProductRemixPage() {
               </div>
             )}
             {activeItems.length > 0 && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {activeItems.map((it) => (
+              <div className="space-y-3">
+                {activeItems.map((it) => {
+                  // v2：images[] 多张；v1 兼容：单张 image_url 包成单元素数组
+                  const subImages = (it.images && it.images.length > 0)
+                    ? it.images
+                    : (it.image_url ? [{ image_url: it.image_url }] : []);
+                  const okImgs = subImages.filter((s) => s.image_url);
+                  return (
                   <div
                     key={it.idx}
                     className="border border-divider rounded-lg p-3 space-y-2"
                   >
                     <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium">第 {it.idx} 套</span>
-                      {it.error && !it.image_url && (
+                      <span className="text-sm font-medium">
+                        第 {it.idx} 套 <span className="text-default-400 text-xs">· {okImgs.length}/{subImages.length} 张</span>
+                      </span>
+                      {it.error && okImgs.length === 0 && (
                         <Chip size="sm" color="danger" variant="flat">失败</Chip>
                       )}
+                      {it.error && okImgs.length > 0 && (
+                        <Chip size="sm" color="warning" variant="flat">部分失败</Chip>
+                      )}
                     </div>
-                    {it.image_url ? (
-                      <div
-                        className="aspect-square rounded-md overflow-hidden bg-default-100 cursor-pointer"
-                        onClick={() => setPreviewSrc(it.image_url)}
-                      >
-                        <img
-                          src={proxyUrl(it.image_url)}
-                          alt={`第 ${it.idx} 套`}
-                          className="w-full h-full object-cover"
-                        />
+                    {subImages.length > 0 ? (
+                      <div className={`grid gap-2 ${
+                        subImages.length === 1 ? "grid-cols-1"
+                        : subImages.length === 2 ? "grid-cols-2"
+                        : "grid-cols-3"
+                      }`}>
+                        {subImages.map((sub, si) => sub.image_url ? (
+                          <div
+                            key={si}
+                            className="aspect-square rounded-md overflow-hidden bg-default-100 cursor-pointer relative group"
+                            onClick={() => setPreviewSrc(sub.image_url)}
+                          >
+                            <img
+                              src={proxyUrl(sub.image_url)}
+                              alt={`套 ${it.idx} 图 ${si + 1}`}
+                              className="w-full h-full object-cover"
+                            />
+                            <span className="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded">
+                              {si + 1}
+                            </span>
+                          </div>
+                        ) : (
+                          <div key={si} className="aspect-square rounded-md bg-default-100 flex items-center justify-center">
+                            <span className="text-[10px] text-danger text-center px-1">
+                              {sub.error?.slice(0, 30) || "失败"}
+                            </span>
+                          </div>
+                        ))}
                       </div>
                     ) : (
                       <div className="aspect-square rounded-md bg-default-100 flex items-center justify-center">
@@ -538,30 +620,34 @@ export default function ProductRemixPage() {
                         {it.body}
                       </p>
                     )}
-                    {(it.title || it.body) && (
-                      <div className="flex gap-2">
-                        <Button
-                          size="sm"
-                          variant="light"
-                          startContent={<Copy size={13} />}
-                          onPress={() => copyText(`${it.title}\n\n${it.body}`)}
-                        >
-                          复制文案
-                        </Button>
-                        {it.image_url && (
+                    {(it.title || it.body || okImgs.length > 0) && (
+                      <div className="flex gap-2 flex-wrap">
+                        {(it.title || it.body) && (
                           <Button
                             size="sm"
                             variant="light"
-                            startContent={<Download size={13} />}
-                            onPress={() => downloadFromUrl(it.image_url)}
+                            startContent={<Copy size={13} />}
+                            onPress={() => copyText(`${it.title}\n\n${it.body}`)}
                           >
-                            下载图
+                            复制文案
                           </Button>
                         )}
+                        {okImgs.map((sub, si) => (
+                          <Button
+                            key={si}
+                            size="sm"
+                            variant="light"
+                            startContent={<Download size={13} />}
+                            onPress={() => downloadFromUrl(sub.image_url)}
+                          >
+                            下载图 {okImgs.length > 1 ? si + 1 : ""}
+                          </Button>
+                        ))}
                       </div>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </CardBody>
