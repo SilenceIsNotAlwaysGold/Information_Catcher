@@ -121,6 +121,19 @@ class QRLoginStartRequest(BaseModel):
     platform: Optional[str] = "xhs"  # xhs / douyin（v1 仅 xhs 实现）
 
 
+class CookieSyncRequest(BaseModel):
+    """CookieBridge 浏览器扩展推送 cookie 时的载荷。
+
+    扩展按域提取 cookie，拼成标准 `name=value; name=value` 串后 POST 上来。
+    通过 (account_name, platform) 在当前用户的账号下定位记录；
+    自动创建关闭，避免恶意请求灌库。
+    """
+    account_name: str
+    cookie: str
+    platform: Optional[str] = "xhs"
+    source: Optional[str] = "extension"  # extension | manual
+
+
 class UpdateAccountRequest(BaseModel):
     name: Optional[str] = None
     cookie: Optional[str] = None

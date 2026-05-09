@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pulse CookieBridge</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                   "Microsoft YaHei", sans-serif;
+      width: 360px;
+      margin: 0;
+      padding: 14px 16px 18px;
+      font-size: 13px;
+      color: #1f2937;
+      background: #fafafa;
+    }
+    h1 { font-size: 14px; margin: 0 0 8px; color: #111827; }
+    .row { margin-bottom: 8px; }
+    label { display: block; margin-bottom: 3px; color: #4b5563; font-size: 12px; }
+    input[type="text"], input[type="password"] {
+      width: 100%; box-sizing: border-box; padding: 6px 8px;
+      border: 1px solid #d1d5db; border-radius: 4px; font-size: 12px;
+      background: #fff;
+    }
+    .mapping-row { display: flex; gap: 6px; align-items: center; }
+    .mapping-row span {
+      width: 56px; flex-shrink: 0; color: #6b7280; font-size: 12px;
+    }
+    .mapping-row input { flex: 1; }
+    button {
+      background: #2563eb; color: #fff; border: 0; border-radius: 4px;
+      padding: 6px 12px; font-size: 12px; cursor: pointer; margin-right: 6px;
+    }
+    button.secondary { background: #6b7280; }
+    button:hover { opacity: 0.9; }
+    .status {
+      margin-top: 10px; padding: 8px; background: #fff; border-radius: 4px;
+      border: 1px solid #e5e7eb; font-family: ui-monospace, "SF Mono", monospace;
+      font-size: 11px; color: #4b5563; white-space: pre-wrap; max-height: 140px;
+      overflow-y: auto;
+    }
+    .ok { color: #059669; }
+    .err { color: #dc2626; }
+    .footer {
+      margin-top: 10px; font-size: 11px; color: #9ca3af; line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <h1>Pulse CookieBridge</h1>
+
+  <div class="row">
+    <label>Pulse 后端 API Base</label>
+    <input id="apiBase" type="text" placeholder="http://127.0.0.1:8080" />
+  </div>
+
+  <div class="row">
+    <label>JWT（登录 Pulse 后从 localStorage.token 拷贝）</label>
+    <input id="jwt" type="password" placeholder="eyJ..." />
+  </div>
+
+  <div class="row">
+    <label>账号映射（Pulse 中已存在的账号名）</label>
+    <div class="mapping-row"><span>小红书</span><input id="map_xhs" type="text" placeholder="如：博主A" /></div>
+    <div class="mapping-row" style="margin-top:4px"><span>抖音</span><input id="map_douyin" type="text" placeholder="可留空" /></div>
+    <div class="mapping-row" style="margin-top:4px"><span>公众号</span><input id="map_mp" type="text" placeholder="可留空" /></div>
+  </div>
+
+  <div class="row">
+    <button id="save">保存配置</button>
+    <button id="syncNow" class="secondary">立即同步全部</button>
+  </div>
+
+  <div class="status" id="status">未同步</div>
+
+  <div class="footer">
+    自动监听 cookie 变化推送（去抖 5s）+ 每 30 分钟兜底同步一次。<br />
+    后端必须先在「账号管理」里创建同名账号占位。
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

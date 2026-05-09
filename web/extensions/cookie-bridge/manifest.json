@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Pulse CookieBridge",
+  "version": "0.1.0",
+  "description": "把小红书 / 抖音 / 公众号 的浏览器登录态自动同步到 Pulse 后端，免去手动重新登录。",
+  "permissions": [
+    "cookies",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://*.xiaohongshu.com/*",
+    "https://*.douyin.com/*",
+    "https://*.weixin.qq.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Pulse CookieBridge",
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "128": "icons/icon128.png"
+  }
+}
