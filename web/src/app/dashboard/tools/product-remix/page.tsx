@@ -23,7 +23,8 @@ import { HistoryGrid } from "@/components/product-image/HistoryGrid";
 const COUNT_PRESETS = [3, 5, 10, 20, 30];
 
 type FetchedPost = {
-  images: string[];        // 全部图（第 0 张是封面）
+  images: string[];        // 展示用：data:URL（首选）或原 CDN URL（兜底）
+  image_urls: string[];    // 原 CDN URL：提交任务时回传给 worker
   title: string;
   desc: string;
   platform: string;
@@ -114,12 +115,14 @@ export default function ProductRemixPage() {
         return;
       }
       const images: string[] = Array.isArray(data?.images) ? data.images : [];
+      const imageUrls: string[] = Array.isArray(data?.image_urls) ? data.image_urls : images;
       if (!images.length) {
         toastErr("作品没有可用图片");
         return;
       }
       setPost({
         images,
+        image_urls: imageUrls,
         title: data.title || "",
         desc: data.desc || "",
         platform: data.platform || "",
@@ -352,8 +355,9 @@ export default function ProductRemixPage() {
                         : "border-divider hover:border-secondary/50"
                     }`}
                   >
+                    {/* data:URL 直接渲染；fallback 的原 CDN URL 才走 proxy */}
                     <img
-                      src={proxyUrl(u)}
+                      src={u.startsWith("data:") ? u : proxyUrl(u)}
                       alt={`图 ${i + 1}`}
                       className="w-full h-full object-cover"
                     />

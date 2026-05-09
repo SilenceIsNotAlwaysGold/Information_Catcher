@@ -37,15 +37,59 @@ class CreateRemixTaskRequest(BaseModel):
     size: Optional[str] = None   # 留空用配置默认
 
 
+async def _fetch_image_dataurl(url: str, platform: str) -> str:
+    """下载平台 CDN 图，返回 data:image/...;base64,... 串。失败返回空字符串。
+
+    平台 CDN（小红书/抖音/公众号）有强防盗链：浏览器直拉 → 403。
+    后端在服务端拉取（带正确 Referer），然后把图嵌进 data URL 给前端，
+    前端就完全绕开 CDN 限制 / 代理白名单 / mixed content 的问题。
+    """
+    if not url:
+        return ""
+    referer = ""
+    if platform == "xhs":
+        referer = "https://www.xiaohongshu.com/"
+    elif platform == "douyin":
+        referer = "https://www.douyin.com/"
+    elif platform == "mp":
+        referer = "https://mp.weixin.qq.com/"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        ),
+    }
+    if referer:
+        headers["Referer"] = referer
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            r = await client.get(url, headers=headers)
+            if r.status_code != 200 or not r.content:
+                return ""
+            ct = (r.headers.get("content-type") or "image/jpeg").split(";")[0].strip()
+            if not ct.startswith("image/"):
+                # 没拿到图片（HTML 错误页等）
+                return ""
+            b64 = base64.b64encode(r.content).decode("ascii")
+            return f"data:{ct};base64,{b64}"
+    except Exception as e:
+        logger.warning(f"[remix/fetch-cover] download failed {url[:80]}: {e}")
+        return ""
+
+
 @router.post("/fetch-post-cover", summary="拉取作品所有图 + 文案（仿写第一步）")
 async def fetch_post_cover(
     req: FetchPostRequest,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """返回 {images: [{url, b64?}, ...], title, desc, platform, post_id}。
+    """返回 {images: [data-url-or-cdn-url, ...], image_urls: [原 CDN URL...], title, ...}。
 
-    images 第 0 张默认是封面。前端展示缩略图条让用户选参考图。
-    为了节省带宽，只把缩略图 URL 给前端，b64 在用户提交任务时由后端再次下载。
+    实现要点：
+      - 后端先用正确的 Referer 把每张图下载下来 base64 内嵌，前端用 data: 渲染
+        ⇒ 不需要代理路由、不被 CDN 防盗链拦截、不存在 mixed content。
+      - 同时返回 image_urls（原 CDN URL）让 worker 提交任务时还能用 URL 引用。
+      - 多张图并发下载，单张超时 15s。
     """
     raw_url = (req.url or "").strip()
     if not raw_url:
@@ -80,15 +124,30 @@ async def fetch_post_cover(
         }
         return {"error": reason_map.get(status, f"作品抓取失败（status={status}）")}
 
-    images = list(metrics.get("images") or [])
+    image_urls = list(metrics.get("images") or [])
     cover_url = metrics.get("cover_url") or ""
-    if cover_url and cover_url not in images:
-        images.insert(0, cover_url)
-    if not images:
+    if cover_url and cover_url not in image_urls:
+        image_urls.insert(0, cover_url)
+    if not image_urls:
         return {"error": "未能从作品中提取到任何图片"}
 
+    # 并发下载并 base64 内嵌：前端展示用 data URL，绕过 CDN 防盗链
+    import asyncio as _asyncio
+    sem = _asyncio.Semaphore(6)
+
+    async def _one(u: str) -> str:
+        async with sem:
+            return await _fetch_image_dataurl(u, plat.name)
+
+    data_urls = await _asyncio.gather(
+        *(_one(u) for u in image_urls), return_exceptions=False,
+    )
+    # 没下载成功的 fallback 用原 URL（让前端尝试直加载，至少有占位）
+    images_for_display = [d or u for d, u in zip(data_urls, image_urls)]
+
     return {
-        "images": images,
+        "images": images_for_display,   # 展示用：优先 data:URL
+        "image_urls": image_urls,       # 原 CDN URL：worker 提交任务时引用
         "title": metrics.get("title") or "",
         "desc": (metrics.get("desc") or "")[:500],
         "platform": plat.name,
