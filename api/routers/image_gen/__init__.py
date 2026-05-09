@@ -34,11 +34,36 @@ router.include_router(remix.router)
 
 # ── 公共端点 ────────────────────────────────────────────────────────────────
 
-@router.get("/proxy", summary="代理拉取图片（解决 mixed content）")
-async def proxy_image(url: str):
-    """前端在 HTTPS 页面里加载 HTTP 七牛图会被浏览器拦截，统一走这个代理。
+_PLATFORM_CDN_SUFFIXES = (
+    # 小红书图片 CDN（sns-img-* / sns-webpic-* / ci-*）
+    ".xhscdn.com", ".xiaohongshu.com",
+    # 抖音图片 CDN（p3-pc / p6-pc / ...douyinpic.com、byteimg.com、bytedance）
+    ".douyinpic.com", ".byteimg.com", ".bytedance.com",
+    # 公众号图片（mmbiz）
+    ".qpic.cn", ".qq.com",
+)
+_QINIU_CDN_SUFFIXES = (".clouddn.com", ".qiniucdn.com", ".qbox.me")
 
-    白名单：仅允许七牛域名 + 配置的 public_url_prefix。
+
+def _referer_for(host: str) -> str:
+    """部分平台 CDN 有 Referer 防盗链，按域名兜对应来源。"""
+    if host.endswith((".xhscdn.com", ".xiaohongshu.com")):
+        return "https://www.xiaohongshu.com/"
+    if host.endswith((".douyinpic.com", ".byteimg.com", ".bytedance.com")):
+        return "https://www.douyin.com/"
+    if host.endswith((".qpic.cn", ".qq.com")):
+        return "https://mp.weixin.qq.com/"
+    return ""
+
+
+@router.get("/proxy", summary="代理拉取图片（解决 mixed content + 平台 CDN 防盗链）")
+async def proxy_image(url: str):
+    """前端在 HTTPS 页面里加载 HTTP 七牛图 / 跨域 CDN 图会被浏览器拦截，统一走这个代理。
+
+    白名单：
+      - 七牛云 / 配置的 public_url_prefix（自有图）
+      - 小红书 / 抖音 / 公众号 平台 CDN（作品仿写从外部抓回来的图）
+    平台 CDN 走代理时按域名补 Referer，规避防盗链 403。
     """
     if not url:
         raise HTTPException(status_code=400, detail="缺少 url 参数")
@@ -52,13 +77,24 @@ async def proxy_image(url: str):
     public_prefix = (await monitor_db.get_setting("public_url_prefix", "")).strip()
     public_host = urlparse(public_prefix).netloc if public_prefix else ""
     allowed_hosts = {qiniu_host, public_host} - {""}
-    suffix_ok = parsed.netloc.endswith((".clouddn.com", ".qiniucdn.com", ".qbox.me"))
+    suffix_ok = parsed.netloc.endswith(_QINIU_CDN_SUFFIXES + _PLATFORM_CDN_SUFFIXES)
     if not (parsed.netloc in allowed_hosts or suffix_ok):
         raise HTTPException(status_code=403, detail=f"域名 {parsed.netloc} 不在白名单")
 
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        ),
+    }
+    referer = _referer_for(parsed.netloc)
+    if referer:
+        headers["Referer"] = referer
+
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cli:
-            r = await cli.get(url)
+            r = await cli.get(url, headers=headers)
             if r.status_code >= 400:
                 raise HTTPException(status_code=r.status_code, detail="上游返回错误")
             content_type = r.headers.get("content-type", "image/png")
