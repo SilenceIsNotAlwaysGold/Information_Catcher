@@ -724,6 +724,10 @@ async def _migrate(db):
     # 博主头像 / 简介（卡片展示用）
     await _ensure_column(db, "monitor_creators", "avatar_url",        "TEXT DEFAULT ''")
     await _ensure_column(db, "monitor_creators", "last_post_title",   "TEXT DEFAULT ''")
+    await _ensure_column(db, "monitor_creators", "followers_count",   "INTEGER DEFAULT 0")
+    await _ensure_column(db, "monitor_creators", "likes_count",       "INTEGER DEFAULT 0")
+    await _ensure_column(db, "monitor_creators", "notes_count",       "INTEGER DEFAULT 0")
+    await _ensure_column(db, "monitor_creators", "creator_desc",      "TEXT DEFAULT ''")
     # post grouping: 'own' = my posts, 'observe' = others' posts (legacy)
     await _ensure_column(db, "monitor_posts", "post_type", "TEXT DEFAULT 'observe'")
     # Track per-post fetch outcome so the UI can flag XHS-locked / deleted notes.
@@ -1474,6 +1478,10 @@ async def delete_creator(creator_id: int, user_id: Optional[int] = None) -> None
 async def update_creator_check(
     creator_id: int, last_post_id: str = "", creator_name: str = "",
     avatar_url: str = "", last_post_title: str = "",
+    followers_count: Optional[int] = None,
+    likes_count: Optional[int] = None,
+    notes_count: Optional[int] = None,
+    creator_desc: str = "",
 ) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         sets = ["last_check_at=datetime('now','localtime')"]
@@ -1486,6 +1494,14 @@ async def update_creator_check(
             sets.append("avatar_url=?"); vals.append(avatar_url)
         if last_post_title:
             sets.append("last_post_title=?"); vals.append(last_post_title)
+        if followers_count is not None:
+            sets.append("followers_count=?"); vals.append(int(followers_count))
+        if likes_count is not None:
+            sets.append("likes_count=?"); vals.append(int(likes_count))
+        if notes_count is not None:
+            sets.append("notes_count=?"); vals.append(int(notes_count))
+        if creator_desc:
+            sets.append("creator_desc=?"); vals.append(creator_desc[:300])
         vals.append(creator_id)
         await db.execute(f"UPDATE monitor_creators SET {','.join(sets)} WHERE id=?", vals)
         await db.commit()
@@ -2676,6 +2692,26 @@ async def list_remix_tasks(
             (*args, limit),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+async def revive_stuck_running_remix_tasks(stuck_minutes: int = 5) -> int:
+    """把 status=running 但 started_at 超过 N 分钟的"僵尸任务"推回 pending。
+
+    场景：worker 正在跑 task 时进程被 kill / service 重启，task 状态留在 running，
+    但没人继续推进 → 永远卡死。本函数让下次 worker 心跳时能重新 claim。
+
+    返回被复活的任务数。
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE remix_tasks SET status='pending' "
+            "WHERE status='running' "
+            "  AND started_at IS NOT NULL "
+            "  AND datetime(started_at, '+' || ? || ' minutes') < datetime('now', 'localtime')",
+            (stuck_minutes,),
+        )
+        await db.commit()
+        return cur.rowcount or 0
 
 
 async def claim_pending_remix_task() -> Optional[Dict]:

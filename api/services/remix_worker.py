@@ -45,14 +45,60 @@ REMIX_PROMPT_EN = (
 )
 
 
+def _prompt_with_caption(caption_title: str, caption_body: str) -> str:
+    """把当前套的"变种文案主题"注入图片 prompt，让图与文案氛围一致。
+
+    用户期望的流程：先生成文案 → 用文案主题做图 prompt → 调 API 换背景换风格。
+    这里只取标题/正文前 200 字作为风格提示，避免 prompt 过长被截断。
+    """
+    theme = (caption_title or caption_body or "").strip()
+    if not theme:
+        return REMIX_PROMPT_EN
+    theme = theme[:200].replace("\n", " ").strip()
+    return (
+        REMIX_PROMPT_EN
+        + f"\n\nAdditional theme guidance for this variant: \"{theme}\". "
+        + "Adapt the background mood, lighting and decorative props to match this theme, "
+        + "while keeping the main subject and any Chinese text completely unchanged."
+    )
+
+
+def _platform_referer(url: str) -> str:
+    """根据 URL host 选合适的 Referer 绕 CDN 防盗链。"""
+    h = url.lower()
+    if "xhscdn.com" in h or "xiaohongshu.com" in h:
+        return "https://www.xiaohongshu.com/"
+    if "douyinpic.com" in h or "byteimg.com" in h or "bytedance.com" in h:
+        return "https://www.douyin.com/"
+    if "qpic.cn" in h or "weixin.qq.com" in h:
+        return "https://mp.weixin.qq.com/"
+    return ""
+
+
 async def _download_ref_image(url: str) -> Optional[bytes]:
+    """带 Referer + 桌面 UA 下载参考图。XHS/抖音/公众号 CDN 防盗链很硬，
+    不带 Referer 会 403。"""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        ),
+    }
+    referer = _platform_referer(url)
+    if referer:
+        headers["Referer"] = referer
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            r = await client.get(url)
+            r = await client.get(url, headers=headers)
             if r.status_code >= 400:
+                logger.warning(
+                    f"[remix_worker] ref download HTTP {r.status_code}: {url[:80]}"
+                )
                 return None
             return r.content
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[remix_worker] ref download exception ({e}): {url[:80]}")
         return None
 
 
@@ -119,9 +165,12 @@ async def _generate_caption(
 async def _gen_one_image(
     client: httpx.AsyncClient, *, base_url: str, api_key: str, model: str,
     size: str, ref_bytes: bytes, user_id: Optional[int] = None,
+    prompt: str = REMIX_PROMPT_EN,
 ) -> dict:
-    """对一张参考图调一次 edits，返回 {image_url, image_b64, error}。"""
-    prompt = REMIX_PROMPT_EN
+    """对一张参考图调一次 edits，返回 {image_url, image_b64, error}。
+
+    prompt 默认用通用 REMIX_PROMPT_EN；调用方可注入"文案主题"个性化 prompt。
+    """
     auth_headers = {"Authorization": f"Bearer {api_key}"}
 
     images = None
@@ -164,31 +213,58 @@ async def _gen_one_set(
     client: httpx.AsyncClient, *, base_url: str, api_key: str, model: str,
     size: str, refs_bytes: list, set_idx: int, total: int,
     post_title: str, post_desc: str, user_id: Optional[int] = None,
+    progress_cb=None,
 ) -> dict:
-    """生成一套：K 张图（每张参考图各换一次背景） + 1 篇文案。
+    """生成一套：1 篇文案 → K 张图（用文案主题派生图 prompt，每张参考图各换一次）。
 
-    返回 {idx, images:[{url, b64, error}], image_url(=images[0].url, 兼容老前端),
-          title, body, error}。
+    流程顺序（响应用户期望）：
+      1. 先调 AI 生成变种文案（标题+正文）—— 几秒
+      2. 用文案主题派生 image edits prompt
+      3. 对每张主体图调 image edits API 换背景换风格
+
+    progress_cb(stage, payload) 在每个里程碑回调，让 worker 写中间进度，
+    让前端能流式看到「文案出来了 → 第 1 张图出来了 → 第 2 张图... 」。
     """
-    images: list = []
-    for ref_bytes in refs_bytes:
-        single = await _gen_one_image(
-            client, base_url=base_url, api_key=api_key, model=model,
-            size=size, ref_bytes=ref_bytes, user_id=user_id,
-        )
-        images.append(single)
-
-    # 文案：基于源作品改写，失败也不挂
+    # ── 第 1 步：先出文案 ────────────────────────────────────────────────
     title, body, cerr = await _generate_caption(
         post_title=post_title, post_desc=post_desc,
         set_idx=set_idx, n_total=total,
     )
+    # 立刻汇报"文案完成"给前端
+    if progress_cb is not None:
+        await progress_cb("caption_done", {
+            "idx": set_idx,
+            "title": title, "body": body,
+            "images": [{"image_url": "", "error": ""}] * len(refs_bytes),
+            "image_url": "",
+            "error": cerr,
+        })
+
+    # ── 第 2 步：用文案主题派生 image prompt ─────────────────────────────
+    image_prompt = _prompt_with_caption(title, body)
+
+    # ── 第 3 步：对每张参考图调 edits ────────────────────────────────────
+    images: list = []
+    for j, ref_bytes in enumerate(refs_bytes):
+        single = await _gen_one_image(
+            client, base_url=base_url, api_key=api_key, model=model,
+            size=size, ref_bytes=ref_bytes, user_id=user_id,
+            prompt=image_prompt,
+        )
+        images.append(single)
+        if progress_cb is not None:
+            await progress_cb("image_done", {
+                "idx": set_idx,
+                "title": title, "body": body,
+                "images": images + [{"image_url": "", "error": ""}] * (len(refs_bytes) - len(images)),
+                "image_url": (images[0].get("image_url") or "") if images else "",
+                "error": cerr,
+            })
 
     succeeded = [im for im in images if im.get("image_url")]
     primary = succeeded[0] if succeeded else (images[0] if images else {})
     item_error = ""
     if not succeeded:
-        # 全部图都失败
         errs = [im.get("error", "") for im in images if im.get("error")]
         item_error = "; ".join(errs)[:200] or "本套所有图均生成失败"
     elif len(succeeded) < len(images):
@@ -196,8 +272,8 @@ async def _gen_one_set(
 
     return {
         "idx": set_idx,
-        "images": images,           # 多张：每个 {image_url, image_b64, error}
-        "image_url": primary.get("image_url", ""),  # 兼容老前端：第一张
+        "images": images,
+        "image_url": primary.get("image_url", ""),
         "title": title,
         "body": body,
         "error": item_error or cerr,
@@ -258,6 +334,26 @@ async def _process_task(task: dict) -> None:
     timeout = httpx.Timeout(180.0, connect=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         for i in range(1, count + 1):
+            # 流式进度回调：每完成"文案/单张图"就把当前套写到 items_json
+            async def _progress(stage: str, partial: dict):
+                # 用 partial 临时覆盖 items 末尾位置（i 对应 items[i-1]）
+                snapshot = list(items)
+                # 剥 image_b64
+                clean = dict(partial)
+                if "images" in clean:
+                    clean["images"] = [
+                        {kk: vv for kk, vv in (sub or {}).items() if kk != "image_b64"}
+                        for sub in clean["images"]
+                    ]
+                snapshot.append(clean)
+                try:
+                    await monitor_db.update_remix_task_progress(
+                        task_id, items_json=json.dumps(snapshot, ensure_ascii=False),
+                        done_count=len(items),  # 仍按"完成的套数"算（部分进度不+）
+                    )
+                except Exception:
+                    pass
+
             try:
                 item = await _gen_one_set(
                     client, base_url=base_url, api_key=api_key, model=model,
@@ -266,6 +362,7 @@ async def _process_task(task: dict) -> None:
                     post_title=task.get("post_title") or "",
                     post_desc=task.get("post_desc") or "",
                     user_id=user_id,
+                    progress_cb=_progress,
                 )
             except Exception as e:
                 logger.exception(f"[remix_worker] task {task_id} set {i} crash: {e}")
@@ -329,7 +426,18 @@ async def _process_task(task: dict) -> None:
 
 
 async def run_once() -> dict:
-    """供 scheduler 调度。一次取一条 pending 任务跑完。"""
+    """供 scheduler 调度。一次取一条 pending 任务跑完。
+
+    心跳开头先复活僵尸 running 任务（worker 进程 kill / service 重启会留下
+    永远卡在 running 的任务），让它们重新进入 pending 队列被 claim。
+    """
+    try:
+        revived = await monitor_db.revive_stuck_running_remix_tasks(stuck_minutes=5)
+        if revived > 0:
+            logger.info(f"[remix_worker] revived {revived} stuck running task(s) → pending")
+    except Exception as e:
+        logger.warning(f"[remix_worker] revive check failed: {e}")
+
     if not await monitor_db.has_pending_remix_tasks():
         return {"ok": True, "skipped": "no pending"}
     task = await monitor_db.claim_pending_remix_task()
