@@ -6,6 +6,7 @@ from ..schemas.monitor import (
     AddPostsRequest,
     UpdatePostRequest,
     AddAccountRequest,
+    CookieSyncRequest,
     UpdateAccountRequest,
     UpdateSettingsRequest,
     QRLoginStartRequest,
@@ -58,18 +59,11 @@ async def add_posts(
     if req.group_id is None:
         raise HTTPException(status_code=400, detail="必须选择一个分组")
 
-    # 配额检查（admin 不限）
-    if (current_user.get("role") or "user") != "admin":
-        from ..services import auth_service
-        u = auth_service.get_user_by_id(current_user["id"]) or {}
-        max_posts = int(u.get("max_monitor_posts", 200))
-        existing = await db.get_posts(user_id=current_user["id"])
-        if len(existing) + len([l for l in req.links if l.strip()]) > max_posts:
-            raise HTTPException(
-                status_code=429,
-                detail=f"超出配额：当前 {len(existing)} / 上限 {max_posts}。"
-                       f"联系管理员升级套餐。",
-            )
+    # 配额检查：按 plan 派生（admin 自动豁免）
+    from ..services import quota_service
+    n_links = len([l for l in req.links if l.strip()])
+    if n_links > 0:
+        await quota_service.check_or_raise(current_user, "monitor_posts", delta=n_links)
 
     results = []
     for raw_link in req.links:
@@ -873,6 +867,12 @@ async def add_account(req: AddAccountRequest, current_user: dict = Depends(get_c
     err = validate_proxy_url(req.proxy_url or "")
     if err:
         raise HTTPException(status_code=400, detail=err)
+
+    # 配额检查：账号池上限（admin 不限）。共享池账号不计入个人配额。
+    if not is_shared:
+        from ..services import quota_service
+        await quota_service.check_or_raise(current_user, "accounts", delta=1)
+
     aid = await db.add_account(
         name=req.name,
         cookie=req.cookie,
@@ -941,6 +941,42 @@ async def check_account_cookie(account_id: int, _: dict = Depends(get_current_us
     status = await cookie_health.check_cookie(acc)
     await db.update_cookie_status(account_id, status)
     return {"ok": True, "status": status}
+
+
+@router.post("/accounts/cookie/sync", summary="CookieBridge 扩展推送 cookie")
+async def cookie_bridge_sync(
+    req: CookieSyncRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """浏览器扩展同步 cookie 到 Pulse。
+
+    设计取舍：
+      - 通过 (account_name, platform, user_id) 定位现有账号；不自动创建账号，
+        避免任何登录浏览器的扩展往后端灌一堆未受控的账号。
+      - 校验 cookie 必须带 a1（小红书签名核心字段），其它字段交给 cookie_health
+        job 异步复测，立刻把状态打回 'valid' 让监控立刻能用。
+    """
+    cookie = (req.cookie or "").strip()
+    if not cookie:
+        raise HTTPException(status_code=400, detail="cookie 不能为空")
+    platform = (req.platform or "xhs").lower()
+    # 至少要带 a1（XHS 签名核心字段）；其它平台只校验非空
+    if platform == "xhs" and "a1=" not in cookie:
+        raise HTTPException(status_code=400, detail="XHS cookie 必须包含 a1 字段")
+
+    account_id = await db.find_account_id_by_name_and_user(
+        name=req.account_name, user_id=current_user["id"], platform=platform,
+    )
+    if not account_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"未找到账号 '{req.account_name}'（平台 {platform}）。"
+                   f"请先在 Pulse 添加同名账号占位。",
+        )
+    await db.update_cookie_via_bridge(
+        account_id=account_id, cookie=cookie, source=(req.source or "extension"),
+    )
+    return {"ok": True, "account_id": account_id}
 
 
 @router.post("/accounts/check-cookies", summary="检查全部账号 Cookie")

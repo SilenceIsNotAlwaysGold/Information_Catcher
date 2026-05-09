@@ -172,6 +172,73 @@ CREATE TABLE IF NOT EXISTS note_comments_cache (
     found_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 
+-- 创作者中心快照：用户授权自家账号后定期拉的运营数据
+-- 一个 (account_id, date) 一行；raw_json 留所有原始字段供前端二次展开
+CREATE TABLE IF NOT EXISTS creator_stats (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER,
+    account_id    INTEGER,
+    platform      TEXT NOT NULL DEFAULT 'xhs',
+    snapshot_date TEXT NOT NULL,        -- YYYY-MM-DD
+    fans_count    INTEGER DEFAULT 0,
+    fans_delta    INTEGER DEFAULT 0,    -- vs 昨天
+    notes_count   INTEGER DEFAULT 0,
+    total_views   INTEGER DEFAULT 0,    -- 累计阅读
+    total_likes   INTEGER DEFAULT 0,
+    total_collects INTEGER DEFAULT 0,
+    total_comments INTEGER DEFAULT 0,
+    daily_views   INTEGER DEFAULT 0,    -- 当日阅读
+    daily_likes   INTEGER DEFAULT 0,
+    daily_collects INTEGER DEFAULT 0,
+    daily_comments INTEGER DEFAULT 0,
+    raw_json      TEXT DEFAULT '',
+    fetched_at    TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_creator_stats_day
+    ON creator_stats(account_id, snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_creator_stats_user_date
+    ON creator_stats(user_id, snapshot_date DESC);
+
+-- 媒体归档：爆款笔记的原图/视频/livePhoto 备份
+-- 一条 note 可对应多条记录（每张图、视频、livePhoto 单独一行）
+CREATE TABLE IF NOT EXISTS media_archive (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER,
+    platform     TEXT NOT NULL DEFAULT 'xhs',
+    note_id      TEXT NOT NULL,
+    note_url     TEXT DEFAULT '',
+    note_title   TEXT DEFAULT '',
+    author       TEXT DEFAULT '',
+    kind         TEXT NOT NULL,    -- cover | image | video | live_photo
+    src_url      TEXT NOT NULL,    -- 原始 CDN URL
+    storage_url  TEXT DEFAULT '',  -- S3 / 七牛 公网 URL（成功才有）
+    storage_backend TEXT DEFAULT '',  -- s3 | qiniu | local
+    sha256       TEXT DEFAULT '',
+    size_bytes   INTEGER DEFAULT 0,
+    status       TEXT NOT NULL DEFAULT 'pending',  -- pending | done | failed
+    fail_count   INTEGER DEFAULT 0,
+    last_error   TEXT DEFAULT '',
+    archived_at  TEXT DEFAULT '',
+    created_at   TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_media_archive_note ON media_archive(note_id);
+CREATE INDEX IF NOT EXISTS idx_media_archive_user ON media_archive(user_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_media_archive_src ON media_archive(note_id, src_url);
+
+-- 通用断点续爬游标表
+-- task: 任务名（如 'trending', 'creator'）；key: 业务主键（如 'uid:keyword'、'creator:123'）
+-- 调度任务按 last_run_at 升序遍历自己的 keys，自然实现"上次没跑完优先续上"。
+CREATE TABLE IF NOT EXISTS crawl_cursor (
+    task        TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    cursor      TEXT DEFAULT '',
+    status      TEXT DEFAULT 'idle',   -- idle | running | done | failed
+    fail_count  INTEGER DEFAULT 0,
+    last_run_at TEXT DEFAULT '',
+    last_error  TEXT DEFAULT '',
+    PRIMARY KEY (task, key)
+);
+
 CREATE TABLE IF NOT EXISTS rewrite_prompts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -336,6 +403,46 @@ CREATE TABLE IF NOT EXISTS remix_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_remix_tasks_user_time ON remix_tasks(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_remix_tasks_status ON remix_tasks(status);
+
+-- 每日用量计数：跨天自动清零（不存当天的零行）
+-- 每用户 + 每天一行，关键端点 record_usage 时累加
+CREATE TABLE IF NOT EXISTS daily_usage (
+    user_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    image_gen_count INTEGER DEFAULT 0,
+    remix_sets_count INTEGER DEFAULT 0,
+    PRIMARY KEY (user_id, date)
+);
+
+-- 邀请码：admin 生成，注册时消费
+CREATE TABLE IF NOT EXISTS invite_codes (
+    code TEXT PRIMARY KEY,
+    created_by INTEGER,
+    plan TEXT DEFAULT 'trial',
+    max_uses INTEGER DEFAULT 1,
+    used_count INTEGER DEFAULT 0,
+    expires_at TEXT,
+    note TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+
+-- 操作审计日志
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_id INTEGER,
+    actor_username TEXT DEFAULT '',
+    action TEXT NOT NULL,
+    target_type TEXT DEFAULT '',
+    target_id TEXT DEFAULT '',
+    metadata TEXT DEFAULT '',
+    ip TEXT DEFAULT '',
+    user_agent TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_logs(target_type, target_id);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
 """
 
 
@@ -571,6 +678,9 @@ async def _migrate(db):
     # Cookie health 探针：上次成功/失败检测的时间戳（ISO 字符串）。
     # 与历史的 cookie_checked_at 共存，前者只有探针在写、后者也兼容旧逻辑。
     await _ensure_column(db, "monitor_accounts", "cookie_last_check", "TEXT DEFAULT ''")
+    # CookieBridge 浏览器扩展同步 cookie 的时间戳与来源
+    await _ensure_column(db, "monitor_accounts", "cookie_synced_at", "TEXT DEFAULT ''")
+    await _ensure_column(db, "monitor_accounts", "cookie_synced_via", "TEXT DEFAULT ''")
     # post grouping: 'own' = my posts, 'observe' = others' posts (legacy)
     await _ensure_column(db, "monitor_posts", "post_type", "TEXT DEFAULT 'observe'")
     # Track per-post fetch outcome so the UI can flag XHS-locked / deleted notes.
@@ -830,7 +940,10 @@ async def get_all_settings() -> Dict[str, str]:
 _ACCOUNT_COLUMNS_SELECT = (
     "id, name, cookie, proxy_url, user_agent, viewport, timezone, locale, "
     "fp_browser_type, fp_profile_id, fp_api_url, created_at, is_active, "
-    "cookie_status, cookie_checked_at, cookie_last_check, is_shared, last_used_at, usage_count, user_id, "
+    "cookie_status, cookie_checked_at, cookie_last_check, "
+    "COALESCE(cookie_synced_at,'') AS cookie_synced_at, "
+    "COALESCE(cookie_synced_via,'') AS cookie_synced_via, "
+    "is_shared, last_used_at, usage_count, user_id, "
     "COALESCE(platform,'xhs') AS platform"
 )
 
@@ -995,6 +1108,36 @@ async def get_account_cookie(account_id: int) -> Optional[str]:
         ) as cur:
             row = await cur.fetchone()
             return row[0] if row else None
+
+
+async def update_cookie_via_bridge(
+    account_id: int, cookie: str, source: str = "extension",
+) -> None:
+    """CookieBridge 浏览器扩展推送的 cookie 写入：同时刷新 cookie_synced_*
+    并把 cookie_status 重置为 valid（让后台健康度 job 复测，避免误用过期态）。"""
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE monitor_accounts SET cookie=?, cookie_status='valid', "
+            "cookie_synced_at=?, cookie_synced_via=? WHERE id=?",
+            (cookie, now_iso, source, account_id),
+        )
+        await db.commit()
+
+
+async def find_account_id_by_name_and_user(
+    name: str, user_id: int, platform: str = "xhs",
+) -> Optional[int]:
+    """CookieBridge 用 (account_name, user_id) 找账号 id（多租户隔离）。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id FROM monitor_accounts "
+            "WHERE name=? AND user_id=? AND COALESCE(platform,'xhs')=? "
+            "LIMIT 1",
+            (name, user_id, platform),
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else None
 
 
 async def delete_account(account_id: int, user_id: Optional[int] = None):
@@ -2299,3 +2442,287 @@ async def has_pending_remix_tasks() -> bool:
             "SELECT 1 FROM remix_tasks WHERE status='pending' LIMIT 1",
         ) as cur:
             return (await cur.fetchone()) is not None
+
+
+# ── Media Archive（爆款媒体归档）─────────────────────────────────────────────
+
+async def archive_enqueue(
+    *, user_id: Optional[int], platform: str, note_id: str,
+    note_url: str, note_title: str, author: str,
+    kind: str, src_url: str,
+) -> Optional[int]:
+    """登记一条待归档媒体（去重：同 note_id + src_url 不重复入库）。
+    返回新行 id；冲突时返回 None。"""
+    if not note_id or not src_url:
+        return None
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                """INSERT INTO media_archive
+                   (user_id, platform, note_id, note_url, note_title, author,
+                    kind, src_url, status)
+                   VALUES (?,?,?,?,?,?,?,?, 'pending')""",
+                (user_id, platform or "xhs", note_id, note_url or "",
+                 (note_title or "")[:500], (author or "")[:200],
+                 kind, src_url),
+            )
+            await db.commit()
+            return cur.lastrowid
+    except aiosqlite.IntegrityError:
+        return None  # 唯一索引冲突 = 已经登记过
+
+
+async def archive_list_pending(limit: int = 30) -> List[Dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM media_archive "
+            "WHERE status='pending' AND fail_count<3 "
+            "ORDER BY id ASC LIMIT ?",
+            (limit,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def archive_mark_done(
+    archive_id: int, *, storage_url: str, storage_backend: str,
+    sha256: str, size_bytes: int,
+) -> None:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE media_archive SET status='done', storage_url=?, "
+            "storage_backend=?, sha256=?, size_bytes=?, archived_at=?, last_error='' "
+            "WHERE id=?",
+            (storage_url, storage_backend, sha256, size_bytes, now_iso, archive_id),
+        )
+        await db.commit()
+
+
+async def archive_mark_failed(archive_id: int, error: str = "") -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE media_archive "
+            "SET status=CASE WHEN fail_count>=2 THEN 'failed' ELSE 'pending' END, "
+            "    fail_count=fail_count+1, last_error=? WHERE id=?",
+            ((error or "")[:500], archive_id),
+        )
+        await db.commit()
+
+
+async def archive_list_for_user(
+    user_id: Optional[int], *, platform: str = "", note_id: str = "",
+    status: str = "", limit: int = 100, offset: int = 0,
+) -> List[Dict]:
+    sql = "SELECT * FROM media_archive WHERE 1=1"
+    params: list = []
+    if user_id is not None:
+        sql += " AND (user_id=? OR user_id IS NULL)"
+        params.append(user_id)
+    if platform:
+        sql += " AND platform=?"
+        params.append(platform)
+    if note_id:
+        sql += " AND note_id=?"
+        params.append(note_id)
+    if status:
+        sql += " AND status=?"
+        params.append(status)
+    sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def archive_count_for_user(
+    user_id: Optional[int], *, platform: str = "", status: str = "",
+) -> int:
+    sql = "SELECT COUNT(*) FROM media_archive WHERE 1=1"
+    params: list = []
+    if user_id is not None:
+        sql += " AND (user_id=? OR user_id IS NULL)"
+        params.append(user_id)
+    if platform:
+        sql += " AND platform=?"
+        params.append(platform)
+    if status:
+        sql += " AND status=?"
+        params.append(status)
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(sql, params) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+
+
+# ── Creator Stats（创作者中心数据）───────────────────────────────────────────
+
+async def creator_stats_upsert(
+    *, user_id: Optional[int], account_id: int, platform: str,
+    snapshot_date: str, raw_json: str, **fields,
+) -> None:
+    """每天一行；同一天重复抓覆盖更新。fields 接 fans_count/total_views 等数值列。"""
+    cols = [
+        "fans_count", "fans_delta", "notes_count",
+        "total_views", "total_likes", "total_collects", "total_comments",
+        "daily_views", "daily_likes", "daily_collects", "daily_comments",
+    ]
+    values = [int(fields.get(c, 0) or 0) for c in cols]
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            f"""INSERT INTO creator_stats
+                (user_id, account_id, platform, snapshot_date, raw_json,
+                 {", ".join(cols)})
+                VALUES (?,?,?,?,?,{",".join("?" * len(cols))})
+                ON CONFLICT(account_id, snapshot_date) DO UPDATE SET
+                  raw_json=excluded.raw_json,
+                  {", ".join(f"{c}=excluded.{c}" for c in cols)},
+                  fetched_at=datetime('now', 'localtime')""",
+            (user_id, account_id, platform or "xhs", snapshot_date,
+             raw_json, *values),
+        )
+        await db.commit()
+
+
+async def creator_stats_list(
+    user_id: Optional[int], *, account_id: Optional[int] = None,
+    days: int = 30,
+) -> List[Dict]:
+    sql = (
+        "SELECT cs.*, ma.name AS account_name "
+        "  FROM creator_stats cs "
+        "  LEFT JOIN monitor_accounts ma ON ma.id = cs.account_id "
+        " WHERE 1=1"
+    )
+    params: list = []
+    if user_id is not None:
+        sql += " AND cs.user_id=?"
+        params.append(user_id)
+    if account_id:
+        sql += " AND cs.account_id=?"
+        params.append(account_id)
+    sql += " AND cs.snapshot_date >= date('now', ?)"
+    params.append(f"-{int(days)} days")
+    sql += " ORDER BY cs.snapshot_date DESC, cs.account_id ASC"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def creator_stats_latest_per_account(
+    user_id: Optional[int],
+) -> List[Dict]:
+    """每个账号的最新一行（用于看板首页）。"""
+    sql = (
+        "SELECT cs.*, ma.name AS account_name "
+        "  FROM creator_stats cs "
+        "  LEFT JOIN monitor_accounts ma ON ma.id = cs.account_id "
+        " WHERE cs.id IN ( "
+        "   SELECT MAX(id) FROM creator_stats GROUP BY account_id "
+        " )"
+    )
+    params: list = []
+    if user_id is not None:
+        sql += " AND cs.user_id=?"
+        params.append(user_id)
+    sql += " ORDER BY cs.account_id ASC"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+# ── Crawl Cursor（断点续爬）──────────────────────────────────────────────────
+
+async def cursor_mark_running(task: str, key: str) -> None:
+    """处理某条目前调用：UPSERT 进 idle/running 状态。"""
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO crawl_cursor(task, key, status, last_run_at) "
+            "VALUES (?, ?, 'running', ?) "
+            "ON CONFLICT(task, key) DO UPDATE SET "
+            "  status='running', last_run_at=excluded.last_run_at",
+            (task, key, now_iso),
+        )
+        await db.commit()
+
+
+async def cursor_mark_done(task: str, key: str, cursor: str = "") -> None:
+    """处理成功：清零 fail_count，状态置 done。"""
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO crawl_cursor(task, key, cursor, status, fail_count, last_run_at, last_error) "
+            "VALUES (?, ?, ?, 'done', 0, ?, '') "
+            "ON CONFLICT(task, key) DO UPDATE SET "
+            "  cursor=excluded.cursor, status='done', fail_count=0, "
+            "  last_run_at=excluded.last_run_at, last_error=''",
+            (task, key, cursor, now_iso),
+        )
+        await db.commit()
+
+
+async def cursor_mark_failed(task: str, key: str, error: str = "") -> int:
+    """处理失败：fail_count +1，返回新值（调用方可据此熔断）。"""
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO crawl_cursor(task, key, status, fail_count, last_run_at, last_error) "
+            "VALUES (?, ?, 'failed', 1, ?, ?) "
+            "ON CONFLICT(task, key) DO UPDATE SET "
+            "  status='failed', fail_count=fail_count+1, "
+            "  last_run_at=excluded.last_run_at, last_error=excluded.last_error",
+            (task, key, now_iso, (error or "")[:500]),
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT fail_count FROM crawl_cursor WHERE task=? AND key=?", (task, key),
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else 1
+
+
+async def cursor_get(task: str, key: str) -> Optional[Dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM crawl_cursor WHERE task=? AND key=?", (task, key),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def cursor_sort_by_last_run(
+    task: str, candidate_keys: List[str], skip_failing_above: int = 5,
+) -> List[str]:
+    """把待处理 keys 按"上次跑得最早"排前。
+    新的 key（cursor 表里没有）排最前，让新加入的项目先跑。
+    fail_count >= skip_failing_above 的项目排到队尾（熔断降权）。
+    """
+    if not candidate_keys:
+        return []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        placeholders = ",".join("?" * len(candidate_keys))
+        async with db.execute(
+            f"SELECT key, COALESCE(last_run_at,'') AS last_run_at, "
+            f"       COALESCE(fail_count, 0) AS fail_count "
+            f"  FROM crawl_cursor WHERE task=? AND key IN ({placeholders})",
+            (task, *candidate_keys),
+        ) as cur:
+            existing = {r["key"]: dict(r) for r in await cur.fetchall()}
+
+    # 排序键：(熔断降权, last_run_at)；不存在的当作最早（''）
+    def _sort_key(k: str):
+        info = existing.get(k)
+        if not info:
+            return (0, "")  # 新 key，最高优先
+        burned = 1 if info["fail_count"] >= skip_failing_above else 0
+        return (burned, info["last_run_at"])
+
+    return sorted(candidate_keys, key=_sort_key)

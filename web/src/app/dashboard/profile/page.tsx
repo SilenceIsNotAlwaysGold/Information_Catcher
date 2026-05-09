@@ -12,6 +12,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { PromptTemplatesCard } from "@/components/PromptTemplatesCard";
 import { MonitorGroupsCard } from "@/components/MonitorGroupsCard";
 import { FeishuBindingCard } from "@/components/FeishuBindingCard";
+import { PlanUsageCard } from "@/components/PlanUsageCard";
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -336,6 +337,9 @@ export default function MonitorSettingsPage() {
   // ── 全局 tab（个人设置）：webhook、告警阈值、飞书多维表格、热门、Prompt ─
   const renderGlobalPanel = () => (
     <div className="space-y-6">
+      {/* 套餐 + 用量 + 改密码 */}
+      <PlanUsageCard />
+
       {/* 飞书 OAuth 绑定（推荐，自动建群 + 多维表格） */}
       <FeishuBindingCard />
 

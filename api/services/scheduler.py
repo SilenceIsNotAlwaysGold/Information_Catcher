@@ -15,6 +15,7 @@ from . import cookie_health
 from . import platforms as platform_registry
 from . import image_upload_worker
 from . import remix_worker
+from . import media_archiver
 
 logger = logging.getLogger(__name__)
 
@@ -472,17 +473,29 @@ async def run_own_comments_check():
 
 
 async def run_creator_check():
-    """博主订阅追新：定时遍历 monitor_creators，把新发的帖子拉进监控列表。"""
+    """博主订阅追新：定时遍历 monitor_creators，把新发的帖子拉进监控列表。
+
+    断点续爬：按 crawl_cursor 表排序，先跑"上次执行最早"的 creator，
+    某 creator 连续失败 5 次降权到队尾（熔断）。崩溃恢复后从断点续上。
+    """
     creators = await db.list_creators()
     if not creators:
         return
-    logger.info(f"[creator_check] checking {len(creators)} creators")
+    # 排序 creator：上次跑得最早的优先
+    creator_by_key = {f"creator:{c['id']}": c for c in creators}
+    sorted_keys = await db.cursor_sort_by_last_run(
+        "creator", list(creator_by_key.keys()),
+    )
+    logger.info(
+        f"[creator_check] checking {len(creators)} creators (cursor-ordered)"
+    )
 
     # 每个用户的抖音/XHS 账号缓存（追新需要登录账号）
     douyin_accounts_by_uid: dict = {}
     xhs_accounts_by_uid: dict = {}
 
-    for creator in creators:
+    for ck in sorted_keys:
+        creator = creator_by_key[ck]
         plat = platform_registry.get_platform(creator.get("platform") or "xhs")
         if not plat:
             continue
@@ -512,12 +525,15 @@ async def run_creator_check():
             if not account:
                 continue  # 没账号直接跳过
 
+        await db.cursor_mark_running("creator", ck)
         try:
             posts = await plat.fetch_creator_posts(creator["creator_url"], account=account)
         except NotImplementedError:
+            await db.cursor_mark_failed("creator", ck, "platform NotImplementedError")
             continue
         except Exception as e:
             logger.error(f"[creator_check] {creator['creator_url']} error: {e}")
+            await db.cursor_mark_failed("creator", ck, str(e))
             continue
 
         last_post_id = creator.get("last_post_id") or ""
@@ -548,6 +564,7 @@ async def run_creator_check():
             creator["id"], last_post_id=newest,
             creator_name=(posts[0].get("creator_name", "") if posts else ""),
         )
+        await db.cursor_mark_done("creator", ck, cursor=newest or "")
         if added:
             logger.info(f"[creator_check] {creator.get('creator_name') or creator['creator_url']} +{added} 新帖")
 
@@ -840,13 +857,22 @@ async def run_trending_monitor(platform: Optional[str] = None, user_id: Optional
         feishu_url = full_user.get("feishu_webhook_url", "") or ""
         chat_id    = full_user.get("feishu_chat_id", "") or ""
 
-        for idx, keyword in enumerate(keywords):
+        # 断点续爬：把 keywords 按"上次跑得最早"排前，崩溃恢复后从断点续上
+        keys = [f"trending:{uid}:{kw}" for kw in keywords]
+        sorted_keys = await db.cursor_sort_by_last_run("trending", keys)
+        # 恢复 key → keyword 映射，保持 idx-based 账号轮转
+        prefix = f"trending:{uid}:"
+        keyword_order = [k[len(prefix):] for k in sorted_keys]
+
+        for idx, keyword in enumerate(keyword_order):
+            cursor_key = f"trending:{uid}:{keyword}"
             account = accounts[idx % len(accounts)]
             acc_platform = (account.get("platform") or "xhs").lower()
             plat = platform_registry.get_platform(acc_platform)
             if not plat:
                 logger.warning(f"[trending] unknown platform '{acc_platform}' for account {account.get('id')}, skipping")
                 continue
+            await db.cursor_mark_running("trending", cursor_key)
             import time as _t
             _t0 = _t.perf_counter()
             try:
@@ -883,14 +909,30 @@ async def run_trending_monitor(platform: Optional[str] = None, user_id: Optional
                     )
                     if is_new:
                         new_posts.append(p)
+                        # 媒体归档登记（开关 + 阈值在 media_archiver 内部判定）
+                        try:
+                            await media_archiver.archive_post(
+                                user_id=uid, platform=acc_platform,
+                                note_id=p["note_id"], note_url=p["note_url"],
+                                note_title=p.get("title", ""),
+                                author=p.get("author", ""),
+                                cover_url=p.get("cover_url", ""),
+                                images=p.get("images") or [],
+                                video_url=p.get("video_url", ""),
+                                liked_count=int(p.get("liked_count", 0) or 0),
+                            )
+                        except Exception as e:
+                            logger.warning(f"[archive] enqueue failed: {e}")
 
                 if new_posts and (wecom_url or feishu_url or chat_id):
                     await notifier.notify_trending(
                         wecom_url, feishu_url, keyword, new_posts,
                         feishu_chat_id=chat_id,
                     )
+                await db.cursor_mark_done("trending", cursor_key)
             except Exception as e:
                 logger.error(f"[trending] user={uid} keyword='{keyword}' error: {e}")
+                await db.cursor_mark_failed("trending", cursor_key, str(e))
 
 
 async def _enrich_trending_descriptions(posts: list, concurrency: int = 3):
@@ -948,6 +990,70 @@ def _parse_time(t: str):
         return 9, 0
 
 
+async def run_creator_dashboard(account_id: Optional[int] = None):
+    """每日抓取创作者中心运营数据快照。
+
+    - account_id 给定时只跑该账号；不给跑全平台所有"开启了创作者数据采集"的账号。
+    - 默认开关 creator_dashboard_enabled=0；admin 在 settings 里启用后才跑。
+    """
+    enabled = (await db.get_setting("creator_dashboard_enabled", "0")) == "1"
+    if not enabled and account_id is None:
+        return
+    if account_id:
+        accounts = []
+        acc = await db.get_account(account_id)
+        if acc and acc.get("cookie") and (acc.get("platform") or "xhs") == "xhs":
+            accounts = [acc]
+    else:
+        all_accounts = await db.get_accounts(include_secrets=True)
+        accounts = [
+            a for a in all_accounts
+            if (a.get("platform") or "xhs") == "xhs" and a.get("cookie")
+        ]
+    if not accounts:
+        logger.info("[creator-dash] no eligible accounts")
+        return
+
+    from .platforms.xhs.creator_dashboard_fetcher import fetch_creator_dashboard
+
+    for acc in accounts:
+        try:
+            metrics = await fetch_creator_dashboard(acc)
+        except Exception as e:
+            logger.warning(f"[creator-dash] account {acc.get('name')} fetch error: {e}")
+            continue
+        if not metrics:
+            continue
+        try:
+            await db.creator_stats_upsert(
+                user_id=acc.get("user_id"),
+                account_id=int(acc["id"]),
+                platform="xhs",
+                snapshot_date=metrics.pop("snapshot_date"),
+                raw_json=metrics.pop("raw_json", ""),
+                **metrics,
+            )
+        except Exception as e:
+            logger.warning(f"[creator-dash] upsert failed: {e}")
+
+
+async def run_trial_expiration():
+    """把所有过期的 trial 用户降级到 free。每天 00:30 跑一次。"""
+    try:
+        from . import auth_service, audit_service
+        affected = auth_service.downgrade_expired_trials()
+        if affected > 0:
+            logger.info(f"[trial_expiration] downgraded {affected} trial users to free")
+            await audit_service.log(
+                action="plan.trial_expired",
+                metadata={"affected": affected},
+            )
+        else:
+            logger.debug("[trial_expiration] no expired trial users")
+    except Exception as e:
+        logger.exception(f"[trial_expiration] failed: {e}")
+
+
 async def start_scheduler():
     settings = await db.get_all_settings()
     interval = int(settings.get("check_interval_minutes", "30") or "30")
@@ -987,6 +1093,22 @@ async def start_scheduler():
     scheduler.add_job(
         remix_worker.run_once, "interval", seconds=10,
         id="remix_worker", replace_existing=True, max_instances=1,
+    )
+    # 试用期到期处理：每天 00:30 跑一次，把过期 trial 用户降级到 free
+    scheduler.add_job(
+        run_trial_expiration, CronTrigger(hour=0, minute=30, timezone="Asia/Shanghai"),
+        id="trial_expiration", replace_existing=True,
+    )
+    # 媒体归档 worker：每分钟扫一批 pending 行下载 + 上传到对象存储
+    scheduler.add_job(
+        media_archiver.run_archive_worker, "interval", minutes=1,
+        id="media_archiver", replace_existing=True, max_instances=1,
+    )
+    # 创作者中心运营数据：每天 09:00 抓一次（避开整点小红书更新数据的高峰）
+    scheduler.add_job(
+        run_creator_dashboard,
+        CronTrigger(hour=9, minute=0, timezone="Asia/Shanghai"),
+        id="creator_dashboard", replace_existing=True, max_instances=1,
     )
     scheduler.start()
     logger.info(f"[scheduler] started — interval={interval}min, report={report_time}")

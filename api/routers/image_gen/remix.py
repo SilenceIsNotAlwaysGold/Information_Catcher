@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..auth import get_current_user
-from ...services import monitor_db, monitor_fetcher
+from ...services import monitor_db, monitor_fetcher, quota_service
 from ...services.platforms import detect_platform
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,9 @@ async def create_remix_task(
     count = max(1, min(int(req.count or 1), 30))
     ref_idx = max(0, int(req.ref_image_idx or 0))
 
+    # 配额检查：今日仿写套数（admin 不限）
+    await quota_service.check_or_raise(current_user, "daily_remix_sets", delta=count)
+
     # 立刻先解析一次，验证可达 + 拿参考图 URL，避免任务跑起来才发现链接挂了
     plat = detect_platform(req.post_url)
     if not plat:
@@ -154,6 +157,13 @@ async def create_remix_task(
         count=count,
         size=(req.size or "").strip(),
     )
+
+    # 用量计数（按提交套数；任务失败也算消耗，因为已经占用了 worker 资源）
+    try:
+        await quota_service.record_usage(user_id, "remix_sets", delta=count)
+    except Exception as e:
+        logger.warning(f"[remix] record_usage failed: {e}")
+
     return {"task_id": task_id, "status": "pending", "count": count}
 
 

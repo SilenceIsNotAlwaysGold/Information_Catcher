@@ -17,7 +17,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   login: (credentials: LoginRequest) => Promise<void>;
-  register: (email: string, password: string) => Promise<void>;
+  register: (email: string, password: string, inviteCode?: string) => Promise<void>;
   setToken: (token: string) => void;
   logout: () => void;
 }
@@ -61,11 +61,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     seedMe(response.access_token, response.user);
   };
 
-  const register = async (email: string, password: string) => {
+  const register = async (email: string, password: string, inviteCode?: string) => {
     const r = await fetch("/api/auth/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({
+        email,
+        password,
+        invite_code: inviteCode?.trim() || undefined,
+      }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || "注册失败");

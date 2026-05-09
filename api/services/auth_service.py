@@ -119,6 +119,20 @@ def init_user_db():
     # 飞书显示名（绑定时从 user_info 拉一次缓存，前端展示用）
     _ensure_column(cursor, "users", "feishu_name",                      "TEXT DEFAULT ''")
 
+    # SaaS 用户生命周期管理
+    # status：active（正常）/ disabled（admin 禁用）/ deleted（软删，列表不显示）
+    # is_active 字段保留兼容老逻辑：status='active' 即 is_active=1
+    _ensure_column(cursor, "users", "status",            "TEXT DEFAULT 'active'")
+    _ensure_column(cursor, "users", "last_login_at",     "TEXT")
+    _ensure_column(cursor, "users", "login_count",       "INTEGER DEFAULT 0")
+    _ensure_column(cursor, "users", "disabled_reason",   "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "created_by",        "INTEGER")  # NULL = 自助注册或 admin 创建初代账号
+    _ensure_column(cursor, "users", "deleted_at",        "TEXT")
+    # JWT 强制下线：早于此时间签发的 token 失效（admin 重置密码 / 强制下线时设置）
+    _ensure_column(cursor, "users", "token_revoked_at",  "TEXT")
+    # 个人/组织级配额覆盖（NULL 走 plan 默认；非 NULL 优先生效）
+    _ensure_column(cursor, "users", "quota_override_json", "TEXT DEFAULT ''")
+
     # email 唯一索引（NULL 允许多个）
     cursor.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email "
@@ -188,11 +202,17 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 
 def authenticate_user(login: str, password: str) -> Optional[dict]:
-    """用户认证。`login` 既支持 username 也支持 email。"""
+    """用户认证。`login` 既支持 username 也支持 email。
+
+    返回 None 的可能：用户不存在、密码错、status != 'active'。
+    返回 {"_disabled": True, ...} 表示用户存在但被禁用 / 软删——上层可用此区分给不同提示。
+    """
     conn = _get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, username, email, password_hash, is_active, plan, trial_ends_at, role "
+        "SELECT id, username, email, password_hash, is_active, plan, trial_ends_at, role, "
+        "       COALESCE(status,'active') AS status, "
+        "       COALESCE(disabled_reason,'') AS disabled_reason "
         "FROM users WHERE username = ? OR email = ?",
         (login, login)
     )
@@ -202,8 +222,15 @@ def authenticate_user(login: str, password: str) -> Optional[dict]:
         return None
     if not verify_password(password, row["password_hash"]):
         return None
-    if not row["is_active"]:
-        return None
+    status = (row["status"] or "active").strip()
+    if status != "active" or not row["is_active"]:
+        return {
+            "_disabled": True,
+            "id": row["id"],
+            "username": row["username"],
+            "status": status,
+            "disabled_reason": row["disabled_reason"] or "",
+        }
     return {
         "id": row["id"],
         "username": row["username"],
@@ -212,7 +239,21 @@ def authenticate_user(login: str, password: str) -> Optional[dict]:
         "plan": row["plan"] or "trial",
         "trial_ends_at": row["trial_ends_at"],
         "role": row["role"] or "user",
+        "status": status,
     }
+
+
+def update_login_stats(user_id: int) -> None:
+    """登录成功时调：更新 last_login_at + login_count + 1。"""
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET last_login_at = datetime('now', 'localtime'), "
+        "login_count = COALESCE(login_count, 0) + 1 WHERE id=?",
+        (user_id,),
+    )
+    conn.commit()
+    conn.close()
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -288,6 +329,11 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
     cursor = conn.cursor()
     cursor.execute(
         "SELECT id, username, email, is_active, plan, trial_ends_at, role, "
+        "       COALESCE(status,'active') AS status, "
+        "       COALESCE(disabled_reason,'') AS disabled_reason, "
+        "       last_login_at, COALESCE(login_count, 0) AS login_count, "
+        "       token_revoked_at, "
+        "       COALESCE(quota_override_json, '') AS quota_override_json, "
         "       COALESCE(feishu_webhook_url,'') AS feishu_webhook_url, "
         "       COALESCE(wecom_webhook_url,'')  AS wecom_webhook_url, "
         "       COALESCE(max_monitor_posts, 200) AS max_monitor_posts, "
@@ -324,6 +370,12 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "plan": row["plan"] or "trial",
         "trial_ends_at": row["trial_ends_at"],
         "role": row["role"] or "user",
+        "status": row["status"] or "active",
+        "disabled_reason": row["disabled_reason"] or "",
+        "last_login_at": row["last_login_at"],
+        "login_count": int(row["login_count"] or 0),
+        "token_revoked_at": row["token_revoked_at"],
+        "quota_override_json": row["quota_override_json"] or "",
         "feishu_webhook_url": row["feishu_webhook_url"] or "",
         "wecom_webhook_url":  row["wecom_webhook_url"]  or "",
         "max_monitor_posts": int(row["max_monitor_posts"] or 200),
@@ -438,14 +490,20 @@ def update_user_webhooks(
     conn.close()
 
 
-def list_users() -> list:
-    """管理员用：列出所有用户。"""
+def list_users(*, include_deleted: bool = False) -> list:
+    """管理员用：列出所有用户。默认隐藏 status='deleted'。"""
     conn = _get_db_connection()
     cursor = conn.cursor()
+    where = "" if include_deleted else "WHERE COALESCE(status,'active') != 'deleted'"
     cursor.execute(
-        "SELECT id, username, email, is_active, plan, trial_ends_at, role, "
-        "       COALESCE(max_monitor_posts, 200) AS max_monitor_posts, created_at "
-        "FROM users ORDER BY id DESC"
+        f"SELECT id, username, email, is_active, plan, trial_ends_at, role, "
+        f"       COALESCE(max_monitor_posts, 200) AS max_monitor_posts, "
+        f"       COALESCE(status,'active') AS status, "
+        f"       COALESCE(disabled_reason,'') AS disabled_reason, "
+        f"       last_login_at, COALESCE(login_count,0) AS login_count, "
+        f"       COALESCE(quota_override_json,'') AS quota_override_json, "
+        f"       created_at "
+        f"FROM users {where} ORDER BY id DESC"
     )
     rows = cursor.fetchall()
     conn.close()
@@ -453,12 +511,21 @@ def list_users() -> list:
 
 
 def update_user_admin(user_id: int, **fields) -> bool:
-    """管理员修改某个用户的 plan、is_active、role 等。"""
-    allowed = {"plan", "is_active", "role", "trial_ends_at", "max_monitor_posts"}
+    """管理员修改某个用户字段。允许字段见 `_ADMIN_ALLOWED_FIELDS`。
+
+    特殊：传 status='disabled' 自动同步 is_active=0；status='active' 同步 is_active=1。
+    """
     sets, vals = [], []
     for k, v in fields.items():
-        if k in allowed and v is not None:
-            sets.append(f"{k}=?"); vals.append(v)
+        if k not in _ADMIN_ALLOWED_FIELDS or v is None:
+            continue
+        sets.append(f"{k}=?"); vals.append(v)
+        # status 联动 is_active（兼容老逻辑）
+        if k == "status":
+            if v == "active":
+                sets.append("is_active=?"); vals.append(1)
+            elif v in ("disabled", "deleted"):
+                sets.append("is_active=?"); vals.append(0)
     if not sets:
         return False
     vals.append(user_id)
@@ -468,6 +535,93 @@ def update_user_admin(user_id: int, **fields) -> bool:
     conn.commit()
     conn.close()
     return True
+
+
+_ADMIN_ALLOWED_FIELDS = {
+    "plan", "is_active", "role", "trial_ends_at", "max_monitor_posts",
+    "status", "disabled_reason", "quota_override_json", "email",
+}
+
+
+def soft_delete_user(user_id: int) -> bool:
+    """软删除：status='deleted'、is_active=0、设置 deleted_at 和 token_revoked_at。"""
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET status='deleted', is_active=0, "
+        "deleted_at=datetime('now','localtime'), "
+        "token_revoked_at=datetime('now','localtime') WHERE id=?",
+        (user_id,),
+    )
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def reset_user_password(user_id: int, new_password: str) -> bool:
+    """admin 强制重置用户密码 + 撤销所有现有 token。"""
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET password_hash=?, "
+        "token_revoked_at=datetime('now','localtime') WHERE id=?",
+        (hash_password(new_password), user_id),
+    )
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def revoke_user_tokens(user_id: int) -> bool:
+    """强制下线某用户：设置 token_revoked_at = now。"""
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET token_revoked_at=datetime('now','localtime') WHERE id=?",
+        (user_id,),
+    )
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def change_password(user_id: int, old_password: str, new_password: str) -> tuple[bool, str]:
+    """用户自己改密码。返回 (ok, error_message)。"""
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT password_hash FROM users WHERE id=?", (user_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return False, "用户不存在"
+    if not verify_password(old_password, row["password_hash"]):
+        conn.close()
+        return False, "原密码错误"
+    if not new_password or len(new_password) < 6:
+        conn.close()
+        return False, "新密码至少 6 位"
+    cur.execute(
+        "UPDATE users SET password_hash=? WHERE id=?",
+        (hash_password(new_password), user_id),
+    )
+    conn.commit()
+    conn.close()
+    return True, ""
+
+
+def downgrade_expired_trials() -> int:
+    """scheduler 调：找 plan='trial' 且 trial_ends_at <= now 的，降级到 free。返回受影响行数。"""
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET plan='free' "
+        "WHERE plan='trial' AND trial_ends_at IS NOT NULL "
+        "AND trial_ends_at <= datetime('now')"
+    )
+    affected = cur.rowcount
+    conn.commit()
+    conn.close()
+    return affected
 
 
 # ── 飞书 OAuth 绑定 ─────────────────────────────────────────────────────────

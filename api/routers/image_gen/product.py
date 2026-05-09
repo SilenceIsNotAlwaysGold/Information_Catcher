@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from ..auth import get_current_user
-from ...services import monitor_db, qiniu_uploader, local_storage
+from ...services import monitor_db, qiniu_uploader, local_storage, quota_service
 from ._common import (
     DEFAULT_SIZE, MAX_TOTAL,
     call_edits, call_generations, max_per_batch_for,
@@ -173,6 +173,10 @@ async def generate_image(
     final_prompt = f"{prompt}\n\nNegative prompt: {neg}" if neg else prompt
 
     n = max(1, min(int(req.n or 1), MAX_TOTAL))
+
+    # 配额检查：今日商品图生成数（admin 不限）
+    await quota_service.check_or_raise(current_user, "daily_image_gen", delta=n)
+
     size = (req.size or "").strip() or cfg_size
     auth_headers = {"Authorization": f"Bearer {api_key}"}
 
@@ -269,6 +273,13 @@ async def generate_image(
                     logger.warning(f"[image_gen] write history failed: {e}")
 
             all_images.extend(images or [])
+
+    # 记用量（按实际成功生成数）。admin 也记，方便看活跃度
+    if all_images:
+        try:
+            await quota_service.record_usage(user_id, "image_gen", delta=len(all_images))
+        except Exception as e:
+            logger.warning(f"[image_gen] record_usage failed: {e}")
 
     return {
         "images": all_images,

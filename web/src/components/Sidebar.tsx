@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Upload, Settings, LogOut, TrendingUp,
   ShieldCheck, Music2, Newspaper, ChevronDown, ChevronRight,
   FileText, Users, Moon, Sun, X, Sparkles, Link2, SlidersHorizontal, Server,
-  Image as ImageIcon, Wand2,
+  Image as ImageIcon, Wand2, Ticket, History as HistoryIcon,
 } from "lucide-react";
 import { Button } from "@nextui-org/button";
 import { Tooltip } from "@nextui-org/tooltip";
@@ -78,6 +78,9 @@ const baseNavItems: NavItem[] = [
 
 const adminNavItems: NavItem[] = [
   { key: "admin",          href: "/dashboard/admin",                                   icon: <ShieldCheck size={20} />,        label: "管理员控制台", module: "common" },
+  { key: "admin-users",    href: "/dashboard/admin/users",                             icon: <Users size={20} />,              label: "用户管理",     module: "common" },
+  { key: "admin-invites",  href: "/dashboard/admin/invites",                           icon: <Ticket size={20} />,             label: "邀请码",       module: "common" },
+  { key: "admin-audit",    href: "/dashboard/admin/audit",                             icon: <HistoryIcon size={20} />,        label: "审计日志",     module: "common" },
   { key: "admin-ai",       href: "/dashboard/admin/ai",                                icon: <Sparkles size={20} />,           label: "AI 模型",      module: "common" },
   { key: "admin-feishu",   href: "/dashboard/admin/feishu",                            icon: <Link2 size={20} />,              label: "飞书应用",     module: "common" },
   { key: "admin-system",   href: "/dashboard/admin/system",                            icon: <SlidersHorizontal size={20} />,  label: "系统配置",     module: "common" },
