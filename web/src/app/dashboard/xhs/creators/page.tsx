@@ -1,6 +1,6 @@
 "use client";
 
-import { usePosts } from "@/lib/useApi";
+import { usePosts, mutatePosts } from "@/lib/useApi";
 import Link from "next/link";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import {
@@ -9,10 +9,13 @@ import {
 import { Chip } from "@nextui-org/chip";
 import { Button } from "@nextui-org/button";
 import { Tooltip } from "@nextui-org/tooltip";
-import { BarChart2, ExternalLink, Users } from "lucide-react";
+import { BarChart2, ExternalLink, Users, Trash2 } from "lucide-react";
 import { PlatformSubNav, CreatorsCard } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
+import { useAuth } from "@/contexts/AuthContext";
+import { confirmDialog } from "@/components/ConfirmDialog";
+import { toastErr, toastOk } from "@/lib/toast";
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -34,6 +37,27 @@ const isXhs = (p: Post) => !p.platform || p.platform === "xhs";
 export default function XhsCreatorsPage() {
   const { posts: rawPosts, isLoading: loading } = usePosts();
   const posts = (rawPosts as Post[]).filter((p) => isXhs(p) && p.group_name === "我的关注");
+  const { token } = useAuth();
+
+  const handleDelete = async (note_id: string, title: string) => {
+    const ok = await confirmDialog({
+      title: "删除帖子",
+      content: `确认删除「${(title || note_id).slice(0, 40)}」？历史快照也会一并删除。`,
+      confirmText: "删除", cancelText: "取消", danger: true,
+    });
+    if (!ok) return;
+    const r = await fetch(API(`/posts/${note_id}`), {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (r.ok) {
+      toastOk("已删除");
+      await mutatePosts();
+    } else {
+      const j = await r.json().catch(() => ({}));
+      toastErr(`删除失败：${j.detail || `HTTP ${r.status}`}`);
+    }
+  };
 
   return (
     <div className="p-6 space-y-4">
@@ -105,6 +129,12 @@ export default function XhsCreatorsPage() {
                         <Button isIconOnly size="sm" variant="light"
                           as="a" href={p.note_url} target="_blank">
                           <ExternalLink size={15} />
+                        </Button>
+                      </Tooltip>
+                      <Tooltip content="删除帖子" color="danger">
+                        <Button isIconOnly size="sm" variant="light" color="danger"
+                          onPress={() => handleDelete(p.note_id, p.title)}>
+                          <Trash2 size={15} />
                         </Button>
                       </Tooltip>
                     </div>

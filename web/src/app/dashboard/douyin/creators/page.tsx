@@ -1,21 +1,47 @@
 "use client";
 
-import { usePosts } from "@/lib/useApi";
+import { usePosts, mutatePosts } from "@/lib/useApi";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Chip } from "@nextui-org/chip";
+import { Button } from "@nextui-org/button";
+import { Tooltip } from "@nextui-org/tooltip";
 import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
 } from "@nextui-org/table";
-import { Users } from "lucide-react";
+import { Users, Trash2 } from "lucide-react";
 import { PlatformSubNav, CreatorsCard, PostRow } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
+import { useAuth } from "@/contexts/AuthContext";
+import { confirmDialog } from "@/components/ConfirmDialog";
+import { toastErr, toastOk } from "@/lib/toast";
 
 export default function DouyinCreatorsPage() {
   const { posts: rawPosts, isLoading: loading } = usePosts();
   const posts = (rawPosts as PostRow[]).filter(
     (p) => p.platform === "douyin" && (p.group_name || "") === "我的关注"
   );
+  const { token } = useAuth();
+
+  const handleDelete = async (note_id: string, title: string) => {
+    const ok = await confirmDialog({
+      title: "删除作品",
+      content: `确认删除「${(title || note_id).slice(0, 40)}」？历史快照也会一并删除。`,
+      confirmText: "删除", cancelText: "取消", danger: true,
+    });
+    if (!ok) return;
+    const r = await fetch(`/api/monitor/posts/${note_id}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (r.ok) {
+      toastOk("已删除");
+      await mutatePosts();
+    } else {
+      const j = await r.json().catch(() => ({}));
+      toastErr(`删除失败：${j.detail || `HTTP ${r.status}`}`);
+    }
+  };
 
   return (
     <div className="p-6 space-y-4 max-w-6xl">
@@ -47,6 +73,7 @@ export default function DouyinCreatorsPage() {
               <TableColumn>点赞</TableColumn>
               <TableColumn>评论</TableColumn>
               <TableColumn>检测时间</TableColumn>
+              <TableColumn>操作</TableColumn>
             </TableHeader>
             <TableBody>
               {posts.map((p) => (
@@ -70,6 +97,14 @@ export default function DouyinCreatorsPage() {
                     <span className="text-xs text-default-400">
                       {p.checked_at ? p.checked_at.slice(0, 16) : "待检测"}
                     </span>
+                  </TableCell>
+                  <TableCell>
+                    <Tooltip content="删除作品" color="danger">
+                      <Button isIconOnly size="sm" variant="light" color="danger"
+                        onPress={() => handleDelete(p.note_id, p.title || "")}>
+                        <Trash2 size={15} />
+                      </Button>
+                    </Tooltip>
                   </TableCell>
                 </TableRow>
               ))}

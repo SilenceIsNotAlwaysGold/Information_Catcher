@@ -2,11 +2,16 @@
 
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Chip } from "@nextui-org/chip";
+import { Button } from "@nextui-org/button";
+import { Tooltip } from "@nextui-org/tooltip";
 import { Skeleton } from "@nextui-org/skeleton";
-import { Newspaper } from "lucide-react";
+import { Newspaper, Trash2 } from "lucide-react";
 import { PlatformSubNav, CreatorsCard } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
-import { usePosts } from "@/lib/useApi";
+import { usePosts, mutatePosts } from "@/lib/useApi";
+import { useAuth } from "@/contexts/AuthContext";
+import { confirmDialog } from "@/components/ConfirmDialog";
+import { toastErr, toastOk } from "@/lib/toast";
 
 type Post = {
   note_id: string;
@@ -21,6 +26,27 @@ type Post = {
 export default function MpCreatorsPage() {
   const { posts: rawPosts, isLoading: loading } = usePosts();
   const posts = (rawPosts as Post[]).filter((p) => p.platform === "mp");
+  const { token } = useAuth();
+
+  const handleDelete = async (note_id: string, title: string) => {
+    const ok = await confirmDialog({
+      title: "删除文章",
+      content: `确认删除「${(title || note_id).slice(0, 40)}」？历史快照也会一并删除。`,
+      confirmText: "删除", cancelText: "取消", danger: true,
+    });
+    if (!ok) return;
+    const r = await fetch(`/api/monitor/posts/${note_id}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (r.ok) {
+      toastOk("已删除");
+      await mutatePosts();
+    } else {
+      const j = await r.json().catch(() => ({}));
+      toastErr(`删除失败：${j.detail || `HTTP ${r.status}`}`);
+    }
+  };
 
   // 按 author 分组，每组取最近 10 篇（按 checked_at 倒序）
   const grouped = (() => {
@@ -83,7 +109,7 @@ export default function MpCreatorsPage() {
                 </div>
                 <ul className="ml-6 space-y-1">
                   {g.items.map((p) => (
-                    <li key={p.note_id} className="flex items-center gap-2 text-sm">
+                    <li key={p.note_id} className="group flex items-center gap-2 text-sm">
                       {p.copyright_stat === "11" && (
                         <Chip size="sm" color="success" variant="flat">原创</Chip>
                       )}
@@ -91,12 +117,19 @@ export default function MpCreatorsPage() {
                         <Chip size="sm" color="warning" variant="flat">转载</Chip>
                       )}
                       <a href={p.note_url} target="_blank" rel="noreferrer"
-                        className="text-primary truncate max-w-xl hover:underline">
+                        className="text-primary truncate max-w-xl hover:underline flex-1">
                         {p.title || p.note_id}
                       </a>
                       <span className="text-xs text-default-400 shrink-0">
                         {p.checked_at ? p.checked_at.slice(5, 16) : ""}
                       </span>
+                      <Tooltip content="删除文章" color="danger">
+                        <Button isIconOnly size="sm" variant="light" color="danger"
+                          className="opacity-0 group-hover:opacity-100 transition-opacity"
+                          onPress={() => handleDelete(p.note_id, p.title || "")}>
+                          <Trash2 size={13} />
+                        </Button>
+                      </Tooltip>
                     </li>
                   ))}
                 </ul>
