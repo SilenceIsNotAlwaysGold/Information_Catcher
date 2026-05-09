@@ -12,7 +12,7 @@ import {
 import { Plus, RefreshCw, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { CreatorRow, PlatformKey, PLATFORM_LABEL } from "./types";
-import { toastOk, toastErr } from "@/lib/toast";
+import { toastOk, toastErr, toastInfo } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
 
 /**
@@ -97,6 +97,10 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
       if (c.ok) {
         const cd = await c.json();
         setFollowResult({ added: cd.added || 0, fetched: cd.fetched || 0 });
+        // 0 帖 + warning：温和提示用户加 cookie，订阅本身已成功
+        if ((cd.fetched || 0) === 0 && cd.warning) {
+          setFollowError(cd.warning);
+        }
       } else {
         const j = await c.json().catch(() => ({}));
         setFollowError(j.detail || "");
@@ -127,7 +131,12 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
     const r = await fetch(`/api/monitor/creators/${cid}/check`, { method: "POST", headers });
     if (r.ok) {
       const d = await r.json();
-      toastOk(`刷新完成：抓到 ${d.fetched || 0} 篇，新增 ${d.added || 0} 篇`);
+      // 后端会在"无 cookie + 抓回 0 帖"时返回 warning（XHS 三路抓取兜底失败）
+      if (d.warning) {
+        toastInfo(d.warning);
+      } else {
+        toastOk(`刷新完成：抓到 ${d.fetched || 0} 篇，新增 ${d.added || 0} 篇`);
+      }
       // 手动刷新会带新 unread → 立刻再清零（用户主动操作就视为已读）
       seenIdsRef.current.delete(cid);
       await load();

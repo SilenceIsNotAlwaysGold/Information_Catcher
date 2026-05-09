@@ -1,7 +1,10 @@
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 from ..schemas.monitor import (
     AddPostsRequest,
@@ -568,27 +571,22 @@ async def check_creator(
     plat = platform_registry.get_platform(creator["platform"])
     if not plat:
         raise HTTPException(status_code=400, detail="未知平台")
-    # 抖音 / XHS 追新都需带 cookie 账号（XHS 主页未登录会跳登录墙）
+    # 账号策略（2026-05 调整）：
+    #   - XHS 现已支持三路抓取（HTML / signed API / Playwright），第一路无需 cookie
+    #   - 抖音目前仍需 cookie 才能拉博主主页 user_posted
+    #   策略：有账号就传，没账号就传 None，让 fetcher 自己决定能不能 fallback
     use_account = None
-    if creator["platform"] == "douyin":
+    if creator["platform"] in ("douyin", "xhs"):
         accs = await db.get_accounts(
-            include_secrets=True, user_id=current_user["id"], platform="douyin",
+            include_secrets=True, user_id=current_user["id"],
+            platform=creator["platform"],
         )
         use_account = next((a for a in accs if a.get("cookie")), None)
-        if not use_account:
+        # 抖音 fetcher 没账号会直接返回空，提前给个友好提示节省一次往返
+        if not use_account and creator["platform"] == "douyin":
             raise HTTPException(
                 status_code=400,
-                detail="需要先添加一个抖音账号（含 cookie）才能追新博主",
-            )
-    elif creator["platform"] == "xhs":
-        accs = await db.get_accounts(
-            include_secrets=True, user_id=current_user["id"], platform="xhs",
-        )
-        use_account = next((a for a in accs if a.get("cookie")), None)
-        if not use_account:
-            raise HTTPException(
-                status_code=400,
-                detail="需要先添加一个小红书账号（扫码登录获取 cookie）才能追新博主",
+                detail="抖音追新需要先添加一个含 cookie 的账号（暂未支持无登录抓取）",
             )
     try:
         posts = await plat.fetch_creator_posts(creator["creator_url"], account=use_account)
@@ -596,11 +594,23 @@ async def check_creator(
         await db.mark_creator_status(creator_id, "error", "平台抓取未实现")
         raise HTTPException(
             status_code=501,
-            detail=f"{creator['platform']} 博主追新尚未实现（依赖 #13 抖音账号系统 / #15 抖音追新 / 后续 XHS）。当前订阅记录已保存，等实现后自动启用。",
+            detail=f"{creator['platform']} 博主追新尚未实现。当前订阅记录已保存，等实现后自动启用。",
         )
     except Exception as e:
         await db.mark_creator_status(creator_id, "error", str(e))
         raise HTTPException(status_code=502, detail=f"抓取失败：{e}")
+
+    # 没账号 + 抓回 0 帖：HTML 路线 SSR 数据为空，提示加 cookie（不报错，让用户自决）
+    if not posts and not use_account and creator["platform"] == "xhs":
+        await db.mark_creator_status(
+            creator_id, "no_account",
+            "无账号 cookie：尝试无登录 HTML 直拉，但小红书未给出 SSR 数据。"
+            "添加一个小红书账号（扫码登录）后追新会更稳定。",
+        )
+        return {
+            "ok": True, "fetched": 0, "added": 0,
+            "warning": "本次未拿到帖子。建议添加一个小红书账号（扫码登录）后稳定追新。",
+        }
     # 把新帖子加到该用户的「我的关注」分组
     new_count = 0
     last_post_id = creator.get("last_post_id") or ""
@@ -1374,6 +1384,21 @@ async def list_trending(
     )}
 
 
+@router.delete("/trending", summary="清空热门内容")
+async def clear_trending(
+    platform: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """清空热门内容。
+    - 普通用户：仅清自己范围（user_id 过滤）
+    - admin：传 platform 过滤；不传 platform 清所有用户的所有平台数据
+    可选 platform=xhs|douyin|mp 收窄范围。
+    """
+    scope_uid = _scope_uid(current_user)
+    deleted = await db.clear_trending_posts(user_id=scope_uid, platform=platform)
+    return {"ok": True, "deleted": deleted, "platform": platform or "all"}
+
+
 @router.post("/trending/check", summary="立即触发热门抓取（仅触发当前用户的关键词）")
 async def manual_trending_check(
     background_tasks: BackgroundTasks,
@@ -1511,43 +1536,64 @@ async def fetch_trending_content(
     note_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """The XHS search API only returns titles. Hit the note detail page to grab
-    the real body text and backfill `desc_text`. Costs one extra request per call,
-    so it's exposed as an explicit user action (not run on every trending fetch)."""
+    """补全单条热门帖子的正文 / 图集 / 视频。
+
+    通道优先级:
+      1. 在线扩展（用户浏览器抓 detail，零封号风险，且能拿到登录态独占字段）
+      2. 匿名 monitor_fetcher（兜底，能拿公开内容但拿不到私密）
+    """
+    from ..services import extension_dispatcher
+
     scope_uid = _scope_uid(current_user)
     post = await db.get_trending_post(note_id, user_id=scope_uid)
     if not post:
         raise HTTPException(status_code=404, detail="帖子不存在或无权访问")
 
-    # Try with the first usable account's cookie (note pages are now mostly
-    # login-walled). Fall back to anonymous if no usable account.
-    account = None
-    for acc in await db.get_accounts(include_secrets=True):
-        if acc.get("is_active") and acc.get("cookie") and acc.get("cookie_status") != "expired":
-            account = acc
-            break
+    title = post.get("title") or ""
+    desc = ""
+    images: list = []
+    video_url = ""
+    cover_url = ""
+    note_type = "normal"
+    via = ""
 
-    metrics, status = await fetcher.fetch_note_metrics(
-        note_id,
-        post.get("xsec_token", ""),
-        "pc_search",
-        account=account,
-    )
-    if not metrics:
-        if status == "login_required":
-            raise HTTPException(
-                status_code=400,
-                detail="该帖子需要登录才能查看正文，请先添加一个有效账号"
-                       if not account else "登录态无效，请检查账号 Cookie 是否过期",
+    # 路径 1: 扩展通道（小红书帖子）
+    if (post.get("platform") or "xhs") == "xhs" and extension_dispatcher.has_online_extension(scope_uid):
+        try:
+            res = await extension_dispatcher.dispatch_xhs_note_detail(
+                user_id=scope_uid, note_id=note_id, xsec_token=post.get("xsec_token", ""),
             )
-        raise HTTPException(status_code=400, detail=f"抓取失败：{status}")
+            if res.get("ok"):
+                title = res.get("title") or title
+                desc = res.get("desc") or ""
+                images = res.get("images") or []
+                video_url = res.get("video_url") or ""
+                cover_url = res.get("cover_url") or ""
+                note_type = res.get("note_type") or "normal"
+                via = "extension"
+        except Exception as e:
+            logger.warning(f"[fetch-content] extension path failed for {note_id}: {e}")
 
-    desc = metrics.get("desc") or ""
-    title = metrics.get("title") or post.get("title") or ""
-    images = metrics.get("images") or []
-    video_url = metrics.get("video_url") or ""
-    cover_url = metrics.get("cover_url") or ""
-    note_type = metrics.get("note_type") or "normal"
+    # 路径 2: 匿名兜底
+    if not desc and (post.get("platform") or "xhs") == "xhs":
+        metrics, status = await fetcher.fetch_note_metrics(
+            note_id, post.get("xsec_token", ""), "pc_search", account=None,
+        )
+        if metrics:
+            desc = metrics.get("desc") or desc
+            title = metrics.get("title") or title
+            images = metrics.get("images") or images
+            video_url = metrics.get("video_url") or video_url
+            cover_url = metrics.get("cover_url") or cover_url
+            note_type = metrics.get("note_type") or note_type
+            via = via or "anonymous"
+        elif via != "extension":
+            if status == "login_required":
+                raise HTTPException(
+                    status_code=400,
+                    detail="该帖子需要登录态。请先安装并连接 Pulse Helper 浏览器扩展，浏览器登录小红书后重试。",
+                )
+            raise HTTPException(status_code=400, detail=f"抓取失败：{status}")
 
     if desc:
         await db.update_trending_desc(note_id, desc, user_id=scope_uid)
@@ -1563,6 +1609,7 @@ async def fetch_trending_content(
     )
     return {
         "ok": True,
+        "via": via,
         "title": title,
         "desc_text": desc,
         "desc_length": len(desc),
