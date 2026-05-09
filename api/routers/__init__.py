@@ -21,10 +21,12 @@ from .health_ops import router as health_ops_router
 from .global_search import router as global_search_router
 from .image_gen import router as image_gen_router
 from .feishu import router as feishu_router
+from .archive import router as archive_router
 
 __all__ = [
     "auth_router", "crawler_router", "data_router", "websocket_router",
     "publisher_router", "monitor_router",
     "dashboard_overview_router", "health_ops_router",
     "global_search_router", "image_gen_router", "feishu_router",
+    "archive_router",
 ]
