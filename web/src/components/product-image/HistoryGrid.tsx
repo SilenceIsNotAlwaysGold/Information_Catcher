@@ -247,9 +247,9 @@ export function HistoryGrid({ isAdmin, onPreview }: Props) {
         )}
         {groups.length === 0 ? (
           <EmptyState
-            icon={<ImageIcon size={36} className="text-default-300" />}
+            icon={ImageIcon}
             title="还没有生成记录"
-            description="去上方生成第一张图吧"
+            hint="去上方生成第一张图吧"
           />
         ) : (
           <div className="space-y-3">
