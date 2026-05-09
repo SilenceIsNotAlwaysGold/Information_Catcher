@@ -20,6 +20,7 @@ import { PlatformSubNav } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
+import { MonitorPaceButton } from "@/components/MonitorPaceButton";
 import { toastOk, toastErr } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { useAccounts, useGroups, usePosts, useAlerts, useMe, mutatePosts, mutateAlerts } from "@/lib/useApi";
@@ -282,6 +283,7 @@ export default function XhsPostsPage() {
             </Tooltip>
           )}
           <MonitorGroupsButton token={token} />
+          <MonitorPaceButton />
           <Button size="sm" color="primary" startContent={<Plus size={16} />} onPress={onOpen}>
             添加小红书帖子
           </Button>

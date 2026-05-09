@@ -16,6 +16,7 @@ import { Plus, RefreshCw, Trash2, Download, Radio, FileText } from "lucide-react
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
 import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
+import { MonitorPaceButton } from "@/components/MonitorPaceButton";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 import { toastOk, toastErr } from "@/lib/toast";
@@ -236,6 +237,7 @@ export default function DouyinPostsPage() {
             </Button>
           )}
           <MonitorGroupsButton token={token} />
+          <MonitorPaceButton />
           <Button size="sm" variant="flat"
             startContent={<RefreshCw size={15} className={checking ? "animate-spin" : ""} />}
             onPress={handleCheck} isLoading={checking}>

@@ -38,7 +38,6 @@ export function TrendingSettingsButton() {
   const [keywords, setKeywords] = useState("");
   const [minLikes, setMinLikes] = useState<string>("1000");
   const [maxPerKeyword, setMaxPerKeyword] = useState<string>("30");
-  const [monitorInterval, setMonitorInterval] = useState<string>("0");
   const [trendingInterval, setTrendingInterval] = useState<string>("0");
   const [globalInterval, setGlobalInterval] = useState<string>("30");
 
@@ -53,7 +52,6 @@ export function TrendingSettingsButton() {
       setKeywords(d.trending_keywords || "");
       setMinLikes(String(d.trending_min_likes || 1000));
       setMaxPerKeyword(String(d.trending_max_per_keyword || 30));
-      setMonitorInterval(String(d.monitor_interval_minutes ?? 0));
       setTrendingInterval(String(d.trending_interval_minutes ?? 0));
       setGlobalInterval(String(d.check_interval_minutes || 30));
     } catch (e: any) {
@@ -87,7 +85,6 @@ export function TrendingSettingsButton() {
           1,
           Math.min(200, parseInt(maxPerKeyword || "30") || 30),
         ),
-        monitor_interval_minutes: clampInterval(monitorInterval),
         trending_interval_minutes: clampInterval(trendingInterval),
       };
       const r = await fetch(API("/settings"), {
@@ -177,39 +174,19 @@ export function TrendingSettingsButton() {
               description="每个关键词每次定时任务抓多少篇（1-200，默认 30；浏览器单次最多约 100，超过会按页数 cap）"
             />
 
-            <div className="border-t border-divider pt-3 space-y-3">
-              <p className="text-sm font-medium text-default-700">
-                抓取频率（分钟）
-              </p>
-              <p className="text-xs text-default-400 -mt-2">
-                填 <code>0</code> 跟随系统基线（当前 <b>{globalInterval}</b> 分钟）；
-                填正数表示你希望多久跑一次（最小值 = 系统基线，最大 1440）。调高频率可减少风控触发。
-              </p>
-              <div className="grid grid-cols-2 gap-3">
-                <Input
-                  label="监控帖子频率"
-                  labelPlacement="outside"
-                  type="number"
-                  min={0}
-                  max={1440}
-                  value={monitorInterval}
-                  onValueChange={setMonitorInterval}
-                  isDisabled={loading}
-                  description="0 = 跟随系统"
-                />
-                <Input
-                  label="热门抓取频率"
-                  labelPlacement="outside"
-                  type="number"
-                  min={0}
-                  max={1440}
-                  value={trendingInterval}
-                  onValueChange={setTrendingInterval}
-                  isDisabled={loading}
-                  description="0 = 跟随系统"
-                />
-              </div>
-            </div>
+            <Input
+              label="热门抓取频率（分钟）"
+              labelPlacement="outside"
+              type="number"
+              min={0}
+              max={1440}
+              value={trendingInterval}
+              onValueChange={setTrendingInterval}
+              isDisabled={loading}
+              description={`填 0 跟随系统基线（当前 ${globalInterval} 分钟）；
+                            填正数 = 你希望多久跑一次（最小 = 系统基线，最大 1440）。
+                            调高可减少风控触发。`}
+            />
           </ModalBody>
           <ModalFooter>
             <Button variant="flat" onPress={modal.onClose} isDisabled={saving}>

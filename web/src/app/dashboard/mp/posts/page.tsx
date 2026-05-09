@@ -16,6 +16,7 @@ import { Plus, RefreshCw, Trash2, Sparkles, ChevronDown, Search, Wand2, Key, New
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
 import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
+import { MonitorPaceButton } from "@/components/MonitorPaceButton";
 import { useMe, mutateMe, usePrompts, usePosts, mutatePosts, useGroups } from "@/lib/useApi";
 import { toastErr } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
@@ -325,6 +326,7 @@ export default function MpPostsPage() {
             </Button>
           )}
           <MonitorGroupsButton token={token} />
+          <MonitorPaceButton />
           <Button size="sm" variant="flat"
             startContent={<Key size={15} />}
             color={authStatus.has_auth ? "success" : "warning"}
