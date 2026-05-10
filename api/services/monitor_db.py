@@ -1240,12 +1240,11 @@ async def add_post(
     platform: str = "xhs",
     creator_id: Optional[int] = None,
     author: Optional[str] = None,
-) -> int:
-    """添加监控帖子。多租户场景下同一 note_id 可被多个用户独立添加。
+) -> Tuple[int, bool]:
+    """添加监控帖子，返回 (post_id, is_new)。
 
-    note_id 字段在不同平台语义不同（xhs note_id / douyin aweme_id / 公众号文章 mid+idx）。
-    creator_id：来自博主追新时关联到 monitor_creators.id；普通监控为 NULL。
-    author：博主名/作者名（博主追新时由 creator_name 填入，监控帖子可能空）。
+    is_new=True 表示该 note_id 在 user×platform 下首次入库；False 表示已存在被
+    UPDATE。调用方据此判断"真正的新增"，进行飞书推送 / 未读累计等操作。
     """
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
@@ -1268,7 +1267,7 @@ async def add_post(
                  account_id, post_type, group_id, platform, creator_id, author, existing_id),
             )
             await db.commit()
-            return existing_id
+            return existing_id, False
         cur = await db.execute(
             """INSERT INTO monitor_posts
                (note_id, title, short_url, note_url, xsec_token, xsec_source,
@@ -1278,7 +1277,7 @@ async def add_post(
              account_id, post_type, group_id, user_id, platform, creator_id, author or ""),
         )
         await db.commit()
-        return cur.lastrowid
+        return cur.lastrowid, True
 
 
 async def list_creator_posts(

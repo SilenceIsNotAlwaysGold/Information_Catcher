@@ -707,21 +707,16 @@ async def check_creator(
             "warning": f"本次未拿到帖子。请确认浏览器已登录{('小红书' if platform_name == 'xhs' else '抖音')}。",
         }
 
-    # 入库 + 计 unread
-    # 注意：不要在命中 last_post_id 时直接 break — add_post 内部 UPDATE 用 COALESCE
-    # 回填 creator_id，让旧版本无 creator_id 入库的帖子也能被关联回博主。
-    # 命中 last_post_id 之后的帖子继续 add_post（修旧数据）但不再计入 unread。
-    new_count = 0
+    # 入库 + 计真正"新"的帖子
+    # add_post 返回 (id, is_new)，is_new=True 表示该 note_id 在本 user×platform
+    # 下从未入库过 → 这才是真正的新增，对其推送 / 累计 unread。
+    new_posts_data = []
     newest = last_post_id
-    hit_known = False
     for p in posts:
         pid = p.get("post_id")
         if not pid:
             continue
-        is_new_for_unread = (not hit_known) and pid != last_post_id
-        if pid == last_post_id:
-            hit_known = True
-        await db.add_post(
+        _, is_new = await db.add_post(
             note_id=pid, title=p.get("title") or "",
             short_url=p.get("url") or "", note_url=p.get("url") or "",
             xsec_token=p.get("xsec_token", ""), xsec_source="app_share",
@@ -731,10 +726,11 @@ async def check_creator(
             creator_id=creator_id,   # 关联到 monitor_creators.id（CreatorsCard 折叠列表用）
             author=p.get("creator_name") or creator.get("creator_name") or "",
         )
-        if is_new_for_unread:
-            new_count += 1
+        if is_new:
+            new_posts_data.append(p)
             if not newest or newest == last_post_id:
                 newest = pid
+    new_count = len(new_posts_data)
 
     # 与 scheduler.run_creator_check 一致：把扩展抓到的博主元信息也落库
     prof = res.get("profile") or {}
@@ -771,7 +767,6 @@ async def check_creator(
             if push_chat or wecom_url or feishu_url:
                 try:
                     from ..services import notifier
-                    new_posts_data = [p for p in posts[:new_count]]
                     await notifier.notify_creator_new_posts(
                         wecom_url, feishu_url,
                         creator_name=(

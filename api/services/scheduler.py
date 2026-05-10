@@ -687,10 +687,10 @@ async def run_creator_check():
             pid = p.get("post_id")
             if not pid:
                 continue
-            if pid == last_post_id:
-                break
             try:
-                await db.add_post(
+                # 不再按 last_post_id break — 让所有 posts 都过 add_post，
+                # is_new 标志才是真正的"该 note_id 第一次入库"判定。
+                _, is_new = await db.add_post(
                     note_id=pid, title=p.get("title") or "",
                     short_url=p.get("url") or "", note_url=p.get("url") or "",
                     xsec_token=p.get("xsec_token", ""), xsec_source="app_share",
@@ -700,10 +700,11 @@ async def run_creator_check():
                     creator_id=creator["id"],   # 关联到 monitor_creators.id
                     author=p.get("creator_name") or creator.get("creator_name") or "",
                 )
-                added += 1
-                new_posts.append(p)
-                if not newest:
-                    newest = pid
+                if is_new:
+                    added += 1
+                    new_posts.append(p)
+                    if not newest or newest == last_post_id:
+                        newest = pid
             except Exception as e:
                 logger.debug(f"[creator_check] add_post {pid} skipped: {e}")
 
