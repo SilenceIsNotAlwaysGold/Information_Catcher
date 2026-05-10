@@ -14,7 +14,7 @@ import { useDisclosure } from "@nextui-org/modal";
 import { Tooltip } from "@nextui-org/tooltip";
 import { Plus, RefreshCw, Trash2, Sparkles, ChevronDown, Search, Wand2, Key, Newspaper } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { PlatformSubNav } from "@/components/platform";
+import { PlatformSubNav, PlatformAlertsCard } from "@/components/platform";
 import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
 import { MonitorPaceButton } from "@/components/MonitorPaceButton";
 import { useMe, mutateMe, usePrompts, usePosts, mutatePosts, useGroups } from "@/lib/useApi";
@@ -65,7 +65,7 @@ export default function MpPostsPage() {
   const { posts: rawPosts, isLoading } = usePosts();
   // 排除博主追新的帖子（有 creator_id），它们在「博主追新」板块单独展示
   const posts = (rawPosts as Post[]).filter((p) => p.platform === "mp" && (p as any).creator_id == null);
-  const { groups } = useGroups();
+  const { groups } = useGroups("mp");
   const [links, setLinks] = useState("");
   const [selectedGroupId, setSelectedGroupId] = useState<string>("");
   const [adding, setAdding] = useState(false);
@@ -86,7 +86,10 @@ export default function MpPostsPage() {
   const authStatus = {
     has_auth: !!(me?.mp_auth_uin && me?.mp_auth_key),
     mp_auth_at: me?.mp_auth_at || null,
+    // 后端 mark_mp_auth_status 写入：valid | expired | unknown
+    status: (me?.mp_auth_status as "valid" | "expired" | "unknown" | undefined) || "unknown",
   };
+  const authExpired = authStatus.has_auth && authStatus.status === "expired";
 
   const submitAuth = async () => {
     setAuthSaving(true);
@@ -313,6 +316,26 @@ export default function MpPostsPage() {
     <div className="p-6 space-y-4 max-w-6xl">
       <PlatformSubNav platform="mp" current="posts" />
 
+      {authExpired && (
+        <div className="rounded-lg border border-danger/40 bg-danger/10 px-4 py-3 text-sm flex items-start gap-3">
+          <span className="text-danger text-base shrink-0">⚠️</span>
+          <div className="flex-1">
+            <p className="font-medium text-danger">公众号凭证已过期</p>
+            <p className="text-xs text-default-600 mt-1">
+              阅读数 / 在看数 / 打赏数 / IP 属地暂时无法刷新。
+              <b className="text-foreground">最快恢复方式</b>：在装了 Pulse CookieBridge 浏览器扩展的 Chrome 里
+              打开任意一篇公众号文章，扩展会自动从 URL 抓新凭证推回 —— 30 秒内监控自动恢复。
+              不装扩展也可以点右侧"凭证已过期"手动粘贴。
+            </p>
+          </div>
+          <Button size="sm" color="danger" variant="flat" onPress={authModal.onOpen}>
+            手动录入
+          </Button>
+        </div>
+      )}
+
+      <PlatformAlertsCard platform="mp" headers={{ "Content-Type": "application/json", Authorization: `Bearer ${token}` }} />
+
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <h2 className="text-lg font-semibold">文章列表</h2>
@@ -326,13 +349,15 @@ export default function MpPostsPage() {
               删除选中 ({selectedKeys.size})
             </Button>
           )}
-          <MonitorGroupsButton token={token} />
+          <MonitorGroupsButton token={token} platform="mp" />
           <MonitorPaceButton />
           <Button size="sm" variant="flat"
             startContent={<Key size={15} />}
-            color={authStatus.has_auth ? "success" : "warning"}
+            color={authExpired ? "danger" : (authStatus.has_auth ? "success" : "warning")}
             onPress={authModal.onOpen}>
-            {authStatus.has_auth ? "凭证已录入" : "录入阅读数凭证"}
+            {authExpired
+              ? "凭证已过期"
+              : authStatus.has_auth ? "凭证已录入" : "录入阅读数凭证"}
           </Button>
           <Button size="sm" variant="flat"
             startContent={<RefreshCw size={15} className={checking ? "animate-spin" : ""} />}

@@ -239,3 +239,32 @@ async def notify_cookie_expired(
     await _push(wecom_url, feishu_url, "⚠️ 账号 Cookie 失效", "\n".join(lines), template="red",
                 feishu_chat_id=feishu_chat_id)
 
+
+# ── 公众号凭证过期提醒（mp uin/key 30 分钟过期，限频 24h）──────────────────
+
+async def notify_mp_auth_expired(
+    wecom_url: str,
+    feishu_url: str,
+    feishu_chat_id: str = "",
+    ret_code: object = None,
+) -> None:
+    """公众号阅读数 / 在看数 / 打赏数依赖 30 分钟一过期的 uin/key，
+    fetcher 检测到失效就推这条提醒，让用户去刷一下。"""
+    body = (
+        "你的公众号客户端凭证（uin / key / pass_ticket）已过期，"
+        "导致阅读数 / 在看数 / 打赏数暂时无法刷新。\n\n"
+        "**最快的恢复方式**：在装了 Pulse CookieBridge 浏览器扩展的 Chrome 里，"
+        "随便打开一篇公众号文章（手机分享出来的链接也行）—— 扩展会自动从 URL 抓"
+        "新凭证推到 Pulse，30 秒内监控自动恢复。\n\n"
+        "如果没装扩展，也可以去 Pulse 的「公众号 → 凭证设置」手动粘贴。"
+    )
+    if ret_code is not None:
+        body += f"\n\n（接口返回码 ret={ret_code}，仅作技术排查参考）"
+    await _push(
+        wecom_url, feishu_url,
+        "⚠️ 公众号凭证已过期",
+        body,
+        template="red",
+        feishu_chat_id=feishu_chat_id,
+    )
+

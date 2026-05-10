@@ -182,3 +182,95 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 });
+
+
+// ── MP 凭证捕获 (uin/key/pass_ticket/appmsg_token) ─────────────────────────
+//
+// 公众号阅读数 / 在看数走 mp.weixin.qq.com/mp/getappmsgext，需要四个临时凭证：
+//   - uin / key / pass_ticket：URL query
+//   - appmsg_token：URL query 里也常出现，或在 /mp/profile_ext 那种页面里
+// 这些值 30 分钟过期，老路径靠用户手动从浏览器抓包拷出来粘进 PulseUI。
+// 这里用 chrome.webRequest 监听打开公众号文章的请求，从 URL 里直接刨出来推到后端。
+
+const _mpAuthCache = { uin: "", key: "", pass_ticket: "", appmsg_token: "" };
+let _mpAuthLastSyncAt = 0;
+
+function _extractMpAuthFromUrl(url) {
+  try {
+    const u = new URL(url);
+    const out = {};
+    for (const k of ["uin", "key", "pass_ticket", "appmsg_token"]) {
+      const v = u.searchParams.get(k);
+      if (v) out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+async function _maybeSyncMpAuth() {
+  // 4 字段齐才推
+  if (!_mpAuthCache.uin || !_mpAuthCache.key || !_mpAuthCache.pass_ticket) {
+    return;
+  }
+  // appmsg_token 不是每个 URL 都有，没拿到也认（后端可降级）
+  // 同步频率：60 秒内只推一次（避免文章里大量 ajax 把后端打满）
+  const now = Date.now();
+  if (now - _mpAuthLastSyncAt < 60 * 1000) return;
+
+  const cfg = await loadConfig();
+  if (!cfg.apiBase || !cfg.jwt) return;
+
+  _mpAuthLastSyncAt = now;
+  try {
+    const resp = await fetch(`${cfg.apiBase}/api/auth/me/mp-auth`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cfg.jwt}`,
+      },
+      body: JSON.stringify({
+        uin: _mpAuthCache.uin,
+        key: _mpAuthCache.key,
+        pass_ticket: _mpAuthCache.pass_ticket,
+        appmsg_token: _mpAuthCache.appmsg_token || "",
+      }),
+    });
+    const ok = resp.ok;
+    await chrome.storage.local.set({
+      lastSync_mp_auth: { ok, ts: now, error: ok ? "" : await resp.text().catch(() => "") },
+    });
+    console.log(`[CookieBridge] mp_auth sync ${ok ? "ok" : "failed"}`);
+  } catch (e) {
+    console.warn("[CookieBridge] mp_auth sync error:", e);
+    await chrome.storage.local.set({
+      lastSync_mp_auth: { ok: false, ts: now, error: String(e) },
+    });
+  }
+}
+
+if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
+  chrome.webRequest.onBeforeRequest.addListener(
+    (details) => {
+      const fields = _extractMpAuthFromUrl(details.url);
+      let updated = false;
+      for (const k of Object.keys(fields)) {
+        if (fields[k] && fields[k] !== _mpAuthCache[k]) {
+          _mpAuthCache[k] = fields[k];
+          updated = true;
+        }
+      }
+      if (updated) {
+        // fire-and-forget；service worker 异步任务不阻塞请求
+        _maybeSyncMpAuth();
+      }
+    },
+    {
+      urls: [
+        "https://mp.weixin.qq.com/*",
+        "https://*.mp.weixin.qq.com/*",
+      ],
+    },
+  );
+}

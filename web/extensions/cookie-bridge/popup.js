@@ -6,6 +6,7 @@ async function loadCfg() {
   const cfg = await chrome.storage.local.get([
     "apiBase", "jwt", "mappings",
     "lastSync_xhs", "lastSync_douyin", "lastSync_mp",
+    "lastSync_mp_auth",
   ]);
   $("apiBase").value = cfg.apiBase || "";
   $("jwt").value = cfg.jwt || "";
@@ -39,6 +40,16 @@ function renderStatus(cfg) {
     const cls = last.ok ? "ok" : "err";
     const detail = last.ok ? "" : `  ${(last.error || "").slice(0, 60)}`;
     lines.push(`<span class="${cls}">${tag}</span>  ${p.padEnd(7)} ${fmtAgo(last.ts)}${detail}`);
+  }
+  // mp 凭证（uin/key/pass_ticket）单独一行
+  const mpAuth = cfg.lastSync_mp_auth;
+  if (mpAuth) {
+    const tag = mpAuth.ok ? "ok " : "err";
+    const cls = mpAuth.ok ? "ok" : "err";
+    const detail = mpAuth.ok ? "" : `  ${(mpAuth.error || "").slice(0, 60)}`;
+    lines.push(`<span class="${cls}">${tag}</span>  mp_auth ${fmtAgo(mpAuth.ts)}${detail}`);
+  } else {
+    lines.push(`mp_auth  打开任意公众号文章即抓`);
   }
   $("status").innerHTML = lines.join("\n");
 }

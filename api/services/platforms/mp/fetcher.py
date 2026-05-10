@@ -121,14 +121,16 @@ def _extract_body(html: str) -> tuple[str, list[str]]:
 async def fetch_article_stats(
     biz: str, mid: str, idx: str,
     uin: str, key: str, pass_ticket: str = "", appmsg_token: str = "",
+    user_id: Optional[int] = None,
 ) -> Optional[Dict[str, int]]:
-    """走 /mp/getappmsgext 拿阅读数 / 在看数 / 点赞数。
+    """走 /mp/getappmsgext 拿阅读数 / 在看数 / 点赞数 / 打赏 / IP 属地。
 
     需要客户端凭证（uin / key），key 约 30 分钟过期。
-    返回 {"read_num", "like_num", "old_like_num"} 或 None（凭证无效/失败）。
+    返回 {"read_num", "like_num", "old_like_num", "reward_total_count", "ip_wording"}
+    或 None（凭证无效/失败）。
 
-    凭证有限制 v1：先按描述实现接口，未真实测试。生产首次跑会暴露问题，
-    届时根据 wechat-articles-crawler / WeChatRobot 的开源实现微调。
+    user_id 给定时：失败 → 标 mp_auth_status='expired' + 24h 限频推送告警；
+                    成功 → 标 mp_auth_status='valid'。
     """
     if not uin or not key:
         return None
@@ -154,18 +156,84 @@ async def fetch_article_stats(
             data = r.json()
     except Exception as e:
         logger.warning(f"[mp] getappmsgext fail: {e}")
+        # 网络异常不视为凭证失效（避免 24h 限频被白白消耗）
         return None
     info = data.get("appmsgstat") or {}
     if not info:
-        # 凭证过期返回 base_resp.ret != 0
         ret = (data.get("base_resp") or {}).get("ret")
         logger.warning(f"[mp] getappmsgext ret={ret} (凭证可能过期)")
+        if user_id is not None:
+            await _on_mp_auth_expired(user_id, ret)
         return None
+    if user_id is not None:
+        await _on_mp_auth_valid(user_id)
     return {
-        "read_num": int(info.get("read_num") or 0),
-        "like_num": int(info.get("like_num") or 0),
-        "old_like_num": int(info.get("old_like_num") or 0),
+        "read_num":            int(info.get("read_num") or 0),
+        "like_num":            int(info.get("like_num") or 0),
+        "old_like_num":        int(info.get("old_like_num") or 0),
+        "reward_total_count":  int(info.get("reward_total_count") or 0),
+        "ip_wording":          (data.get("ip_wording") or {}).get("province_name") or "",
     }
+
+
+async def _on_mp_auth_valid(user_id: int) -> None:
+    """凭证成功一次：把 status 标 valid（旧的 expired 自动恢复）。"""
+    try:
+        from ... import auth_service
+        u = auth_service.get_user_by_id(user_id) or {}
+        if (u.get("mp_auth_status") or "unknown") != "valid":
+            auth_service.mark_mp_auth_status(user_id, "valid")
+    except Exception as e:
+        logger.debug(f"[mp] _on_mp_auth_valid failed: {e}")
+
+
+async def _on_mp_auth_expired(user_id: int, ret_code) -> None:
+    """凭证失效：标 expired + 24h 限频推送 webhook。"""
+    try:
+        from ... import auth_service, notifier
+        from datetime import datetime, timedelta
+
+        u = auth_service.get_user_by_id(user_id) or {}
+        prev_status = u.get("mp_auth_status") or "unknown"
+        notified_at = u.get("mp_auth_expired_notified_at") or ""
+
+        # 距上次推送 < 24h 不再推（标 status 但不发消息）
+        suppress = False
+        if notified_at:
+            try:
+                last = datetime.fromisoformat(notified_at)
+                if datetime.now() - last < timedelta(hours=24):
+                    suppress = True
+            except Exception:
+                pass
+
+        wecom = u.get("wecom_webhook_url", "") or ""
+        feishu = u.get("feishu_webhook_url", "") or ""
+        chat = u.get("feishu_chat_id", "") or ""
+        has_channel = bool(wecom or feishu or chat)
+
+        # 写状态：第一次失效时同时刷新 notified_at；限频期内只标状态
+        auth_service.mark_mp_auth_status(
+            user_id, "expired",
+            set_notified=(has_channel and not suppress),
+        )
+
+        if has_channel and not suppress:
+            try:
+                await notifier.notify_mp_auth_expired(
+                    wecom_url=wecom, feishu_url=feishu,
+                    feishu_chat_id=chat, ret_code=ret_code,
+                )
+            except Exception as e:
+                logger.warning(f"[mp] notify expired failed: {e}")
+
+        # 状态首次跳变也写一次日志便于排查
+        if prev_status != "expired":
+            logger.warning(
+                f"[mp] user {user_id} mp_auth marked expired (ret={ret_code})"
+            )
+    except Exception as e:
+        logger.debug(f"[mp] _on_mp_auth_expired failed: {e}")
 
 
 async def search_sogou_articles(
@@ -396,9 +464,11 @@ class MpPlatform(Platform):
         # desc 留 200 字预览，正文最多 5000 给 AI 摘要
         body_for_ai = body_preview[:5000]
 
-        # 阅读数 / 在看数：用 account 里的客户端凭证（v1 手动模式）
+        # 阅读数 / 在看数 / 打赏 / IP 属地：走 /mp/getappmsgext 客户端凭证
         read_num = 0
         like_num = 0
+        reward_total = 0
+        ip_wording = ""
         if account and account.get("mp_auth_uin"):
             ids = _extract_ids_from_url(url)
             if ids:
@@ -408,10 +478,13 @@ class MpPlatform(Platform):
                     key=account.get("mp_auth_key", ""),
                     pass_ticket=account.get("mp_auth_pass_ticket", ""),
                     appmsg_token=account.get("mp_auth_appmsg_token", ""),
+                    user_id=account.get("user_id"),
                 )
                 if stats:
                     read_num = stats["read_num"]
                     like_num = stats["like_num"]
+                    reward_total = stats.get("reward_total_count", 0) or 0
+                    ip_wording = stats.get("ip_wording", "") or ""
 
         return ({
             "title": title[:200],
@@ -430,6 +503,8 @@ class MpPlatform(Platform):
             "publish_ts": int(ct) if (ct and ct.isdigit()) else 0,
             "copyright_stat": copyright_stat,
             "source_url": source_url,
+            "reward_total": reward_total,
+            "ip_wording": ip_wording,
         }, "ok")
 
     async def fetch_creator_posts(

@@ -58,6 +58,7 @@ export type Me = {
   mp_auth_uin?: string | null;
   mp_auth_key?: string | null;
   mp_auth_at?: string | null;
+  mp_auth_status?: "valid" | "expired" | "unknown" | null;
   [k: string]: any;
 };
 export const useMe = () => useApi<Me>("/api/auth/me");
@@ -73,13 +74,14 @@ export const mutateAccounts = () =>
   globalMutate((k) => Array.isArray(k) && k[0] === "/api/monitor/accounts");
 
 // /api/monitor/groups
-export type Group = { id: number; name: string; is_builtin: number; [k: string]: any };
-export const useGroups = () => {
-  const swr = useApi<{ groups: Group[] }>("/api/monitor/groups");
+export type Group = { id: number; name: string; is_builtin: number; platform?: string; [k: string]: any };
+export const useGroups = (platform?: "xhs" | "douyin" | "mp") => {
+  const path = platform ? `/api/monitor/groups?platform=${platform}` : "/api/monitor/groups";
+  const swr = useApi<{ groups: Group[] }>(path);
   return { ...swr, groups: swr.data?.groups ?? [] };
 };
 export const mutateGroups = () =>
-  globalMutate((k) => Array.isArray(k) && k[0] === "/api/monitor/groups");
+  globalMutate((k) => Array.isArray(k) && String(k[0]).startsWith("/api/monitor/groups"));
 
 // /api/monitor/settings
 export const useSettings = <T = Record<string, string>>() =>
@@ -114,13 +116,16 @@ export const usePosts = () => {
 export const mutatePosts = () =>
   globalMutate((k) => Array.isArray(k) && k[0] === "/api/monitor/posts");
 
-// /api/monitor/alerts（最近 30 条）
+// /api/monitor/alerts（最近 30 条）；?platform=xhs|douyin|mp 按平台隔离
 export type AlertRow = {
   id: number; note_id: string; title: string;
   alert_type: string; message: string; created_at: string;
+  platform?: string;
 };
-export const useAlerts = (limit = 30) => {
-  const url = `/api/monitor/alerts?limit=${limit}`;
+export const useAlerts = (limit = 30, platform?: "xhs" | "douyin" | "mp") => {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  if (platform) qs.set("platform", platform);
+  const url = `/api/monitor/alerts?${qs.toString()}`;
   const swr = useApi<{ alerts: AlertRow[] }>(url, { dedupingInterval: 30000 });
   return { ...swr, alerts: swr.data?.alerts ?? [] };
 };

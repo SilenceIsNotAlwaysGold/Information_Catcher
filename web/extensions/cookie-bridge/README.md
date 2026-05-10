@@ -48,3 +48,26 @@ Authorization: Bearer <JWT>
 1. 把账号的 cookie 字段覆盖
 2. `cookie_status` 置 `valid`
 3. 记录 `cookie_synced_at` / `cookie_synced_via='extension'`
+
+## 公众号特殊：自动抓 uin/key/pass_ticket
+
+公众号阅读数 / 在看数走 `mp.weixin.qq.com/mp/getappmsgext`，
+需要 `uin / key / pass_ticket` 三个 30 分钟过期的 query 参数。
+**不在 cookie 里**，老路径靠用户手动从抓包工具拷贝粘贴。
+
+扩展用 `chrome.webRequest` 监听 `mp.weixin.qq.com/*`，从 URL query 自动
+提取 `uin / key / pass_ticket / appmsg_token`，4 字段齐了就推送到后端：
+
+```
+PUT /api/auth/me/mp-auth
+Authorization: Bearer <JWT>
+
+{ "uin": "xxx", "key": "xxx", "pass_ticket": "xxx", "appmsg_token": "" }
+```
+
+**用户操作**：在装了扩展的浏览器里**打开任意一篇公众号文章**（手机分享出来的链接也行），
+扩展自动抓字段、推后端，无需任何配置。后端把字段写到 `users.mp_auth_*`，
+之后 30 分钟内的监控任务用这个凭证拿真实阅读数。
+
+凭证 30 分钟过期是微信侧的限制（无解），但**只要你一周内开过几次公众号文章**，
+扩展会持续刷新，**用户感知里就是"它一直能用"**。

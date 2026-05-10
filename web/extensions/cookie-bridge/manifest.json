@@ -6,7 +6,8 @@
   "permissions": [
     "cookies",
     "storage",
-    "alarms"
+    "alarms",
+    "webRequest"
   ],
   "host_permissions": [
     "https://*.xiaohongshu.com/*",

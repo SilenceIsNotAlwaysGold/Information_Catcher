@@ -62,6 +62,7 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
         u = auth_service.get_user_by_id(post.get("user_id")) if post.get("user_id") else None
         if u and u.get("mp_auth_uin"):
             account = {
+                "user_id":             u.get("id"),  # fetcher 用来标 expired/valid
                 "mp_auth_uin":         u.get("mp_auth_uin"),
                 "mp_auth_key":         u.get("mp_auth_key"),
                 "mp_auth_pass_ticket": u.get("mp_auth_pass_ticket"),
@@ -91,6 +92,10 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
         update_fields["copyright_stat"] = metrics.get("copyright_stat") or ""
     if "source_url" in metrics:
         update_fields["source_url"] = metrics.get("source_url") or ""
+    if "reward_total" in metrics:
+        update_fields["reward_total"] = int(metrics.get("reward_total") or 0)
+    if "ip_wording" in metrics:
+        update_fields["ip_wording"] = metrics.get("ip_wording") or ""
     if metrics.get("author") and not post.get("author"):
         update_fields["author"] = metrics.get("author") or ""
     # 话题：每次抓都更新（话题可能后续被作者编辑）
@@ -233,7 +238,7 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
         # 4 小时去抖动：同 (note_id, alert_type) 内不重复通知
         if dedup_hours > 0 and await db.has_recent_alert(note_id, alert_type, dedup_hours):
             return
-        await db.save_alert(note_id, title, alert_type, message, user_id=post_user_id)
+        await db.save_alert(note_id, title, alert_type, message, user_id=post_user_id, platform=platform_key)
         await notifier.notify_metric(
             g_wecom, g_feishu, title, note_id, post["xsec_token"],
             f"{prefix}{metric_label.get(alert_type.split('_')[0], '指标')}告警".strip(),
@@ -294,7 +299,7 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
         # 旧规则（向后兼容）：likes/collects/comments delta + 4h 去抖
         if likes_on and liked_delta >= likes_thr:
             if not await db.has_recent_alert(note_id, "likes", 4):
-                await db.save_alert(note_id, title, "likes", f"点赞 +{liked_delta}", user_id=post_user_id)
+                await db.save_alert(note_id, title, "likes", f"点赞 +{liked_delta}", user_id=post_user_id, platform=platform_key)
                 body = _fmt(group and group.get("template_likes"),
                             "「{title}」点赞 **+{liked_delta}**（当前 {liked_count}）")
                 await notifier.notify_metric(
@@ -305,7 +310,7 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
 
         if collects_on and collected_delta >= collects_thr:
             if not await db.has_recent_alert(note_id, "collects", 4):
-                await db.save_alert(note_id, title, "collects", f"收藏 +{collected_delta}", user_id=post_user_id)
+                await db.save_alert(note_id, title, "collects", f"收藏 +{collected_delta}", user_id=post_user_id, platform=platform_key)
                 body = _fmt(group and group.get("template_collects"),
                             "「{title}」收藏 **+{collected_delta}**（当前 {collected_count}）")
                 await notifier.notify_metric(
@@ -316,7 +321,7 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
 
     # Fetch actual comment content when threshold triggered
     if comments_on and comment_delta >= comments_thr:
-        await db.save_alert(note_id, title, "comment", f"新增评论 {comment_delta} 条", user_id=post_user_id)
+        await db.save_alert(note_id, title, "comment", f"新增评论 {comment_delta} 条", user_id=post_user_id, platform=platform_key)
 
         # Try to fetch actual new comment content via Playwright
         comments_fetch_enabled = settings.get("comments_fetch_enabled", "0") == "1"

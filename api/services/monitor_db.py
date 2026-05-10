@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS monitor_alerts (
     title TEXT,
     alert_type TEXT NOT NULL,
     message TEXT,
+    platform TEXT DEFAULT '',  -- xhs / douyin / mp（按平台隔离展示）
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 
@@ -727,6 +728,18 @@ async def _migrate(db):
     # ''  = 老分组（跨平台兼容，所有平台都能选）
     # 'xhs' / 'douyin' / 'mp' = 平台专属分组
     await _ensure_column(db, "monitor_groups", "platform", "TEXT DEFAULT ''")
+    # P14: monitor_alerts 按平台隔离展示
+    await _ensure_column(db, "monitor_alerts", "platform", "TEXT DEFAULT ''")
+    # 老数据补 platform：通过 note_id JOIN monitor_posts 反推
+    await db.execute(
+        "UPDATE monitor_alerts SET platform=("
+        "  SELECT platform FROM monitor_posts WHERE monitor_posts.note_id=monitor_alerts.note_id LIMIT 1"
+        ") WHERE (platform IS NULL OR platform='') "
+        "  AND EXISTS (SELECT 1 FROM monitor_posts WHERE monitor_posts.note_id=monitor_alerts.note_id)"
+    )
+    await db.execute(
+        "UPDATE monitor_alerts SET platform='xhs' WHERE platform IS NULL OR platform=''"
+    )
     # 博主头像 / 简介（卡片展示用）
     await _ensure_column(db, "monitor_creators", "avatar_url",        "TEXT DEFAULT ''")
     await _ensure_column(db, "monitor_creators", "last_post_title",   "TEXT DEFAULT ''")
@@ -758,6 +771,9 @@ async def _migrate(db):
     # copyright_stat: '11' = 原创, '100' = 转载, 其他/空 = 普通
     await _ensure_column(db, "monitor_posts", "copyright_stat", "TEXT DEFAULT ''")
     await _ensure_column(db, "monitor_posts", "source_url", "TEXT DEFAULT ''")
+    # 公众号扩展字段：打赏数 + 发布者 IP 属地（来自 /mp/getappmsgext）
+    await _ensure_column(db, "monitor_posts", "reward_total", "INTEGER DEFAULT 0")
+    await _ensure_column(db, "monitor_posts", "ip_wording", "TEXT DEFAULT ''")
     # 关联到博主（来自博主追新的帖子才有；普通监控帖为 NULL）
     # 用于在 CreatorsCard 折叠展开时展示该博主的作品列表
     await _ensure_column(db, "monitor_posts", "creator_id", "INTEGER")
@@ -1919,21 +1935,35 @@ async def has_ever_alerted(note_id: str, alert_type: str) -> bool:
         return (await cur.fetchone()) is not None
 
 
-async def save_alert(note_id: str, title: str, alert_type: str, message: str, user_id: Optional[int] = None):
+async def save_alert(
+    note_id: str, title: str, alert_type: str, message: str,
+    user_id: Optional[int] = None, platform: str = "",
+):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO monitor_alerts (note_id,title,alert_type,message,user_id) VALUES (?,?,?,?,?)",
-            (note_id, title, alert_type, message, user_id),
+            "INSERT INTO monitor_alerts (note_id,title,alert_type,message,user_id,platform) "
+            "VALUES (?,?,?,?,?,?)",
+            (note_id, title, alert_type, message, user_id, platform or ""),
         )
         await db.commit()
 
 
-async def get_alerts(limit: int = 50, user_id: Optional[int] = None) -> List[Dict]:
+async def get_alerts(
+    limit: int = 50,
+    user_id: Optional[int] = None,
+    platform: Optional[str] = None,
+) -> List[Dict]:
     sql = "SELECT * FROM monitor_alerts"
+    where: list = []
     params: list = []
     if user_id is not None:
-        sql += " WHERE user_id=?"
+        where.append("user_id=?")
         params.append(user_id)
+    if platform:
+        where.append("platform=?")
+        params.append(platform)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1942,12 +1972,23 @@ async def get_alerts(limit: int = 50, user_id: Optional[int] = None) -> List[Dic
             return [dict(r) for r in await cur.fetchall()]
 
 
-async def clear_alerts(user_id: Optional[int] = None) -> int:
+async def clear_alerts(
+    user_id: Optional[int] = None,
+    platform: Optional[str] = None,
+) -> int:
+    where: list = []
+    params: list = []
+    if user_id is not None:
+        where.append("user_id=?")
+        params.append(user_id)
+    if platform:
+        where.append("platform=?")
+        params.append(platform)
+    sql = "DELETE FROM monitor_alerts"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
     async with aiosqlite.connect(DB_PATH) as db:
-        if user_id is not None:
-            cur = await db.execute("DELETE FROM monitor_alerts WHERE user_id=?", (user_id,))
-        else:
-            cur = await db.execute("DELETE FROM monitor_alerts")
+        cur = await db.execute(sql, params)
         await db.commit()
         return cur.rowcount or 0
 

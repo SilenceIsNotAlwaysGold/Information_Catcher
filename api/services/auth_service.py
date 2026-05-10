@@ -98,6 +98,11 @@ def init_user_db():
     _ensure_column(cursor, "users", "mp_auth_pass_ticket",  "TEXT DEFAULT ''")
     _ensure_column(cursor, "users", "mp_auth_appmsg_token", "TEXT DEFAULT ''")
     _ensure_column(cursor, "users", "mp_auth_at",           "TEXT")
+    # 公众号凭证健康度：valid | expired | unknown
+    # 由 fetcher.fetch_article_stats 失败/成功时刷新
+    _ensure_column(cursor, "users", "mp_auth_status",       "TEXT DEFAULT 'unknown'")
+    # 上次因凭证过期推送提醒的时间戳（限频 24h 一次，避免连续 fetch 失败疯狂推送）
+    _ensure_column(cursor, "users", "mp_auth_expired_notified_at", "TEXT")
 
     # 用户级 trending 配置（之前在 monitor_settings 全局，2026-05 改为 per-user）
     # admin 配的全局值仅作为新用户首次的默认；每用户独立维护自己的关键词
@@ -107,6 +112,15 @@ def init_user_db():
     # 单关键词单次抓取的目标数量（默认 30；admin 可设到 200，普通用户 1-100）
     # 后端会按此值算 pages = ceil(N/18)，抓完 truncate 到 N 条
     _ensure_column(cursor, "users", "trending_max_per_keyword", "INTEGER DEFAULT 30")
+    # P10.4: per-platform 隔离的 trending 配置（NULL=继承全局 trending_* 字段）
+    _ensure_column(cursor, "users", "trending_xhs_keywords",          "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "trending_xhs_enabled",           "INTEGER")
+    _ensure_column(cursor, "users", "trending_xhs_min_likes",         "INTEGER")
+    _ensure_column(cursor, "users", "trending_xhs_max_per_keyword",   "INTEGER")
+    _ensure_column(cursor, "users", "trending_douyin_keywords",       "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "trending_douyin_enabled",        "INTEGER")
+    _ensure_column(cursor, "users", "trending_douyin_min_likes",      "INTEGER")
+    _ensure_column(cursor, "users", "trending_douyin_max_per_keyword","INTEGER")
     # 用户级抓取频率覆盖（分钟）。0 = 跟随全局 check_interval_minutes；
     # > 0 = 用户自定义（必须 ≥ 全局，否则全局 job 跑不到那么频繁）
     # 设计：admin 控制全局 baseline 决定最快频率；用户能调慢减少风控暴露
@@ -358,10 +372,20 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "       COALESCE(mp_auth_pass_ticket,'')  AS mp_auth_pass_ticket, "
         "       COALESCE(mp_auth_appmsg_token,'') AS mp_auth_appmsg_token, "
         "       mp_auth_at, "
+        "       COALESCE(mp_auth_status,'unknown') AS mp_auth_status, "
+        "       mp_auth_expired_notified_at, "
         "       COALESCE(trending_keywords,'')   AS trending_keywords, "
         "       COALESCE(trending_enabled,0)     AS trending_enabled, "
         "       COALESCE(trending_min_likes,1000) AS trending_min_likes, "
         "       COALESCE(trending_max_per_keyword,30) AS trending_max_per_keyword, "
+        "       COALESCE(trending_xhs_keywords,'')     AS trending_xhs_keywords, "
+        "       trending_xhs_enabled AS trending_xhs_enabled, "
+        "       trending_xhs_min_likes AS trending_xhs_min_likes, "
+        "       trending_xhs_max_per_keyword AS trending_xhs_max_per_keyword, "
+        "       COALESCE(trending_douyin_keywords,'')  AS trending_douyin_keywords, "
+        "       trending_douyin_enabled AS trending_douyin_enabled, "
+        "       trending_douyin_min_likes AS trending_douyin_min_likes, "
+        "       trending_douyin_max_per_keyword AS trending_douyin_max_per_keyword, "
         "       COALESCE(monitor_interval_minutes,0)  AS monitor_interval_minutes, "
         "       COALESCE(trending_interval_minutes,0) AS trending_interval_minutes, "
         "       COALESCE(trending_push_enabled,0) AS trending_push_enabled, "
@@ -409,10 +433,20 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "mp_auth_pass_ticket":  row["mp_auth_pass_ticket"] or "",
         "mp_auth_appmsg_token": row["mp_auth_appmsg_token"] or "",
         "mp_auth_at": row["mp_auth_at"],
+        "mp_auth_status": row["mp_auth_status"] or "unknown",
+        "mp_auth_expired_notified_at": row["mp_auth_expired_notified_at"],
         "trending_keywords":  row["trending_keywords"] or "",
         "trending_enabled":   bool(row["trending_enabled"]),
         "trending_min_likes": int(row["trending_min_likes"] or 1000),
         "trending_max_per_keyword": int(row["trending_max_per_keyword"] or 30),
+        "trending_xhs_keywords":       row["trending_xhs_keywords"] or "",
+        "trending_xhs_enabled":        row["trending_xhs_enabled"],
+        "trending_xhs_min_likes":      row["trending_xhs_min_likes"],
+        "trending_xhs_max_per_keyword": row["trending_xhs_max_per_keyword"],
+        "trending_douyin_keywords":       row["trending_douyin_keywords"] or "",
+        "trending_douyin_enabled":        row["trending_douyin_enabled"],
+        "trending_douyin_min_likes":      row["trending_douyin_min_likes"],
+        "trending_douyin_max_per_keyword": row["trending_douyin_max_per_keyword"],
         "monitor_interval_minutes":  int(row["monitor_interval_minutes"] or 0),
         "trending_interval_minutes": int(row["trending_interval_minutes"] or 0),
         "trending_push_enabled": bool(row["trending_push_enabled"]),
@@ -441,7 +475,12 @@ def update_user_mp_auth(
     pass_ticket: Optional[str] = None,
     appmsg_token: Optional[str] = None,
 ) -> None:
-    """用户更新自己的公众号客户端凭证。"""
+    """用户更新自己的公众号客户端凭证。
+
+    新凭证写入时：
+      - mp_auth_status 重置为 'valid'（让监控立刻能用）
+      - mp_auth_expired_notified_at 清零（如果再次过期还会推送提醒）
+    """
     fields, values = [], []
     if uin is not None:
         fields.append("mp_auth_uin = ?"); values.append(uin)
@@ -454,12 +493,65 @@ def update_user_mp_auth(
     if not fields:
         return
     fields.append("mp_auth_at = datetime('now', 'localtime')")
+    fields.append("mp_auth_status = 'valid'")
+    fields.append("mp_auth_expired_notified_at = NULL")
     values.append(user_id)
     conn = _get_db_connection()
     cur = conn.cursor()
     cur.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
     conn.commit()
     conn.close()
+
+
+def mark_mp_auth_status(
+    user_id: int, status: str, *, set_notified: bool = False,
+) -> None:
+    """fetcher 检测到凭证失效/恢复时调用：把 mp_auth_status 标 valid|expired|unknown。
+
+    set_notified=True 时同时更新 mp_auth_expired_notified_at 限频戳，
+    避免每次失败都推送告警（24h 一次足够）。
+    """
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    if set_notified:
+        cur.execute(
+            "UPDATE users SET mp_auth_status=?, "
+            "mp_auth_expired_notified_at=datetime('now','localtime') "
+            "WHERE id=?",
+            (status, user_id),
+        )
+    else:
+        cur.execute(
+            "UPDATE users SET mp_auth_status=? WHERE id=?",
+            (status, user_id),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_trending_for_platform(user: dict, platform: str) -> dict:
+    """读取用户在指定平台的 trending 配置。
+    优先 per-platform 字段；为空（NULL / 空字符串）则 fallback 到全局字段。
+    返回标准化 dict: {keywords, enabled, min_likes, max_per_keyword}
+    """
+    p = (platform or "").lower()
+    if p not in ("xhs", "douyin"):
+        return {
+            "keywords": user.get("trending_keywords") or "",
+            "enabled":  bool(user.get("trending_enabled")),
+            "min_likes": int(user.get("trending_min_likes") or 1000),
+            "max_per_keyword": int(user.get("trending_max_per_keyword") or 30),
+        }
+    pf_kw = user.get(f"trending_{p}_keywords") or ""
+    pf_en = user.get(f"trending_{p}_enabled")
+    pf_ml = user.get(f"trending_{p}_min_likes")
+    pf_mpk = user.get(f"trending_{p}_max_per_keyword")
+    return {
+        "keywords": pf_kw if pf_kw else (user.get("trending_keywords") or ""),
+        "enabled":  bool(pf_en) if pf_en is not None else bool(user.get("trending_enabled")),
+        "min_likes": int(pf_ml) if pf_ml is not None else int(user.get("trending_min_likes") or 1000),
+        "max_per_keyword": int(pf_mpk) if pf_mpk is not None else int(user.get("trending_max_per_keyword") or 30),
+    }
 
 
 def update_user_trending(
@@ -470,17 +562,32 @@ def update_user_trending(
     max_per_keyword: Optional[int] = None,
     monitor_interval_minutes: Optional[int] = None,
     trending_interval_minutes: Optional[int] = None,
+    platform: Optional[str] = None,
 ) -> None:
-    """用户更新自己的抓取偏好（关键词、阈值、抓取频率等）。"""
+    """用户更新自己的抓取偏好（关键词、阈值、抓取频率等）。
+
+    platform：'xhs' / 'douyin' = 写入 per-platform 字段；None = 写入全局字段（向后兼容）。
+    """
     fields, values = [], []
+    p = (platform or "").lower()
+    if p in ("xhs", "douyin"):
+        kw_col      = f"trending_{p}_keywords"
+        en_col      = f"trending_{p}_enabled"
+        ml_col      = f"trending_{p}_min_likes"
+        mpk_col     = f"trending_{p}_max_per_keyword"
+    else:
+        kw_col, en_col, ml_col, mpk_col = (
+            "trending_keywords", "trending_enabled",
+            "trending_min_likes", "trending_max_per_keyword",
+        )
     if keywords is not None:
-        fields.append("trending_keywords = ?"); values.append(keywords)
+        fields.append(f"{kw_col} = ?"); values.append(keywords)
     if enabled is not None:
-        fields.append("trending_enabled = ?"); values.append(1 if enabled else 0)
+        fields.append(f"{en_col} = ?"); values.append(1 if enabled else 0)
     if min_likes is not None:
-        fields.append("trending_min_likes = ?"); values.append(int(min_likes))
+        fields.append(f"{ml_col} = ?"); values.append(int(min_likes))
     if max_per_keyword is not None:
-        fields.append("trending_max_per_keyword = ?")
+        fields.append(f"{mpk_col} = ?")
         values.append(max(1, min(int(max_per_keyword), 200)))
     if monitor_interval_minutes is not None:
         fields.append("monitor_interval_minutes = ?")
@@ -502,16 +609,25 @@ def update_user_trending(
 
 
 def list_users_with_trending() -> list:
-    """scheduler 用：列出所有 trending_enabled=1 的用户（含 keywords / min_likes）。"""
+    """scheduler 用：列出所有有 trending 配置的用户（全局 OR per-platform 任一启用）。"""
     conn = _get_db_connection()
     cur = conn.cursor()
     cur.execute(
         "SELECT id, username, "
         "       COALESCE(trending_keywords,'')   AS trending_keywords, "
+        "       COALESCE(trending_enabled,0)     AS trending_enabled, "
         "       COALESCE(trending_min_likes,1000) AS trending_min_likes, "
         "       COALESCE(trending_max_per_keyword,30) AS trending_max_per_keyword, "
-        "       COALESCE(trending_interval_minutes,0) AS trending_interval_minutes "
-        "FROM users WHERE COALESCE(trending_enabled,0)=1 AND COALESCE(is_active,1)=1"
+        "       COALESCE(trending_interval_minutes,0) AS trending_interval_minutes, "
+        "       COALESCE(trending_xhs_keywords,'')      AS trending_xhs_keywords, "
+        "       trending_xhs_enabled, trending_xhs_min_likes, trending_xhs_max_per_keyword, "
+        "       COALESCE(trending_douyin_keywords,'')   AS trending_douyin_keywords, "
+        "       trending_douyin_enabled, trending_douyin_min_likes, trending_douyin_max_per_keyword "
+        "FROM users WHERE ("
+        "    COALESCE(trending_enabled,0)=1 "
+        "    OR COALESCE(trending_xhs_enabled,0)=1 "
+        "    OR COALESCE(trending_douyin_enabled,0)=1"
+        ") AND COALESCE(is_active,1)=1"
     )
     rows = cur.fetchall()
     conn.close()
