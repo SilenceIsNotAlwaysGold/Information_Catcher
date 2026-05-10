@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useMe } from "@/lib/useApi";
 import { toastOk, toastErr } from "@/lib/toast";
+import { confirmDialog } from "@/components/ConfirmDialog";
 
 import { IMAGE_API, proxyUrl } from "@/components/product-image/utils";
 import { useImageConfig } from "@/components/product-image/useImageConfig";
@@ -85,6 +86,7 @@ export default function ProductRemixPage() {
 
   // ── 步骤 2：提交参数 ────────────────────────────────────────────────────
   const [count, setCount] = useState(5);
+  const [styleKeywords, setStyleKeywords] = useState("");
 
   // 切换勾选某一张图作参考；保持点击顺序作为生成顺序
   const toggleRef = (i: number) => {
@@ -107,6 +109,7 @@ export default function ProductRemixPage() {
       const d = JSON.parse(raw);
       if (d.postUrl) setPostUrl(d.postUrl);
       if (typeof d.count === "number") setCount(d.count);
+      if (typeof d.styleKeywords === "string") setStyleKeywords(d.styleKeywords);
     } catch {}
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -114,9 +117,9 @@ export default function ProductRemixPage() {
   useEffect(() => {
     if (_firstSave.current) { _firstSave.current = false; return; }
     try {
-      localStorage.setItem(PERSIST_KEY, JSON.stringify({ postUrl, count }));
+      localStorage.setItem(PERSIST_KEY, JSON.stringify({ postUrl, count, styleKeywords }));
     } catch {}
-  }, [postUrl, count, PERSIST_KEY]);
+  }, [postUrl, count, styleKeywords, PERSIST_KEY]);
 
   const handleFetch = async () => {
     const url = postUrl.trim();
@@ -175,9 +178,9 @@ export default function ProductRemixPage() {
         body: JSON.stringify({
           post_url: post.post_url,
           ref_image_idxs: refIdxs,
-          // 兼容字段：第一张作为旧 ref_image_idx
           ref_image_idx: refIdxs[0] ?? 0,
           count,
+          style_keywords: styleKeywords.trim(),
         }),
       });
       const data = await r.json().catch(() => ({}));
@@ -477,8 +480,38 @@ export default function ProductRemixPage() {
                 />
               </div>
               <p className="text-xs text-default-400">
-                上限 30 套。每套约 10 秒，{count} 套预计耗时 ~{Math.ceil(count * 10 / 60)} 分钟。
+                上限 30 套。一套内 {refIdxs.length} 张图并发生成，预计单套 ~30 秒，
+                {count} 套总计 ~{Math.ceil(count * 30 / 60)} 分钟。
               </p>
+            </div>
+
+            {/* 风格关键词（可选） */}
+            <div className="space-y-2">
+              <p className="text-sm text-default-700">
+                风格关键词（可选）<span className="text-xs text-default-400 ml-2">追加在 image prompt 末尾，影响每套图风格</span>
+              </p>
+              <Input
+                placeholder="如：日系简约 / 莫兰迪色调 / 赛博朋克霓虹 / 极简白底"
+                value={styleKeywords}
+                onValueChange={setStyleKeywords}
+                size="sm"
+                description="留空则只走默认 prompt + 文案主题"
+              />
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  "日系简约", "莫兰迪色调", "极简白底", "复古胶片",
+                  "ins 风", "高端质感", "暖色调暖光", "赛博朋克霓虹",
+                ].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => setStyleKeywords(preset)}
+                    className="px-2 py-0.5 text-xs rounded border border-divider text-default-500 hover:bg-secondary/10 hover:border-secondary hover:text-secondary"
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <Button
@@ -499,7 +532,61 @@ export default function ProductRemixPage() {
       )}
 
       {/* 步骤 3：进度 + 结果 */}
-      {activeTask && (
+      {activeTask && (() => {
+        // 加权进度：文案 0.1 unit + 每张图 1 unit。比"按套数"细 10×
+        const refsPerSet = Math.max(
+          ...activeItems.map((it) => (it.images?.length || (it.image_url ? 1 : 0))),
+          1,
+        );
+        const perSetTotal = 0.1 + refsPerSet * 1.0;
+        const taskTotal = perSetTotal * Math.max(activeTask.count, 1);
+        const taskDone = activeItems.reduce((sum, it) => {
+          const captionUnit = (it.title || it.body) ? 0.1 : 0;
+          const imgs = it.images && it.images.length
+            ? it.images
+            : (it.image_url ? [{ image_url: it.image_url }] : []);
+          const imageUnit = imgs.filter((x) => x.image_url).length;
+          return sum + captionUnit + imageUnit;
+        }, 0);
+        const pct = taskTotal > 0 ? Math.min(100, Math.round(taskDone / taskTotal * 100)) : 0;
+        const cancellable = activeTask.status === "pending" || activeTask.status === "running";
+
+        const handleCancel = async () => {
+          const ok = await confirmDialog({
+            title: "取消任务",
+            content: `确认取消任务 #${activeTask.id}？已生成的图会保留，未完成的套会停止。`,
+            confirmText: "取消任务", cancelText: "继续等", danger: true,
+          });
+          if (!ok) return;
+          const r = await fetch(IMAGE_API(`/remix-tasks/${activeTask.id}/cancel`), {
+            method: "POST", headers,
+          });
+          if (r.ok) {
+            toastOk("已请求取消，worker 会在跑完当前一套后停止");
+            await reloadTasks();
+            await pollTask(activeTask.id);
+          } else {
+            const j = await r.json().catch(() => ({}));
+            toastErr(`取消失败：${j.detail || `HTTP ${r.status}`}`);
+          }
+        };
+
+        const handleClone = async () => {
+          const r = await fetch(IMAGE_API(`/remix-tasks/${activeTask.id}/clone`), {
+            method: "POST", headers,
+          });
+          if (r.ok) {
+            const d = await r.json();
+            toastOk(`已重新提交，新任务 #${d.task_id}`);
+            setActiveTaskId(d.task_id);
+            await reloadTasks();
+          } else {
+            const j = await r.json().catch(() => ({}));
+            toastErr(`重新生成失败：${j.detail || `HTTP ${r.status}`}`);
+          }
+        };
+
+        return (
         <Card>
           <CardHeader className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -508,43 +595,46 @@ export default function ProductRemixPage() {
               {activeTask.status === "running" && <Chip size="sm" color="primary" variant="flat">处理中</Chip>}
               {activeTask.status === "done" && <Chip size="sm" color="success" variant="flat">已完成</Chip>}
               {activeTask.status === "error" && <Chip size="sm" color="danger" variant="flat">失败</Chip>}
+              {activeTask.status === "cancelled" && <Chip size="sm" color="default" variant="flat">已取消</Chip>}
               <span className="text-xs text-default-400">
-                {activeTask.done_count} / {activeTask.count}
+                {activeTask.done_count} / {activeTask.count} 套
               </span>
             </div>
-            <Button size="sm" variant="flat" onPress={closeActive}>关闭</Button>
+            <div className="flex gap-2">
+              {cancellable && (
+                <Button size="sm" variant="flat" color="danger" onPress={handleCancel}>
+                  取消任务
+                </Button>
+              )}
+              {!cancellable && activeTask.status !== "done" && (
+                <Button size="sm" variant="flat" color="secondary" onPress={handleClone}>
+                  重新生成
+                </Button>
+              )}
+              <Button size="sm" variant="flat" onPress={closeActive}>关闭</Button>
+            </div>
           </CardHeader>
           <CardBody className="space-y-4">
-            {/* 进度条（原生实现，避免 NextUI Progress 子包打包问题） */}
+            {/* 加权进度条 */}
             <div>
               <div className="flex justify-between text-xs text-default-600 mb-1">
                 <span>
-                  {activeTask.status === "done"
-                    ? "全部完成"
-                    : activeTask.status === "error"
-                      ? "任务失败"
-                      : "生成中…"}
+                  {activeTask.status === "done" ? "全部完成"
+                  : activeTask.status === "error" ? "任务失败"
+                  : activeTask.status === "cancelled" ? "已取消"
+                  : "生成中…"}
                 </span>
-                <span>
-                  {activeTask.count > 0
-                    ? Math.round(activeTask.done_count * 100 / activeTask.count)
-                    : 0}%
-                </span>
+                <span>{pct}%</span>
               </div>
               <div className="w-full h-2 bg-default-200 rounded-full overflow-hidden">
                 <div
                   className={`h-full transition-all duration-300 ${
-                    activeTask.status === "error"
-                      ? "bg-danger"
-                      : activeTask.status === "done"
-                        ? "bg-success"
-                        : "bg-secondary"
+                    activeTask.status === "error" ? "bg-danger"
+                    : activeTask.status === "done" ? "bg-success"
+                    : activeTask.status === "cancelled" ? "bg-default-400"
+                    : "bg-secondary"
                   }`}
-                  style={{
-                    width: `${activeTask.count > 0
-                      ? Math.min(100, activeTask.done_count * 100 / activeTask.count)
-                      : 0}%`,
-                  }}
+                  style={{ width: `${pct}%` }}
                 />
               </div>
             </div>
@@ -652,7 +742,8 @@ export default function ProductRemixPage() {
             )}
           </CardBody>
         </Card>
-      )}
+        );
+      })()}
 
       {/* 任务列表 */}
       {tasks.length > 0 && (

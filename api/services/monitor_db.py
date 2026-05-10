@@ -712,6 +712,8 @@ async def _migrate(db):
     # 新任务：ref_image_idxs/urls 存 JSON list；worker 用 list 长度判断走多图逻辑
     await _ensure_column(db, "remix_tasks", "ref_image_idxs", "TEXT DEFAULT ''")
     await _ensure_column(db, "remix_tasks", "ref_image_urls", "TEXT DEFAULT ''")
+    # 用户自定义风格关键词（追加在 image edits prompt 末尾），如"日系简约"
+    await _ensure_column(db, "remix_tasks", "style_keywords", "TEXT DEFAULT ''")
     # 博主追新健康度 + 未读：让列表能区分"挂了 / 卡 cookie / 有新内容"
     await _ensure_column(db, "monitor_creators", "last_check_status", "TEXT DEFAULT 'unknown'")
     await _ensure_column(db, "monitor_creators", "last_check_error",  "TEXT DEFAULT ''")
@@ -2642,6 +2644,7 @@ async def create_remix_task(
     ref_image_urls: Optional[List[str]] = None,
     ref_image_idxs: Optional[List[int]] = None,
     count: int = 1, size: str = "",
+    style_keywords: str = "",
 ) -> int:
     """创建 remix 任务。
 
@@ -2658,15 +2661,50 @@ async def create_remix_task(
                (user_id, status, post_url, post_title, post_desc, platform,
                 ref_image_url, ref_image_idx,
                 ref_image_urls, ref_image_idxs,
-                count, done_count, items_json, size)
-               VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?)""",
+                count, done_count, items_json, size, style_keywords)
+               VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?, ?)""",
             (user_id, post_url, post_title, post_desc, platform,
              ref_image_url, ref_image_idx,
              urls_json, idxs_json,
-             count, size),
+             count, size, (style_keywords or "")[:200]),
         )
         await db.commit()
         return cur.lastrowid or 0
+
+
+async def cancel_remix_task(task_id: int, user_id: Optional[int] = None) -> bool:
+    """把 task 标 cancelled。worker 跑完一套时检查，cancelled 就提前退出。
+
+    user_id 给定时只能取消自己的（前端校验 + 后端兜底）。
+    返回是否真有改动（如已 done/error 不会被 cancel）。
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        if user_id is not None:
+            cur = await db.execute(
+                "UPDATE remix_tasks SET status='cancelled', "
+                "finished_at=datetime('now','localtime') "
+                "WHERE id=? AND user_id=? AND status IN ('pending', 'running')",
+                (task_id, user_id),
+            )
+        else:
+            cur = await db.execute(
+                "UPDATE remix_tasks SET status='cancelled', "
+                "finished_at=datetime('now','localtime') "
+                "WHERE id=? AND status IN ('pending', 'running')",
+                (task_id,),
+            )
+        await db.commit()
+        return (cur.rowcount or 0) > 0
+
+
+async def get_remix_task_status(task_id: int) -> Optional[str]:
+    """轻量查询：只取 status 字段，给 worker 做 cancel 检查用。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT status FROM remix_tasks WHERE id=?", (task_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
 
 
 async def get_remix_task(task_id: int) -> Optional[Dict]:

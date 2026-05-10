@@ -37,6 +37,8 @@ class CreateRemixTaskRequest(BaseModel):
     ref_image_idx: int = 0       # v1 向后兼容
     count: int = 5               # 1–30 套
     size: Optional[str] = None   # 留空用配置默认
+    # 用户自定义风格关键词，附加到 image edits prompt 末尾（"日系简约"等）
+    style_keywords: Optional[str] = ""
 
 
 async def _fetch_image_dataurl(url: str, platform: str) -> str:
@@ -227,14 +229,13 @@ async def create_remix_task(
         post_title=metrics.get("title") or "",
         post_desc=(metrics.get("desc") or "")[:1000],
         platform=plat.name,
-        # 单值字段（兼容老 worker 路径）：取第一张
         ref_image_url=ref_urls[0],
         ref_image_idx=ref_idxs[0],
-        # 多图字段（v2 主路径）
         ref_image_urls=ref_urls,
         ref_image_idxs=ref_idxs,
         count=count,
         size=(req.size or "").strip(),
+        style_keywords=(req.style_keywords or "").strip(),
     )
 
     try:
@@ -242,12 +243,106 @@ async def create_remix_task(
     except Exception as e:
         logger.warning(f"[remix] record_usage failed: {e}")
 
+    # 提交即唤醒：不等下个心跳（默认 10s）才开始处理
+    try:
+        from ...services import remix_worker as _rw
+        import asyncio as _asyncio
+        _asyncio.create_task(_rw.run_once())
+    except Exception as e:
+        logger.warning(f"[remix] kick worker failed (will fall back to next heartbeat): {e}")
+
     return {
         "task_id": task_id,
         "status": "pending",
         "count": count,
         "refs_per_set": len(ref_idxs),
     }
+
+
+@router.post("/remix-tasks/{task_id}/cancel", summary="取消仿写任务")
+async def cancel_remix_task(
+    task_id: int,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """取消进行中或排队中的任务。worker 跑完当前一套后会检查并提前退出。"""
+    task = await monitor_db.get_remix_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    role = (current_user or {}).get("role") or "user"
+    if role != "admin" and task.get("user_id") != current_user.get("id"):
+        raise HTTPException(status_code=403, detail="无权操作此任务")
+    if task.get("status") not in ("pending", "running"):
+        return {"ok": False, "message": f"任务当前状态 {task.get('status')}，无需取消"}
+    user_id = current_user.get("id") if role != "admin" else None
+    affected = await monitor_db.cancel_remix_task(task_id, user_id=user_id)
+    return {"ok": affected, "task_id": task_id}
+
+
+@router.post("/remix-tasks/{task_id}/clone", summary="用相同参数重新生成（重试整个任务）")
+async def clone_remix_task(
+    task_id: int,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """用相同参数复制一个新任务（推回队列），用于"重新生成"按钮。
+
+    比较：
+      - cancel = 停掉当前任务
+      - clone  = 用同样的输入重做一次（拿到新 task_id）
+    """
+    src = await monitor_db.get_remix_task(task_id)
+    if not src:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    role = (current_user or {}).get("role") or "user"
+    if role != "admin" and src.get("user_id") != current_user.get("id"):
+        raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    import json as _json
+    user_id = src.get("user_id")
+    ref_urls: list = []
+    ref_idxs: list = []
+    raw_urls = (src.get("ref_image_urls") or "").strip()
+    raw_idxs = (src.get("ref_image_idxs") or "").strip()
+    if raw_urls:
+        try:
+            ref_urls = list(_json.loads(raw_urls))
+        except Exception:
+            pass
+    if raw_idxs:
+        try:
+            ref_idxs = list(_json.loads(raw_idxs))
+        except Exception:
+            pass
+    if not ref_urls:
+        ref_urls = [src.get("ref_image_url") or ""]
+        ref_idxs = [int(src.get("ref_image_idx") or 0)]
+
+    count = max(1, min(int(src.get("count") or 1), 30))
+    await quota_service.check_or_raise(current_user, "daily_remix_sets", delta=count)
+    new_id = await monitor_db.create_remix_task(
+        user_id=user_id,
+        post_url=src.get("post_url") or "",
+        post_title=src.get("post_title") or "",
+        post_desc=src.get("post_desc") or "",
+        platform=src.get("platform") or "xhs",
+        ref_image_url=ref_urls[0] if ref_urls else "",
+        ref_image_idx=ref_idxs[0] if ref_idxs else 0,
+        ref_image_urls=ref_urls,
+        ref_image_idxs=ref_idxs,
+        count=count,
+        size=(src.get("size") or "").strip(),
+        style_keywords=(src.get("style_keywords") or "").strip(),
+    )
+    try:
+        await quota_service.record_usage(user_id, "remix_sets", delta=count)
+    except Exception as e:
+        logger.warning(f"[remix] clone record_usage failed: {e}")
+    try:
+        from ...services import remix_worker as _rw
+        import asyncio as _asyncio
+        _asyncio.create_task(_rw.run_once())
+    except Exception:
+        pass
+    return {"task_id": new_id, "cloned_from": task_id, "status": "pending"}
 
 
 @router.get("/remix-tasks/{task_id}", summary="查询仿写任务进度 + 结果")

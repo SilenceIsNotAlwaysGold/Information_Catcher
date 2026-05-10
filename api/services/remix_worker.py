@@ -45,22 +45,34 @@ REMIX_PROMPT_EN = (
 )
 
 
-def _prompt_with_caption(caption_title: str, caption_body: str) -> str:
-    """把当前套的"变种文案主题"注入图片 prompt，让图与文案氛围一致。
+def _prompt_with_caption(
+    caption_title: str, caption_body: str, style_keywords: str = "",
+) -> str:
+    """把当前套的"变种文案主题" + 用户自定义风格关键词 注入图片 prompt。
 
-    用户期望的流程：先生成文案 → 用文案主题做图 prompt → 调 API 换背景换风格。
+    流程：先生成文案 → 用文案主题做图 prompt → 调 API 换背景换风格。
     这里只取标题/正文前 200 字作为风格提示，避免 prompt 过长被截断。
+    style_keywords 为用户填的自由文本（"日系简约 / 赛博朋克 / 莫兰迪色调"等），
+    优先级最高，附加到 prompt 末尾。
     """
     theme = (caption_title or caption_body or "").strip()
-    if not theme:
-        return REMIX_PROMPT_EN
-    theme = theme[:200].replace("\n", " ").strip()
-    return (
-        REMIX_PROMPT_EN
-        + f"\n\nAdditional theme guidance for this variant: \"{theme}\". "
-        + "Adapt the background mood, lighting and decorative props to match this theme, "
-        + "while keeping the main subject and any Chinese text completely unchanged."
-    )
+    parts = [REMIX_PROMPT_EN]
+    if theme:
+        theme = theme[:200].replace("\n", " ").strip()
+        parts.append(
+            f'Additional theme guidance for this variant: "{theme}". '
+            "Adapt the background mood, lighting and decorative props to match this theme, "
+            "while keeping the main subject and any Chinese text completely unchanged."
+        )
+    sk = (style_keywords or "").strip()
+    if sk:
+        sk = sk[:120].replace("\n", " ").strip()
+        parts.append(
+            f'Visual style requirement (highest priority): {sk}. '
+            "Apply this style to the entire image — colors, lighting, texture, "
+            "composition mood — while still keeping subject and Chinese text intact."
+        )
+    return "\n\n".join(parts)
 
 
 def _platform_referer(url: str) -> str:
@@ -213,56 +225,72 @@ async def _gen_one_set(
     client: httpx.AsyncClient, *, base_url: str, api_key: str, model: str,
     size: str, refs_bytes: list, set_idx: int, total: int,
     post_title: str, post_desc: str, user_id: Optional[int] = None,
+    style_keywords: str = "",
     progress_cb=None,
+    cancel_check=None,
 ) -> dict:
-    """生成一套：1 篇文案 → K 张图（用文案主题派生图 prompt，每张参考图各换一次）。
+    """生成一套：1 篇文案 → K 张图（套内 K 张并发）。
 
-    流程顺序（响应用户期望）：
-      1. 先调 AI 生成变种文案（标题+正文）—— 几秒
-      2. 用文案主题派生 image edits prompt
-      3. 对每张主体图调 image edits API 换背景换风格
+    流程：
+      1. _generate_caption 生成 1 篇变种文案
+      2. _prompt_with_caption 把文案主题 + 用户 style_keywords 拼进 image prompt
+      3. asyncio.gather K 张图同时调 image edits API
+         （vs 老逻辑串行：5 张图从 2.5 分钟压到 ~30s）
 
-    progress_cb(stage, payload) 在每个里程碑回调，让 worker 写中间进度，
-    让前端能流式看到「文案出来了 → 第 1 张图出来了 → 第 2 张图... 」。
+    progress_cb(stage, payload) 在文案完成 / 每张图完成时回调，让 worker
+    流式写 items_json。并发时多个回调可能同时到，调用方自己保证线程安全。
+
+    cancel_check() -> bool：返回 True 表示任务已被用户取消，函数应早退。
     """
-    # ── 第 1 步：先出文案 ────────────────────────────────────────────────
+    images: list = [{"image_url": "", "error": ""} for _ in refs_bytes]
+
+    async def _emit(title: str, body: str, cerr: str):
+        if progress_cb is not None:
+            await progress_cb("update", {
+                "idx": set_idx,
+                "title": title, "body": body,
+                "images": [dict(im) for im in images],
+                "image_url": next((im["image_url"] for im in images if im.get("image_url")), ""),
+                "error": cerr,
+            })
+
+    # ── 第 1 步：文案 ────────────────────────────────────────────────────
+    if cancel_check and await cancel_check():
+        return {"idx": set_idx, "images": images, "image_url": "",
+                "title": "", "body": "", "error": "任务已取消"}
     title, body, cerr = await _generate_caption(
         post_title=post_title, post_desc=post_desc,
         set_idx=set_idx, n_total=total,
     )
-    # 立刻汇报"文案完成"给前端
-    if progress_cb is not None:
-        await progress_cb("caption_done", {
-            "idx": set_idx,
-            "title": title, "body": body,
-            "images": [{"image_url": "", "error": ""}] * len(refs_bytes),
-            "image_url": "",
-            "error": cerr,
-        })
+    await _emit(title, body, cerr)
 
-    # ── 第 2 步：用文案主题派生 image prompt ─────────────────────────────
-    image_prompt = _prompt_with_caption(title, body)
+    # ── 第 2 步：派生 prompt ─────────────────────────────────────────────
+    image_prompt = _prompt_with_caption(title, body, style_keywords=style_keywords)
 
-    # ── 第 3 步：对每张参考图调 edits ────────────────────────────────────
-    images: list = []
-    for j, ref_bytes in enumerate(refs_bytes):
-        single = await _gen_one_image(
+    # ── 第 3 步：套内 K 张并发 ───────────────────────────────────────────
+    if cancel_check and await cancel_check():
+        return {"idx": set_idx, "images": images, "image_url": "",
+                "title": title, "body": body, "error": "任务已取消"}
+
+    sem = asyncio.Lock()  # 保护 images 列表 + progress 顺序
+
+    async def _one_with_progress(j: int, ref_bytes: bytes):
+        result = await _gen_one_image(
             client, base_url=base_url, api_key=api_key, model=model,
             size=size, ref_bytes=ref_bytes, user_id=user_id,
             prompt=image_prompt,
         )
-        images.append(single)
-        if progress_cb is not None:
-            await progress_cb("image_done", {
-                "idx": set_idx,
-                "title": title, "body": body,
-                "images": images + [{"image_url": "", "error": ""}] * (len(refs_bytes) - len(images)),
-                "image_url": (images[0].get("image_url") or "") if images else "",
-                "error": cerr,
-            })
+        async with sem:
+            images[j] = result
+            await _emit(title, body, cerr)
+
+    await asyncio.gather(
+        *[_one_with_progress(j, rb) for j, rb in enumerate(refs_bytes)],
+        return_exceptions=True,
+    )
 
     succeeded = [im for im in images if im.get("image_url")]
-    primary = succeeded[0] if succeeded else (images[0] if images else {})
+    primary = succeeded[0] if succeeded else {}
     item_error = ""
     if not succeeded:
         errs = [im.get("error", "") for im in images if im.get("error")]
@@ -330,15 +358,27 @@ async def _process_task(task: dict) -> None:
         return
     refs_bytes = [b for (_, b) in refs_bytes_with_idx]
 
+    style_keywords = (task.get("style_keywords") or "").strip()
+
+    async def _is_cancelled() -> bool:
+        try:
+            st = await monitor_db.get_remix_task_status(task_id)
+            return st == "cancelled"
+        except Exception:
+            return False
+
     items: list[dict] = []
     timeout = httpx.Timeout(180.0, connect=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         for i in range(1, count + 1):
+            # 套间检查取消（套内并发到 _gen_one_set 里有更细的检查）
+            if await _is_cancelled():
+                logger.info(f"[remix_worker] task {task_id} cancelled at set {i}/{count}")
+                break
+
             # 流式进度回调：每完成"文案/单张图"就把当前套写到 items_json
             async def _progress(stage: str, partial: dict):
-                # 用 partial 临时覆盖 items 末尾位置（i 对应 items[i-1]）
                 snapshot = list(items)
-                # 剥 image_b64
                 clean = dict(partial)
                 if "images" in clean:
                     clean["images"] = [
@@ -349,7 +389,7 @@ async def _process_task(task: dict) -> None:
                 try:
                     await monitor_db.update_remix_task_progress(
                         task_id, items_json=json.dumps(snapshot, ensure_ascii=False),
-                        done_count=len(items),  # 仍按"完成的套数"算（部分进度不+）
+                        done_count=len(items),
                     )
                 except Exception:
                     pass
@@ -362,7 +402,9 @@ async def _process_task(task: dict) -> None:
                     post_title=task.get("post_title") or "",
                     post_desc=task.get("post_desc") or "",
                     user_id=user_id,
+                    style_keywords=style_keywords,
                     progress_cb=_progress,
+                    cancel_check=_is_cancelled,
                 )
             except Exception as e:
                 logger.exception(f"[remix_worker] task {task_id} set {i} crash: {e}")
@@ -417,8 +459,12 @@ async def _process_task(task: dict) -> None:
             except Exception as e:
                 logger.warning(f"[remix_worker] update progress failed: {e}")
 
+    # 末尾再查一次：用户中途取消就保留 cancelled 状态，不要 done/error 覆盖
+    if await _is_cancelled():
+        logger.info(f"[remix_worker] task {task_id} ended in cancelled state")
+        return
     failed = sum(1 for it in items if it.get("error") and not it.get("image_url"))
-    if failed == count:
+    if failed >= count:
         await monitor_db.finish_remix_task(task_id, status="error",
                                             error="所有套均失败（详见 items）")
     else:
