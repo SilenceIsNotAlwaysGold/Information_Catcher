@@ -1572,10 +1572,35 @@ async function _maybeSyncMpAuth() {
   }
 }
 
+// 调试：记录最近 5 条访问到的 mp.weixin URL（含哪些字段），写 storage 给 popup 看
+const _mpAuthDebug = { recentUrls: [], totalSeen: 0 };
+
+async function _saveDebug() {
+  try {
+    await chrome.storage.local.set({ mpAuthDebug: _mpAuthDebug });
+  } catch (_e) {}
+}
+
 if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
   chrome.webRequest.onBeforeRequest.addListener(
     (details) => {
+      _mpAuthDebug.totalSeen += 1;
       const fields = _extractMpAuthFromUrl(details.url);
+      const fieldNames = Object.keys(fields).filter((k) => fields[k]);
+
+      // 只记录有任何凭证字段的 URL（普通文章页没字段就不记，避免淹没）
+      if (fieldNames.length > 0) {
+        _mpAuthDebug.recentUrls.unshift({
+          ts: Date.now(),
+          path: (() => { try { return new URL(details.url).pathname; } catch { return details.url.slice(0, 80); } })(),
+          fields: fieldNames,
+        });
+        if (_mpAuthDebug.recentUrls.length > 5) {
+          _mpAuthDebug.recentUrls = _mpAuthDebug.recentUrls.slice(0, 5);
+        }
+        _saveDebug();
+      }
+
       let updated = false;
       for (const k of Object.keys(fields)) {
         if (fields[k] && fields[k] !== _mpAuthCache[k]) {
@@ -1584,7 +1609,8 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
         }
       }
       if (updated) {
-        // fire-and-forget；service worker 异步不阻塞请求
+        console.log("[Helper] mp_auth fields seen:", fieldNames, "cache now has:",
+          Object.keys(_mpAuthCache).filter((k) => _mpAuthCache[k]));
         _maybeSyncMpAuth();
       }
     },
@@ -1594,4 +1620,5 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
       ],
     },
   );
+  console.log("[Helper] mp_auth webRequest listener installed");
 }

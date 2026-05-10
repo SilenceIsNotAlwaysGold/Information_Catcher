@@ -79,7 +79,7 @@ function escapeHtml(s) {
 async function readStorage() {
   return new Promise((resolve) => {
     chrome.storage.local.get(
-      ["serverUrl", "token", "lastTaskLog", "lastMpAuthSync"],
+      ["serverUrl", "token", "lastTaskLog", "lastMpAuthSync", "mpAuthDebug"],
       (items) => resolve(items || {}),
     );
   });
@@ -96,27 +96,39 @@ function fmtAgo(ts) {
   return `${Math.floor(h / 24)} 天前`;
 }
 
-function renderMpAuth(last) {
+function renderMpAuth(last, debug) {
   const el = $("mp-auth-status");
   if (!el) return;
-  if (!last) {
-    el.style.background = "#f8fafc";
-    el.style.borderColor = "#e2e8f0";
-    el.style.color = "#64748b";
-    el.textContent = "打开任意一篇 mp.weixin.qq.com 文章即自动同步";
-    return;
-  }
-  if (last.ok) {
-    el.style.background = "#f0fdf4";
-    el.style.borderColor = "#86efac";
-    el.style.color = "#166534";
-    el.textContent = `✅ 凭证已同步 · ${fmtAgo(last.ts)}（30 分钟内有效）`;
+  let main = "";
+  let bg = "#f8fafc", bd = "#e2e8f0", fg = "#64748b";
+  if (last && last.ok) {
+    bg = "#f0fdf4"; bd = "#86efac"; fg = "#166534";
+    main = `✅ 凭证已同步 · ${fmtAgo(last.ts)}（30 分钟内有效）`;
+  } else if (last && !last.ok) {
+    bg = "#fef2f2"; bd = "#fca5a5"; fg = "#991b1b";
+    main = `❌ 同步失败 · ${fmtAgo(last.ts)}${last.error ? "：" + last.error.slice(0, 60) : ""}`;
   } else {
-    el.style.background = "#fef2f2";
-    el.style.borderColor = "#fca5a5";
-    el.style.color = "#991b1b";
-    el.textContent = `❌ 同步失败 · ${fmtAgo(last.ts)}${last.error ? "：" + last.error.slice(0, 60) : ""}`;
+    main = "尚未同步。打开公众号文章后滑到底部，触发阅读数加载。";
   }
+
+  // 诊断行：展示扩展看到了多少 mp 请求 + 最近一条带凭证字段的 URL
+  let diag = "";
+  if (debug) {
+    const seen = debug.totalSeen || 0;
+    if (seen === 0) {
+      diag = "\n（暂未观察到 mp.weixin.qq.com 请求 — 请检查扩展是否加载了 v0.5.0）";
+    } else if (!debug.recentUrls || debug.recentUrls.length === 0) {
+      diag = `\n（看到 ${seen} 次 mp 请求，但都没有 uin/key/pass_ticket 字段。请滑到文章底部触发阅读量加载。）`;
+    } else {
+      const last5 = debug.recentUrls.slice(0, 3).map((r) => `${r.path} → ${r.fields.join(",")}`);
+      diag = `\n看到 ${seen} 次 mp 请求，最近带凭证的：\n` + last5.join("\n");
+    }
+  }
+  el.style.background = bg;
+  el.style.borderColor = bd;
+  el.style.color = fg;
+  el.style.whiteSpace = "pre-line";
+  el.textContent = main + diag;
 }
 
 async function refresh() {
@@ -129,7 +141,7 @@ async function refresh() {
   };
   renderStatus(merged);
   renderTasks(merged.tasks);
-  renderMpAuth(stored.lastMpAuthSync);
+  renderMpAuth(stored.lastMpAuthSync, stored.mpAuthDebug);
 }
 
 // 严格清洗服务器地址：只保留 protocol + host[:port]，丢掉所有 path / 重复 protocol 残留
