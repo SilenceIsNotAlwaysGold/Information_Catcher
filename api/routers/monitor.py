@@ -174,18 +174,41 @@ async def post_video_url(
     - 抖音：clean=true 返回无水印版（playwm → play 替换）
     - 其他平台：返回 video_url 原值
     返回 302 重定向到真实 mp4，前端 <a href> 打开即可下载。
+
+    优先从 monitor_posts 表查；找不到再 fallback 到 trending_posts（同时支持
+    "热门内容" 页的去水印下载）。
     """
     from fastapi.responses import RedirectResponse
+
     post = await db.get_post_by_note_id(note_id, user_id=_scope_uid(current_user))
-    if not post:
-        raise HTTPException(status_code=404, detail="帖子不存在")
-    plat = platform_registry.get_platform(post.get("platform") or "xhs")
+    note_url = ""
+    xsec_token = ""
+    xsec_source = "app_share"
+    platform_name = ""
+
+    if post:
+        note_url = post.get("note_url") or ""
+        xsec_token = post.get("xsec_token", "")
+        xsec_source = post.get("xsec_source", "app_share")
+        platform_name = post.get("platform") or "xhs"
+    else:
+        # fallback：trending_posts（热门内容页的下载）
+        is_admin = (current_user.get("role") or "user") == "admin"
+        scope_uid = None if is_admin else current_user["id"]
+        tpost = await db.get_trending_post(note_id, user_id=scope_uid)
+        if not tpost:
+            raise HTTPException(status_code=404, detail="帖子不存在")
+        note_url = tpost.get("note_url") or ""
+        xsec_token = tpost.get("xsec_token", "") or ""
+        platform_name = tpost.get("platform") or "xhs"
+
+    plat = platform_registry.get_platform(platform_name)
     if not plat:
         raise HTTPException(status_code=400, detail="未知平台")
     metrics, status = await plat.fetch_detail({
-        "post_id": note_id, "note_id": note_id, "url": post.get("note_url"),
-        "xsec_token": post.get("xsec_token", ""),
-        "xsec_source": post.get("xsec_source", "app_share"),
+        "post_id": note_id, "note_id": note_id, "url": note_url,
+        "xsec_token": xsec_token,
+        "xsec_source": xsec_source,
     }, account=None)
     if not metrics:
         raise HTTPException(status_code=502, detail=f"无法抓取：{status}")
