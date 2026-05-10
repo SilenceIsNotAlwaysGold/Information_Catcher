@@ -30,13 +30,16 @@ type Post = {
   checked_at?: string | null;
   group_name?: string | null;
   platform?: string;
+  creator_id?: number | null;
 };
 
 const isXhs = (p: Post) => !p.platform || p.platform === "xhs";
 
 export default function XhsCreatorsPage() {
   const { posts: rawPosts, isLoading: loading } = usePosts();
-  const posts = (rawPosts as Post[]).filter((p) => isXhs(p) && p.group_name === "我的关注");
+  // 博主追新的帖子：creator_id 不为 null（add_post 时关联到 monitor_creators.id）
+  // 之前用 group_name === "我的关注" 过滤需要分组提前存在；用 creator_id 更稳健
+  const posts = (rawPosts as Post[]).filter((p) => isXhs(p) && p.creator_id != null);
   const { token } = useAuth();
 
   const handleDelete = async (note_id: string, title: string) => {
@@ -70,7 +73,7 @@ export default function XhsCreatorsPage() {
           <div>
             <p className="text-sm font-medium">已入库帖子（来自博主追新）</p>
             <p className="text-xs text-default-400">
-              下方列出「我的关注」分组下的小红书帖子，共 {posts.length} 条
+              下方列出关联到任一博主的小红书帖子，共 {posts.length} 条
             </p>
           </div>
         </CardHeader>

@@ -723,6 +723,10 @@ async def _migrate(db):
     # P9: 每博主单独可配的推送 + 频率（覆盖全局 1h 默认）
     await _ensure_column(db, "monitor_creators", "push_enabled",      "INTEGER DEFAULT 1")
     await _ensure_column(db, "monitor_creators", "fetch_interval_minutes", "INTEGER DEFAULT 60")
+    # P11: monitor_groups 加 platform 字段实现 xhs / douyin / mp 隔离
+    # ''  = 老分组（跨平台兼容，所有平台都能选）
+    # 'xhs' / 'douyin' / 'mp' = 平台专属分组
+    await _ensure_column(db, "monitor_groups", "platform", "TEXT DEFAULT ''")
     # 博主头像 / 简介（卡片展示用）
     await _ensure_column(db, "monitor_creators", "avatar_url",        "TEXT DEFAULT ''")
     await _ensure_column(db, "monitor_creators", "last_post_title",   "TEXT DEFAULT ''")
@@ -1264,12 +1268,13 @@ async def list_creator_posts(
 
     按 creator_id 精确关联（add_post 时存的）；老数据 creator_id=NULL 用 author 兜底。
     """
+    # monitor_snapshots 的列名是 checked_at（不是 captured_at），最近一次快照取互动数
     sql_parts = [
         "SELECT p.*, "
         "       (SELECT s.liked_count FROM monitor_snapshots s "
-        "        WHERE s.note_id=p.note_id ORDER BY s.captured_at DESC LIMIT 1) AS liked_count, "
+        "        WHERE s.note_id=p.note_id ORDER BY s.checked_at DESC LIMIT 1) AS liked_count, "
         "       (SELECT s.comment_count FROM monitor_snapshots s "
-        "        WHERE s.note_id=p.note_id ORDER BY s.captured_at DESC LIMIT 1) AS comment_count "
+        "        WHERE s.note_id=p.note_id ORDER BY s.checked_at DESC LIMIT 1) AS comment_count "
         "FROM monitor_posts p"
     ]
     where = ["p.is_active=1", "p.creator_id=?"]
@@ -2278,17 +2283,31 @@ _GROUP_COLUMNS = (
     "comments_alert_enabled, comments_threshold, "
     "message_prefix, template_likes, template_collects, template_comments, "
     "COALESCE(alert_rules,'') AS alert_rules, "
+    "COALESCE(platform,'') AS platform, "
     "is_builtin, user_id, created_at"
 )
 
 
-async def list_groups(user_id: Optional[int] = None) -> List[Dict]:
-    """内置分组对所有用户可见；自定义分组按 user_id 过滤。"""
+async def list_groups(
+    user_id: Optional[int] = None,
+    platform: Optional[str] = None,
+) -> List[Dict]:
+    """内置分组对所有用户可见；自定义分组按 user_id 过滤。
+
+    platform：'xhs' / 'douyin' / 'mp' → 只返回该平台或跨平台 (platform='') 的分组；
+              None → 返回所有平台分组（admin / 老接口）。
+    """
     sql = f"SELECT {_GROUP_COLUMNS} FROM monitor_groups"
+    where: list = []
     params: list = []
     if user_id is not None:
-        sql += " WHERE is_builtin=1 OR user_id=?"
+        where.append("(is_builtin=1 OR user_id=?)")
         params.append(user_id)
+    if platform:
+        where.append("(COALESCE(platform,'')='' OR platform=?)")
+        params.append(platform)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY is_builtin DESC, id"
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -2319,17 +2338,19 @@ async def create_group(
     user_id: Optional[int] = None,
     feishu_chat_id: str = "",
     feishu_webhook_url: str = "",
+    platform: str = "",
 ) -> int:
-    """创建分组。新版支持绑定飞书：
+    """创建分组。
       - feishu_chat_id  非空 → 内部群（应用机器人）
       - feishu_webhook_url 非空 → 外部群（自定义机器人 webhook）
       - 都为空 → 仅本地分组（不会触发告警推送）
+      - platform：'xhs' / 'douyin' / 'mp' → 平台专属；'' → 跨平台
     """
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO monitor_groups (name, user_id, feishu_chat_id, feishu_webhook_url) "
-            "VALUES (?, ?, ?, ?)",
-            (name, user_id, feishu_chat_id, feishu_webhook_url),
+            "INSERT INTO monitor_groups (name, user_id, feishu_chat_id, feishu_webhook_url, platform) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (name, user_id, feishu_chat_id, feishu_webhook_url, platform),
         )
         await db.commit()
         return cur.lastrowid

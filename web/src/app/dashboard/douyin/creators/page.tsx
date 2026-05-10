@@ -18,8 +18,9 @@ import { toastErr, toastOk } from "@/lib/toast";
 
 export default function DouyinCreatorsPage() {
   const { posts: rawPosts, isLoading: loading } = usePosts();
+  // 博主追新的帖子：creator_id 不为 null（add_post 时关联到 monitor_creators.id）
   const posts = (rawPosts as PostRow[]).filter(
-    (p) => p.platform === "douyin" && (p.group_name || "") === "我的关注"
+    (p) => p.platform === "douyin" && (p as any).creator_id != null
   );
   const { token } = useAuth();
 

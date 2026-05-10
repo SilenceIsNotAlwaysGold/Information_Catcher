@@ -51,6 +51,7 @@ type Post = {
   post_type: string; // legacy
   group_id: number | null;
   group_name: string | null;
+  creator_id?: number | null;
   last_fetch_status?: string;
   last_fetch_at?: string | null;
   fail_count?: number;
@@ -79,7 +80,8 @@ export default function XhsPostsPage() {
   const { data: me } = useMe();
   const isAdmin = me?.role === "admin";
   const { posts: rawPosts, isLoading } = usePosts();
-  const posts = (rawPosts as Post[]).filter(isXhs);
+  // 排除博主追新的帖子（有 creator_id），它们在「博主追新」板块单独展示
+  const posts = (rawPosts as Post[]).filter((p) => isXhs(p) && p.creator_id == null);
   const { alerts } = useAlerts(30);
   const { accounts } = useAccounts();
   const { groups } = useGroups();

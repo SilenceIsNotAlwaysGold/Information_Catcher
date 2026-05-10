@@ -63,7 +63,8 @@ export default function MpPostsPage() {
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 
   const { posts: rawPosts, isLoading } = usePosts();
-  const posts = (rawPosts as Post[]).filter((p) => p.platform === "mp");
+  // 排除博主追新的帖子（有 creator_id），它们在「博主追新」板块单独展示
+  const posts = (rawPosts as Post[]).filter((p) => p.platform === "mp" && (p as any).creator_id == null);
   const { groups } = useGroups();
   const [links, setLinks] = useState("");
   const [selectedGroupId, setSelectedGroupId] = useState<string>("");
