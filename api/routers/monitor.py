@@ -1479,14 +1479,48 @@ async def manual_trending_check(
     platform: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    # 普通用户：只跑自己的；admin：传 user_id=None 触发所有用户
+    """前置校验：失败原因直接返给用户，避免「已触发」但实际啥都没跑。"""
     target_uid = _scope_uid(current_user)
+    if target_uid is not None:
+        from ..services import auth_service
+        u = auth_service.get_user_by_id(target_uid) or {}
+        if not u.get("trending_enabled"):
+            raise HTTPException(
+                status_code=400,
+                detail="尚未启用关键词搜索。请先在「监控设置」打开「启用关键词搜索」开关。",
+            )
+        keywords = (u.get("trending_keywords") or "").strip()
+        if not keywords:
+            raise HTTPException(
+                status_code=400,
+                detail="还没有配置关键词。请先在「监控设置」填入要监控的关键词。",
+            )
+        # 渠道校验：扩展 / cookie 账号至少有一个
+        from ..services import extension_dispatcher
+        ext_online = extension_dispatcher.has_online_extension(target_uid)
+        # cookie 账号判定（共享池）
+        settings = await db.get_all_settings()
+        accounts = []
+        try:
+            from ..services.scheduler import _resolve_trending_accounts
+            accounts = await _resolve_trending_accounts(settings)
+        except Exception:
+            pass
+        if not ext_online and not accounts:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "无可用抓取通道。请确认 TrendPulse Helper 浏览器扩展已安装并连接服务器"
+                    "（点扩展图标看连接状态），且浏览器已登录小红书 / 抖音。"
+                ),
+            )
+
     background_tasks.add_task(
         sched.run_trending_monitor, platform=platform, user_id=target_uid,
     )
     return {
         "ok": True,
-        "message": "热门抓取任务已触发",
+        "message": "热门抓取任务已触发，请稍等几秒后刷新查看结果",
         "platform": platform or "all",
         "scope": "self" if target_uid is not None else "all_users",
     }

@@ -18,6 +18,7 @@ import { PlatformSubNav } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 import { TrendingSettingsButton } from "@/components/TrendingSettingsButton";
+import { proxyUrl } from "@/components/product-image/utils";
 import { PromptTemplatesButton } from "@/components/PromptTemplatesButton";
 import { toastOk, toastErr } from "@/lib/toast";
 
@@ -90,8 +91,28 @@ export default function DouyinTrendingPage() {
 
   const triggerCheck = async () => {
     setTriggering(true);
-    await fetch(API("/trending/check?platform=douyin"), { method: "POST", headers });
-    setTimeout(() => { setTriggering(false); load(); }, 4000);
+    const before = posts.length;
+    try {
+      await fetch(API("/trending/check?platform=douyin"), { method: "POST", headers });
+      // 扩展抓取需要 15-60 秒。每 5 秒 reload 让用户实时看到数据增长，
+      // 最多跑 60 秒。结束后再 reload 一次保底。
+      for (let i = 0; i < 12; i++) {
+        await new Promise((r) => setTimeout(r, 5000));
+        await load();
+      }
+    } finally {
+      // 最后强制再 reload 一次，确保看到的是最新数据
+      await load();
+      setTriggering(false);
+      // 用最新拉到的 posts 数对比 before 给个反馈
+      const r = await fetch(API("/trending?limit=200&platform=douyin"), { headers });
+      if (r.ok) {
+        const d = await r.json();
+        const delta = (d.posts?.length ?? 0) - before;
+        if (delta > 0) toastOk(`抓取完成，新增 ${delta} 条`);
+        else toastOk("抓取完成（无新增）");
+      }
+    }
   };
 
   const backfillMedia = async () => {
@@ -417,7 +438,7 @@ export default function DouyinTrendingPage() {
                         onClick={() => openDetail(p)}
                       >
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={p.cover_url} alt="cover"
+                        <img src={proxyUrl(p.cover_url)} alt="cover"
                           referrerPolicy="no-referrer"
                           className="w-full h-full object-cover" />
                         <span className="absolute right-0 bottom-0 bg-black/60 text-white text-[10px] px-1 rounded-tl">
@@ -517,7 +538,7 @@ export default function DouyinTrendingPage() {
                   />
                 ) : active.cover_url ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={active.cover_url} alt="cover"
+                  <img src={proxyUrl(active.cover_url)} alt="cover"
                     referrerPolicy="no-referrer"
                     className="w-full max-h-64 object-contain rounded" />
                 ) : null}

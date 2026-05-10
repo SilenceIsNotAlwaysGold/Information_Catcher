@@ -18,6 +18,7 @@ import { PlatformSubNav } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 import { TrendingSettingsButton } from "@/components/TrendingSettingsButton";
+import { proxyUrl } from "@/components/product-image/utils";
 import { PromptTemplatesButton } from "@/components/PromptTemplatesButton";
 import { toastOk, toastErr } from "@/lib/toast";
 
@@ -120,8 +121,26 @@ export default function XhsTrendingPage() {
 
   const triggerCheck = async () => {
     setTriggering(true);
-    await fetch(API("/trending/check"), { method: "POST", headers });
-    setTimeout(() => { setTriggering(false); load(); }, 4000);
+    const before = posts.length;
+    try {
+      // 必须带 platform=xhs，否则 scheduler 会同时跑 xhs+douyin
+      await fetch(API("/trending/check?platform=xhs"), { method: "POST", headers });
+      // 扩展抓取需要 15-60 秒。每 5 秒 reload 让用户实时看到数据增长，最多 60 秒
+      for (let i = 0; i < 12; i++) {
+        await new Promise((r) => setTimeout(r, 5000));
+        await load();
+      }
+    } finally {
+      await load();
+      setTriggering(false);
+      const r = await fetch(API("/trending?limit=200&platform=xhs"), { headers });
+      if (r.ok) {
+        const d = await r.json();
+        const delta = (d.posts?.length ?? 0) - before;
+        if (delta > 0) toastOk(`抓取完成，新增 ${delta} 条`);
+        else toastOk("抓取完成（无新增）");
+      }
+    }
   };
 
   const clearAll = async () => {
@@ -433,7 +452,7 @@ export default function XhsTrendingPage() {
                           onClick={() => openDetail(p)}
                         >
                           {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={cover} alt="cover"
+                          <img src={proxyUrl(cover)} alt="cover"
                             referrerPolicy="no-referrer"
                             className="w-full h-full object-cover" />
                           {p.note_type === "video" && (
@@ -532,17 +551,20 @@ export default function XhsTrendingPage() {
                     />
                   ) : imgs.length > 0 ? (
                     <div className="grid grid-cols-3 gap-2">
-                      {imgs.map((url, i) => (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img key={i} src={url} alt={`img-${i}`}
-                          referrerPolicy="no-referrer"
-                          className="w-full h-32 object-cover rounded cursor-pointer hover:opacity-80"
-                          onClick={() => window.open(url, "_blank")} />
-                      ))}
+                      {imgs.map((rawUrl, i) => {
+                        const url = proxyUrl(rawUrl);
+                        return (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img key={i} src={url} alt={`img-${i}`}
+                            referrerPolicy="no-referrer"
+                            className="w-full h-32 object-cover rounded cursor-pointer hover:opacity-80"
+                            onClick={() => window.open(url, "_blank")} />
+                        );
+                      })}
                     </div>
                   ) : active.cover_url ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={active.cover_url} alt="cover"
+                    <img src={proxyUrl(active.cover_url)} alt="cover"
                       referrerPolicy="no-referrer"
                       className="w-full max-h-64 object-contain rounded" />
                   ) : null}
