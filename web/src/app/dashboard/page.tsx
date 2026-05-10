@@ -21,7 +21,6 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { UpdateNoticeBanner } from "@/components/UpdateNoticeBanner";
 import { CardSkeleton } from "@/components/CardSkeleton";
 import { EmptyState } from "@/components/EmptyState";
 import { OnboardingCard } from "@/components/OnboardingCard";
@@ -151,8 +150,7 @@ export default function DashboardPage() {
   if (isLoading || (!data && !error)) {
     return (
       <div className="p-6 space-y-6 max-w-6xl">
-        <UpdateNoticeBanner />
-        <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold">运营概览</h1>
             <p className="text-sm text-default-500 mt-0.5">加载中...</p>
@@ -168,8 +166,7 @@ export default function DashboardPage() {
   if (error || !data) {
     return (
       <div className="p-6 space-y-6 max-w-6xl">
-        <UpdateNoticeBanner />
-        <Card className="border border-divider">
+          <Card className="border border-divider">
           <CardBody>
             <EmptyState
               icon={AlertTriangle}
@@ -237,7 +234,6 @@ export default function DashboardPage() {
 
   return (
     <div className="p-6 space-y-6 max-w-6xl">
-      <UpdateNoticeBanner />
 
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
