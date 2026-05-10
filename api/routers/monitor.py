@@ -728,6 +728,7 @@ async def check_creator(
             user_id=user_id,
             platform=platform_name,
             creator_id=creator_id,   # 关联到 monitor_creators.id（CreatorsCard 折叠列表用）
+            author=p.get("creator_name") or creator.get("creator_name") or "",
         )
         if is_new_for_unread:
             new_count += 1
@@ -924,13 +925,19 @@ async def list_alerts(limit: int = 50, current_user: dict = Depends(get_current_
 
 @router.delete("/alerts", summary="清空告警记录")
 async def clear_all_alerts(current_user: dict = Depends(get_current_user)):
-    deleted = await db.clear_alerts(user_id=_scope_uid(current_user))
+    # admin 看到的是全平台 alerts（list_alerts 里 admin 走 user_id=None），
+    # 所以清空也走 user_id=None；普通用户只清自己的。否则 admin 看见的删不掉。
+    is_admin = (current_user.get("role") or "user") == "admin"
+    uid = None if is_admin else _scope_uid(current_user)
+    deleted = await db.clear_alerts(user_id=uid)
     return {"ok": True, "deleted": deleted}
 
 
 @router.delete("/alerts/{alert_id}", summary="删除单条告警")
 async def remove_alert(alert_id: int, current_user: dict = Depends(get_current_user)):
-    await db.delete_alert(alert_id, user_id=_scope_uid(current_user))
+    is_admin = (current_user.get("role") or "user") == "admin"
+    uid = None if is_admin else _scope_uid(current_user)
+    await db.delete_alert(alert_id, user_id=uid)
     return {"ok": True}
 
 

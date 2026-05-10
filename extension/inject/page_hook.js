@@ -15,6 +15,41 @@
   if (window.__PULSE_HOOKED__) return;
   window.__PULSE_HOOKED__ = true;
 
+  // ──── 后台 tab 节流绕过 ─────────────────────────────────────────────
+  // 扩展用 chrome.tabs.create({active:false}) 开背景 tab，
+  // 浏览器把 document.visibilityState 设为 'hidden' / document.hidden=true。
+  // 小红书 / 抖音的 SPA 在 hidden 状态下会跳过初始数据请求（节能），
+  // 导致 user_posted / search/notes 根本不发，hook 拦不到任何东西。
+  // 这里在 document_start 最早期 override 这两个属性 + 屏蔽 visibilitychange，
+  // 让 SPA 以为页面始终可见。
+  try {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true, get: () => "visible",
+    });
+    Object.defineProperty(document, "hidden", {
+      configurable: true, get: () => false,
+    });
+    Object.defineProperty(document, "webkitVisibilityState", {
+      configurable: true, get: () => "visible",
+    });
+    Object.defineProperty(document, "webkitHidden", {
+      configurable: true, get: () => false,
+    });
+    // 屏蔽 visibilitychange 事件（避免某些 SPA 监听到一次 hidden→visible 切换乱了状态）
+    const _origAdd = EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener = function (type, listener, opts) {
+      if (type === "visibilitychange" || type === "webkitvisibilitychange") {
+        return; // 吞掉
+      }
+      return _origAdd.call(this, type, listener, opts);
+    };
+    // hasFocus 也撒谎为 true（部分 SPA 用这个判断）
+    document.hasFocus = () => true;
+    console.log("[pulse-hook] visibility override installed");
+  } catch (e) {
+    console.warn("[pulse-hook] visibility override failed:", e);
+  }
+
   let captureOn = false;
   let urlMatcher = null; // (url:string) => boolean
   const collected = [];
@@ -132,6 +167,16 @@
     } else if (m.action === "drain_urls") {
       // 诊断：把 hook 看到过的所有 URL 吐回 content
       window.postMessage({ __pulse: "seen_urls", urls: seenUrls.slice() }, "*");
+    } else if (m.action === "read_initial_state") {
+      // 主世界读 window.__INITIAL_STATE__，剪裁 user 子树（避免 1MB+ 巨对象跨 world）
+      let payload = null;
+      try {
+        const s = window.__INITIAL_STATE__ || {};
+        // 小红书博主主页 SSR 把博主信息放在 state.user 下；不同版本路径有差异
+        // 整个 user 子树通常 < 50KB，安全可传
+        payload = s.user || s.userPage || null;
+      } catch {}
+      window.postMessage({ __pulse: "initial_state", data: payload }, "*");
     }
   });
 

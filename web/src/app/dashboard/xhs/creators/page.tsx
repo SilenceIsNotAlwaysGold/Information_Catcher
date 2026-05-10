@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import { usePosts, mutatePosts } from "@/lib/useApi";
 import Link from "next/link";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
@@ -9,7 +10,7 @@ import {
 import { Chip } from "@nextui-org/chip";
 import { Button } from "@nextui-org/button";
 import { Tooltip } from "@nextui-org/tooltip";
-import { BarChart2, ExternalLink, Users, Trash2 } from "lucide-react";
+import { BarChart2, ExternalLink, Users, Trash2, X as XIcon } from "lucide-react";
 import { PlatformSubNav, CreatorsCard } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
@@ -24,6 +25,7 @@ type Post = {
   title: string;
   note_url: string;
   account_name?: string | null;
+  author?: string | null;
   liked_count?: number | null;
   collected_count?: number | null;
   comment_count?: number | null;
@@ -38,8 +40,18 @@ const isXhs = (p: Post) => !p.platform || p.platform === "xhs";
 export default function XhsCreatorsPage() {
   const { posts: rawPosts, isLoading: loading } = usePosts();
   // 博主追新的帖子：creator_id 不为 null（add_post 时关联到 monitor_creators.id）
-  // 之前用 group_name === "我的关注" 过滤需要分组提前存在；用 creator_id 更稳健
-  const posts = (rawPosts as Post[]).filter((p) => isXhs(p) && p.creator_id != null);
+  const allPosts = (rawPosts as Post[]).filter((p) => isXhs(p) && p.creator_id != null);
+
+  // 按作者筛选
+  const [authorFilter, setAuthorFilter] = useState<string>("");
+  const authorOptions = useMemo(() => {
+    const s = new Set<string>();
+    for (const p of allPosts) if (p.author) s.add(p.author);
+    return Array.from(s).sort();
+  }, [allPosts]);
+  const posts = authorFilter
+    ? allPosts.filter((p) => (p.author || "") === authorFilter)
+    : allPosts;
   const { token } = useAuth();
 
   const handleDelete = async (note_id: string, title: string) => {
@@ -69,13 +81,33 @@ export default function XhsCreatorsPage() {
       <CreatorsCard platform="xhs" />
 
       <Card>
-        <CardHeader className="flex justify-between items-center">
+        <CardHeader className="flex justify-between items-center gap-3 flex-wrap">
           <div>
             <p className="text-sm font-medium">已入库帖子（来自博主追新）</p>
             <p className="text-xs text-default-400">
-              下方列出关联到任一博主的小红书帖子，共 {posts.length} 条
+              共 {allPosts.length} 条{authorFilter && `（筛选后 ${posts.length} 条）`}
             </p>
           </div>
+          {authorOptions.length > 0 && (
+            <div className="flex items-center gap-2">
+              <select
+                className="border border-divider rounded-md px-2 h-8 text-xs bg-background"
+                value={authorFilter}
+                onChange={(e) => setAuthorFilter(e.target.value)}
+              >
+                <option value="">全部博主</option>
+                {authorOptions.map((a) => (
+                  <option key={a} value={a}>{a}</option>
+                ))}
+              </select>
+              {authorFilter && (
+                <Button size="sm" variant="light" isIconOnly
+                  onPress={() => setAuthorFilter("")}>
+                  <XIcon size={14} />
+                </Button>
+              )}
+            </div>
+          )}
         </CardHeader>
         <CardBody className="p-0">
           {loading ? (
@@ -110,7 +142,7 @@ export default function XhsCreatorsPage() {
                     </div>
                   </TableCell>
                   <TableCell>
-                    <Chip size="sm" variant="flat">{p.account_name ?? "—"}</Chip>
+                    <Chip size="sm" variant="flat" color="secondary">{p.author || p.account_name || "—"}</Chip>
                   </TableCell>
                   <TableCell>{p.liked_count ?? "—"}</TableCell>
                   <TableCell>{p.collected_count ?? "—"}</TableCell>

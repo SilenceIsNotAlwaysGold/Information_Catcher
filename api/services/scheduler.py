@@ -692,6 +692,7 @@ async def run_creator_check():
                     user_id=uid,
                     platform=platform_name,
                     creator_id=creator["id"],   # 关联到 monitor_creators.id
+                    author=p.get("creator_name") or creator.get("creator_name") or "",
                 )
                 added += 1
                 new_posts.append(p)

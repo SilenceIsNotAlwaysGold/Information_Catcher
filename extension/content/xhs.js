@@ -86,28 +86,28 @@ function stopAutoScroll() {
   _autoScrollTimer = null;
 }
 
-// SSR 兜底：从 window.__INITIAL_STATE__ 解析首屏笔记数据
-// 小红书首屏结果是 SSR 嵌进 HTML 的，不发 XHR；只有翻页才发 search/notes。
-// 关键词结果少（≤1 屏）时扩展只能拿首屏 SSR。
-function extractInitialStateNotes() {
-  try {
-    const state = window.__INITIAL_STATE__;
-    if (!state) return [];
-    // 路径：state.search.feeds._rawValue / state.search.feed.feeds 等多种变体
-    const candidates = [
-      state?.search?.feeds?._rawValue,
-      state?.search?.feed?.feeds,
-      state?.search?.searchResults,
-      state?.search?.notes?._rawValue,
-    ];
-    for (const c of candidates) {
-      if (Array.isArray(c) && c.length > 0) {
-        return c;
-      }
-    }
-  } catch {}
-  return [];
+// SSR 兜底：window.__INITIAL_STATE__ 在 main world，content script 在 isolated world
+// 拿不到。让 page_hook 中转读出 state.user 子树。
+let _initialStateResolver = null;
+window.addEventListener("message", (e) => {
+  if (e.source !== window) return;
+  if (e.data?.__pulse === "initial_state" && _initialStateResolver) {
+    _initialStateResolver(e.data.data || null);
+    _initialStateResolver = null;
+  }
+});
+async function readInitialStateUser(timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    _initialStateResolver = resolve;
+    window.postMessage({ __pulse: "control", action: "read_initial_state" }, "*");
+    setTimeout(() => {
+      if (_initialStateResolver) { _initialStateResolver(null); _initialStateResolver = null; }
+    }, timeoutMs);
+  });
 }
+
+// 旧 SSR helper：search 页 first screen 兜底（保留以备将来）
+function extractInitialStateNotes() { return []; }
 
 async function captureFor(urlPattern, timeoutMs, minHits = 1) {
   startCapture(urlPattern);
@@ -178,5 +178,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     window.scrollBy(0, msg.dy || 800);
     sendResponse({ ok: true });
     return false;
+  }
+  if (msg.action === "get_initial_state") {
+    // background 通过 content 转发到 main world 拿 SSR 数据
+    readInitialStateUser(msg.timeout_ms || 1500).then((data) => sendResponse({ data }));
+    return true; // async
   }
 });

@@ -638,21 +638,119 @@ async function runXhsCreatorPosts(payload) {
     });
     let finalUrl = "";
     try { finalUrl = (await chrome.tabs.get(tabId)).url || ""; } catch {}
-    if (!resp || (!resp.ok && (resp.hits?.length || 0) === 0)) {
+    let { posts, profile } = extractXhsCreatorPosts(resp?.hits || []);
+    // XHR 完全没拿到时不要立刻 throw —— 博主主页大多 SSR 不发 user_posted XHR，
+    // 先尝试从 window.__INITIAL_STATE__ 读 SSR 数据，能拿到就当成功。
+    // SSR 兜底：博主主页大多 SSR，user/otherinfo XHR 不一定发。
+    // 让 content 透 window.__INITIAL_STATE__.user 出来，从中补 profile + 缺封面的 posts。
+    try {
+      const ssrResp = await chrome.tabs.sendMessage(tabId, {
+        from: "bg", action: "get_initial_state", timeout_ms: 1500,
+      });
+      const ssrUser = ssrResp?.data;
+      if (ssrUser) {
+        const ssr = extractXhsCreatorFromSsr(ssrUser);
+        // profile：缺什么补什么（XHR 拿到的优先）
+        profile = {
+          ...ssr.profile,
+          ...Object.fromEntries(Object.entries(profile || {}).filter(([, v]) => v)),
+        };
+        // posts：以 XHR 抓到的为主；XHR 一无所获时用 SSR；
+        // 都有时按 post_id 合并，SSR 字段补缺（封面/标题）
+        if (ssr.posts.length) {
+          if (posts.length === 0) {
+            posts = ssr.posts;
+          } else {
+            const byId = new Map(posts.map((p) => [p.post_id, p]));
+            for (const sp of ssr.posts) {
+              const ex = byId.get(sp.post_id);
+              if (!ex) {
+                byId.set(sp.post_id, sp);
+              } else {
+                if (!ex.cover_url && sp.cover_url) ex.cover_url = sp.cover_url;
+                if (!ex.title && sp.title) ex.title = sp.title;
+                if (!ex.liked_count && sp.liked_count) ex.liked_count = sp.liked_count;
+              }
+            }
+            posts = Array.from(byId.values());
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[pulse] xhs SSR fallback failed:", e?.message || e);
+    }
+    // XHR + SSR 都拿不到任何东西才算失败
+    if (posts.length === 0 && !(profile && profile.creator_name)) {
       const code = classifyFailure(resp, finalUrl);
       const e = new Error(code);
       e.debug = { seen_urls: resp?.seen_urls || [], final_tab_url: finalUrl };
       throw e;
     }
-    const { posts, profile } = extractXhsCreatorPosts(resp.hits || []);
     return {
-      url, raw_hits: (resp.hits || []).length, total: posts.length, posts,
+      url, raw_hits: (resp?.hits || []).length, total: posts.length, posts,
       profile,
       seen_urls_sample: (resp.seen_urls || []).slice(-30),
     };
   } finally {
     await closeWorkerWindow(windowId);
   }
+}
+
+// 从 window.__INITIAL_STATE__.user 子树解析博主 profile + 笔记列表
+// 小红书结构（不同版本路径有差异）：
+//   user.userPageData.basicInfo: { nickname, imageb, desc, ... }
+//   user.userPageData.interactions: [{ type:"fans"|"follows"|"interaction", count:"1.2万" }]
+//   user.notes: [[{id, displayTitle, cover:{urlDefault}, interactInfo:{likedCount}, ...}, ...], ...]
+function extractXhsCreatorFromSsr(state) {
+  const out = { profile: {}, posts: [] };
+  if (!state || typeof state !== "object") return out;
+  // 1. 找 basicInfo / interactions
+  const upd = state.userPageData || state;
+  const basic = upd.basicInfo || state.basicInfo || {};
+  const interactions = upd.interactions || state.interactions || basic.interactions || [];
+  const interMap = {};
+  for (const it of interactions) {
+    if (it && it.type) interMap[String(it.type).toLowerCase()] = it.count;
+  }
+  out.profile = {
+    creator_name: basic.nickname || state.nickname || "",
+    avatar_url: basic.imageb || basic.images?.[0] || basic.avatar || state.imageb || "",
+    followers_count: parseCount(interMap.fans || basic.fans),
+    following_count: parseCount(interMap.follows || basic.follows),
+    likes_count: parseCount(interMap.interaction || basic.interactions || basic.interactions_count),
+    notes_count: parseCount(basic.notes || upd.notes_count || state.notesNum),
+    desc: (basic.desc || state.desc || "").slice(0, 200),
+  };
+  // 2. 笔记列表（二维或一维）
+  const candidates = [upd.notes, upd.feeds, state.notes, state.feeds];
+  let flat = [];
+  for (const arr of candidates) {
+    if (!arr) continue;
+    if (Array.isArray(arr)) {
+      for (const x of arr) {
+        if (Array.isArray(x)) flat.push(...x);
+        else if (x && typeof x === "object") flat.push(x);
+      }
+    }
+    if (flat.length) break;
+  }
+  for (const n of flat) {
+    const noteId = n.id || n.noteId || n.note_id;
+    if (!noteId) continue;
+    const cover = n.cover?.urlDefault || n.cover?.url_default || n.cover?.url || n.coverUrl || "";
+    const inter = n.interactInfo || n.interact_info || {};
+    out.posts.push({
+      post_id: String(noteId),
+      title: (n.displayTitle || n.title || "").slice(0, 200),
+      url: `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=${n.xsecToken || n.xsec_token || ""}`,
+      xsec_token: n.xsecToken || n.xsec_token || "",
+      cover_url: cover,
+      liked_count: parseCount(inter.likedCount || inter.liked_count),
+      note_type: n.type === "video" ? "video" : "normal",
+      creator_name: out.profile.creator_name,
+    });
+  }
+  return out;
 }
 
 function extractXhsCreatorPosts(hits) {

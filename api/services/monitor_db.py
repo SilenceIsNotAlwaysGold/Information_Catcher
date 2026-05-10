@@ -1223,11 +1223,13 @@ async def add_post(
     user_id: Optional[int] = None,
     platform: str = "xhs",
     creator_id: Optional[int] = None,
+    author: Optional[str] = None,
 ) -> int:
     """添加监控帖子。多租户场景下同一 note_id 可被多个用户独立添加。
 
     note_id 字段在不同平台语义不同（xhs note_id / douyin aweme_id / 公众号文章 mid+idx）。
     creator_id：来自博主追新时关联到 monitor_creators.id；普通监控为 NULL。
+    author：博主名/作者名（博主追新时由 creator_name 填入，监控帖子可能空）。
     """
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
@@ -1238,24 +1240,26 @@ async def add_post(
         row = await cur.fetchone()
         if row:
             existing_id = row[0]
+            # author / creator_id 用 COALESCE 仅在原值为 NULL/空时回填，避免覆盖已有数据
             await db.execute(
                 "UPDATE monitor_posts SET title=?, short_url=?, note_url=?, "
                 "xsec_token=?, xsec_source=?, account_id=?, post_type=?, "
                 "group_id=?, platform=?, "
                 "creator_id=COALESCE(?, creator_id), "
+                "author=CASE WHEN author IS NULL OR author='' THEN COALESCE(?, author) ELSE author END, "
                 "is_active=1 WHERE id=?",
                 (title, short_url, note_url, xsec_token, xsec_source,
-                 account_id, post_type, group_id, platform, creator_id, existing_id),
+                 account_id, post_type, group_id, platform, creator_id, author, existing_id),
             )
             await db.commit()
             return existing_id
         cur = await db.execute(
             """INSERT INTO monitor_posts
                (note_id, title, short_url, note_url, xsec_token, xsec_source,
-                account_id, post_type, group_id, user_id, platform, creator_id, is_active)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+                account_id, post_type, group_id, user_id, platform, creator_id, author, is_active)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
             (note_id, title, short_url, note_url, xsec_token, xsec_source,
-             account_id, post_type, group_id, user_id, platform, creator_id),
+             account_id, post_type, group_id, user_id, platform, creator_id, author or ""),
         )
         await db.commit()
         return cur.lastrowid
