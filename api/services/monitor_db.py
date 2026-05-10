@@ -1,7 +1,7 @@
 import aiosqlite
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 DB_PATH = Path(__file__).parent.parent.parent / "database" / "monitor.db"
 
