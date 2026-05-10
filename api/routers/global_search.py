@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""全局搜索：跨三平台搜帖子/作者/直播间。
+"""全局搜索：跨三平台搜帖子/作者。
 
-路由前缀 /monitor/search。前端 ⌘K 弹窗调用，结果分三段返回：
+路由前缀 /monitor/search。前端 ⌘K 弹窗调用，结果分两段返回：
 - posts:    全文搜索（title + summary，复用 db.search_posts，已支持多关键词 LIKE）
 - creators: list_creators 后内存过滤 name/url（数据量小，<10k）
-- lives:    list_lives 后内存过滤 streamer_name/room_url
 """
 from typing import Optional
 
@@ -27,7 +26,7 @@ def _post_url(platform: str, note_id: str, fallback: Optional[str]) -> str:
     return fallback or ""
 
 
-@router.get("", summary="全局搜索：帖子 + 作者 + 直播间")
+@router.get("", summary="全局搜索：帖子 + 作者")
 async def global_search(
     q: str = "",
     limit: int = 20,
@@ -37,7 +36,7 @@ async def global_search(
     limit = max(1, min(int(limit or 20), 50))
 
     if len(q) < 1:
-        return {"posts": [], "creators": [], "lives": []}
+        return {"posts": [], "creators": [], "lives": []}  # lives 留空兼容旧前端
 
     uid = _scope_uid(current_user)
     q_lower = q.lower()
@@ -75,20 +74,5 @@ async def global_search(
             if len(creators) >= limit:
                 break
 
-    # 直播间：同样全捞内存过滤
-    live_rows = await db.list_lives(user_id=uid)
-    lives = []
-    for r in live_rows:
-        name = (r.get("streamer_name") or "").lower()
-        url = (r.get("room_url") or "").lower()
-        if q_lower in name or q_lower in url:
-            lives.append({
-                "platform": r.get("platform") or "",
-                "id": int(r.get("id") or 0),
-                "streamer_name": r.get("streamer_name") or "",
-                "url": r.get("room_url") or "",
-            })
-            if len(lives) >= limit:
-                break
-
-    return {"posts": posts, "creators": creators, "lives": lives}
+    # 直播间监控已下线，lives 字段返回空数组兼容旧前端
+    return {"posts": posts, "creators": creators, "lives": []}

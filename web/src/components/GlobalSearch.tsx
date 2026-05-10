@@ -23,7 +23,7 @@ import {
 import { Input } from "@nextui-org/input";
 import { Chip } from "@nextui-org/chip";
 import { Spinner } from "@nextui-org/spinner";
-import { ExternalLink, Search, FileText, User as UserIcon, Radio } from "lucide-react";
+import { ExternalLink, Search, FileText, User as UserIcon } from "lucide-react";
 
 import { useAuth } from "@/contexts/AuthContext";
 import { PLATFORM_LABEL, PLATFORM_COLOR, type PlatformKey } from "@/components/platform";
@@ -48,20 +48,12 @@ type CreatorHit = {
   url: string;
 };
 
-type LiveHit = {
-  platform: string;
-  id: number;
-  streamer_name: string;
-  url: string;
-};
-
 type SearchResp = {
   posts: PostHit[];
   creators: CreatorHit[];
-  lives: LiveHit[];
 };
 
-const EMPTY_RESP: SearchResp = { posts: [], creators: [], lives: [] };
+const EMPTY_RESP: SearchResp = { posts: [], creators: [] };
 const SECTION_LIMIT = 5;
 
 // 按平台决定点击进入的内部路由（保持各平台一致：进列表页）
@@ -80,11 +72,6 @@ function creatorInternalHref(platform: string): string {
   if (platform === "douyin") return "/dashboard/douyin/creators/";
   if (platform === "mp") return "/dashboard/mp/creators/";
   return "/dashboard";
-}
-
-function liveInternalHref(_platform: string): string {
-  // 直播间统一在监控设置页（lives 暂无单独路由）
-  return "/dashboard/monitor/";
 }
 
 function platformChip(platform: string) {
@@ -164,7 +151,6 @@ export function GlobalSearch({
           setData({
             posts: j.posts ?? [],
             creators: j.creators ?? [],
-            lives: j.lives ?? [],
           });
         }
       } catch (e: any) {
@@ -191,7 +177,7 @@ export function GlobalSearch({
     [router, onClose],
   );
 
-  const totalCount = data.posts.length + data.creators.length + data.lives.length;
+  const totalCount = data.posts.length + data.creators.length;
   const trimmed = q.trim();
   const showEmptyHint = trimmed.length === 0;
   const showNoResult = !loading && trimmed.length > 0 && totalCount === 0;
@@ -220,7 +206,7 @@ export function GlobalSearch({
                   variant="flat"
                   value={q}
                   onValueChange={setQ}
-                  placeholder="搜索三平台帖子、作者、直播间…  ⌘K"
+                  placeholder="搜索三平台帖子、作者…  ⌘K"
                   startContent={<Search size={18} className="text-default-400" />}
                   endContent={loading ? <Spinner size="sm" /> : null}
                   classNames={{
@@ -289,26 +275,6 @@ export function GlobalSearch({
                       )}
                     />
 
-                    <ResultSection
-                      icon={<Radio size={14} />}
-                      label="直播间"
-                      items={data.lives.slice(0, SECTION_LIMIT)}
-                      total={data.lives.length}
-                      renderItem={(l) => (
-                        <ResultRow
-                          key={`l-${l.platform}-${l.id}`}
-                          platform={l.platform}
-                          title={l.streamer_name || l.url}
-                          subtitle={
-                            <span className="text-xs text-default-400 truncate block">
-                              {l.url}
-                            </span>
-                          }
-                          externalUrl={l.url}
-                          onClick={() => goInternal(liveInternalHref(l.platform))}
-                        />
-                      )}
-                    />
                   </div>
                 )}
               </div>

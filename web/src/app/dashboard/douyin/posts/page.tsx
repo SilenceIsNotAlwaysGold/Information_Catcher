@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { usePosts, mutatePosts, useLives, mutateLives, useMe, useGroups } from "@/lib/useApi";
+import { usePosts, mutatePosts, useMe, useGroups } from "@/lib/useApi";
 import dynamic from "next/dynamic";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
@@ -12,7 +12,7 @@ import {
 } from "@nextui-org/table";
 import { useDisclosure } from "@nextui-org/modal";
 import { Tooltip } from "@nextui-org/tooltip";
-import { Plus, RefreshCw, Trash2, Download, Radio, FileText } from "lucide-react";
+import { Plus, RefreshCw, Trash2, Download, FileText } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
 import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
@@ -22,9 +22,8 @@ import { TableSkeleton } from "@/components/TableSkeleton";
 import { toastOk, toastErr } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
 
-// 添加视频 / 订阅直播 Modal —— 首屏不需要，懒加载
+// 添加视频 Modal —— 首屏不需要，懒加载
 const AddDouyinPostsModal = dynamic(() => import("./_modals/AddDouyinPostsModal"), { ssr: false });
-const SubscribeLiveModal = dynamic(() => import("./_modals/SubscribeLiveModal"), { ssr: false });
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -42,16 +41,6 @@ type Post = {
   tags?: string;
   author?: string;
   owner_username?: string;
-};
-
-type Live = {
-  id: number;
-  room_url: string;
-  streamer_name?: string;
-  online_alert_threshold?: number;
-  last_online?: number | null;
-  last_check_at?: string | null;
-  room_id?: string | null;
 };
 
 function parseTags(s?: string): string[] {
@@ -160,67 +149,7 @@ export default function DouyinPostsPage() {
     return <Chip size="sm" variant="flat">未检测</Chip>;
   };
 
-  // ── 直播订阅 ──────────────────────────────────────────────────
-  const { lives: rawLives, isLoading: livesLoading } = useLives();
-  const lives = (rawLives as Live[]);
-  const liveModal = useDisclosure();
-  const [liveRoomUrl, setLiveRoomUrl] = useState("");
-  const [liveStreamer, setLiveStreamer] = useState("");
-  const [liveThreshold, setLiveThreshold] = useState("");
-  const [liveBusy, setLiveBusy] = useState(false);
-  const [liveError, setLiveError] = useState("");
-
-  const submitLive = async () => {
-    setLiveError("");
-    if (!liveRoomUrl.trim()) { setLiveError("请填写直播间 URL"); return; }
-    setLiveBusy(true);
-    try {
-      const r = await fetch(API("/lives"), {
-        method: "POST", headers,
-        body: JSON.stringify({
-          room_url: liveRoomUrl.trim(),
-          streamer_name: liveStreamer.trim() || undefined,
-          online_alert_threshold: liveThreshold ? Number(liveThreshold) : 0,
-          platform: "douyin",
-        }),
-      });
-      if (!r.ok) {
-        const j = await r.json().catch(() => ({}));
-        setLiveError(j.detail || "添加失败");
-        return;
-      }
-      setLiveRoomUrl(""); setLiveStreamer(""); setLiveThreshold("");
-      liveModal.onClose();
-      await mutateLives();
-    } finally {
-      setLiveBusy(false);
-    }
-  };
-
-  const deleteLive = async (id: number) => {
-    const ok = await confirmDialog({
-      title: "取消直播订阅",
-      content: "取消该直播订阅？",
-      confirmText: "取消订阅",
-      cancelText: "保留",
-      danger: true,
-    });
-    if (!ok) return;
-    await fetch(API(`/lives/${id}`), { method: "DELETE", headers });
-    await mutateLives();
-  };
-
-  const checkLive = async (id: number) => {
-    const r = await fetch(API(`/lives/${id}/check`), { method: "POST", headers });
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      toastErr(`抓取失败：${j.detail || "未知错误"}`);
-      return;
-    }
-    const d = await r.json();
-    toastOk(`当前在线：${d.state?.online ?? "—"}`);
-    await mutateLives();
-  };
+  // 直播订阅功能已下线（2026-05-10）
 
   return (
     <div className="p-6 space-y-4 max-w-6xl">
@@ -373,91 +302,6 @@ export default function DouyinPostsPage() {
         </CardBody>
       </Card>
 
-      {/* ── 直播订阅（抖音特有） ─────────────────────────── */}
-      <Card>
-        <CardHeader className="flex justify-between items-center">
-          <div className="flex items-center gap-2">
-            <Radio size={16} className="text-danger" />
-            <div>
-              <p className="text-sm font-medium">直播订阅</p>
-              <p className="text-xs text-default-400">已订阅 {lives.length} 个直播间，定时拉取在线人数与礼物榜</p>
-            </div>
-          </div>
-          <Button size="sm" color="danger" variant="flat" startContent={<Plus size={14} />}
-            onPress={() => { setLiveError(""); liveModal.onOpen(); }}>
-            订阅直播间
-          </Button>
-        </CardHeader>
-        <CardBody className="p-0">
-          {livesLoading ? (
-            <TableSkeleton rows={3} cols={5} />
-          ) : lives.length === 0 ? (
-            <EmptyState
-              icon={Radio}
-              title="还没有订阅直播间"
-              hint="支持 https://live.douyin.com/{room_id}，订阅后会定时拉取在线人数与礼物榜。"
-              action={
-                <Button color="danger" variant="flat" startContent={<Plus size={14} />}
-                  onPress={() => { setLiveError(""); liveModal.onOpen(); }}>
-                  订阅直播间
-                </Button>
-              }
-            />
-          ) : (
-          <Table aria-label="douyin-lives" removeWrapper>
-            <TableHeader>
-              <TableColumn>主播 / 房间</TableColumn>
-              <TableColumn>在线人数</TableColumn>
-              <TableColumn>预警阈值</TableColumn>
-              <TableColumn>最后检测</TableColumn>
-              <TableColumn>操作</TableColumn>
-            </TableHeader>
-            <TableBody>
-              {lives.map((l) => (
-                <TableRow key={l.id}>
-                  <TableCell>
-                    <div className="flex flex-col">
-                      <a href={l.room_url} target="_blank" rel="noreferrer"
-                        className="text-primary text-sm hover:underline truncate max-w-sm">
-                        {l.streamer_name || l.room_id || l.room_url}
-                      </a>
-                      <span className="text-xs text-default-400">{l.room_url}</span>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <span className="text-sm">{l.last_online ?? "—"}</span>
-                  </TableCell>
-                  <TableCell>
-                    <span className="text-xs text-default-400">{l.online_alert_threshold || "—"}</span>
-                  </TableCell>
-                  <TableCell>
-                    <span className="text-xs text-default-400">
-                      {l.last_check_at ? l.last_check_at.slice(0, 16) : "待检测"}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex gap-1">
-                      <Tooltip content="立即拉取">
-                        <Button isIconOnly size="sm" variant="light" onPress={() => checkLive(l.id)}>
-                          <RefreshCw size={14} />
-                        </Button>
-                      </Tooltip>
-                      <Tooltip content="取消订阅" color="danger">
-                        <Button isIconOnly size="sm" variant="light" color="danger"
-                          onPress={() => deleteLive(l.id)}>
-                          <Trash2 size={14} />
-                        </Button>
-                      </Tooltip>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-          )}
-        </CardBody>
-      </Card>
-
       {/* Modal —— 懒加载 */}
       {isOpen && (
         <AddDouyinPostsModal
@@ -471,21 +315,6 @@ export default function DouyinPostsPage() {
           results={results}
           adding={adding}
           onSubmit={handleAdd}
-        />
-      )}
-      {liveModal.isOpen && (
-        <SubscribeLiveModal
-          isOpen={liveModal.isOpen}
-          onClose={liveModal.onClose}
-          liveRoomUrl={liveRoomUrl}
-          setLiveRoomUrl={setLiveRoomUrl}
-          liveStreamer={liveStreamer}
-          setLiveStreamer={setLiveStreamer}
-          liveThreshold={liveThreshold}
-          setLiveThreshold={setLiveThreshold}
-          liveError={liveError}
-          liveBusy={liveBusy}
-          onSubmit={submitLive}
         />
       )}
     </div>

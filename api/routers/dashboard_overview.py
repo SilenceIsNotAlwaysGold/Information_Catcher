@@ -166,17 +166,12 @@ async def dashboard_overview(current_user: dict = Depends(get_current_user)):
     acc_valid = sum(1 for a in accounts if (a.get("cookie_status") or "") == "valid")
     acc_expired = sum(1 for a in accounts if (a.get("cookie_status") or "") == "expired")
 
-    # 3. 创作者订阅 / 直播订阅
+    # 3. 创作者订阅
     creators: List[Dict[str, Any]] = []
-    lives: List[Dict[str, Any]] = []
     try:
         creators = await db.list_creators(user_id=scope_uid)
     except Exception:
         creators = []
-    try:
-        lives = await db.list_lives(user_id=scope_uid)
-    except Exception:
-        lives = []
 
     # 4. 今日告警 + Top 5
     alerts_summary = await _today_alerts_summary(scope_uid)
@@ -202,7 +197,6 @@ async def dashboard_overview(current_user: dict = Depends(get_current_user)):
                 "by_platform": posts_by_platform,
             },
             "creators": len(creators),
-            "lives": len(lives),
         },
         "metric_totals": {
             "likes": likes_sum,

@@ -8,7 +8,7 @@ import { Menu, Search } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
 import { PLATFORM_LABEL, type PlatformKey } from "@/components/platform";
 import { GlobalSearch, useGlobalSearch } from "@/components/GlobalSearch";
-import { usePosts, useAlerts, useAccounts, useGroups, useLives } from "@/lib/useApi";
+import { usePosts, useAlerts, useAccounts, useGroups } from "@/lib/useApi";
 
 // 预热最常用 SWR 缓存：布局挂载后立即拉取，子页面导航时数据已就绪，无需重新请求
 function CachePrefetcher() {
@@ -16,7 +16,6 @@ function CachePrefetcher() {
   useAlerts(30);
   useAccounts();
   useGroups();
-  useLives();
   return null;
 }
 

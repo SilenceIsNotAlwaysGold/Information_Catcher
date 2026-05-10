@@ -59,7 +59,6 @@ type Overview = {
     accounts: { total: number; valid: number; expired: number };
     posts: { total: number; by_platform: Record<string, number> };
     creators: number;
-    lives: number;
   };
   metric_totals: { likes: number; collects: number; comments: number };
 };
@@ -472,11 +471,6 @@ export default function DashboardPage() {
                   </div>
                 </div>
 
-                {quota.lives > 0 && (
-                  <div className="pt-1 text-[11px] text-default-500">
-                    直播订阅：{quota.lives} 个
-                  </div>
-                )}
               </div>
             )}
           </CardBody>

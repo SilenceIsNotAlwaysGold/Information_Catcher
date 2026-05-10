@@ -562,7 +562,7 @@ export default function AdminPage() {
                   loading
                     ? <TableSkeleton rows={4} cols={9} />
                     : <EmptyState icon={Server} title="暂无平台账号"
-                        hint="点右上角「扫码新增」用小红书 App 扫码登录，或「手动录入 Cookie」直接粘贴 cookie 字符串。" />
+                        hint="此账号池已弃用 — TrendPulse 现已全面切换到浏览器扩展通道，无需在此录入 cookie。请前往「我的浏览器扩展」页面安装 Helper 扩展。" />
                 }>
                   {accounts.map((a) => (
                     <TableRow key={a.id}>
@@ -1106,8 +1106,7 @@ function AdminOverview({ token }: { token: string | null }) {
         <StatCard icon={<Server size={18} />} label="监控帖子" value={data.total_posts}
           hint={`涉及 ${data.posts_by_user_count} 个用户`} />
         <StatCard icon={<Cpu size={18} />} label="账号总数" value={data.total_accounts} />
-        <StatCard icon={<Cpu size={18} />} label="订阅博主" value={data.total_creators}
-          hint={`直播订阅 ${data.total_lives}`} />
+        <StatCard icon={<Cpu size={18} />} label="订阅博主" value={data.total_creators} />
       </div>
 
       <Card>
@@ -1207,10 +1206,6 @@ function TenantsView({ token }: { token: string | null }) {
                   <div className="bg-default-100 rounded p-2">
                     <div className="text-xs text-default-400">博主</div>
                     <div className="text-lg font-semibold">{u.creator_count}</div>
-                  </div>
-                  <div className="bg-default-100 rounded p-2">
-                    <div className="text-xs text-default-400">直播</div>
-                    <div className="text-lg font-semibold">{u.live_count}</div>
                   </div>
                 </div>
 
