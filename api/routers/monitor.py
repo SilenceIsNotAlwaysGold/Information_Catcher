@@ -722,19 +722,32 @@ async def check_creator(
             account_id=None, post_type="own",
             user_id=user_id,
             platform=platform_name,
+            creator_id=creator_id,   # 关联到 monitor_creators.id（CreatorsCard 折叠列表用）
         )
         new_count += 1
         if not newest:
             newest = pid
 
+    # 与 scheduler.run_creator_check 一致：把扩展抓到的博主元信息也落库
+    prof = res.get("profile") or {}
+    latest_post_title = posts[0].get("title", "") if posts else ""
     await db.update_creator_check(
         creator_id, last_post_id=newest,
-        creator_name=(posts[0].get("creator_name", "") if posts else ""),
+        creator_name=prof.get("creator_name") or (posts[0].get("creator_name", "") if posts else ""),
+        avatar_url=prof.get("avatar_url", ""),
+        last_post_title=latest_post_title,
+        followers_count=prof.get("followers_count"),
+        likes_count=prof.get("likes_count"),
+        notes_count=prof.get("notes_count"),
+        creator_desc=prof.get("desc", ""),
     )
     await db.mark_creator_status(creator_id, "ok")
     if new_count:
         await db.add_creator_unread(creator_id, new_count)
-    return {"ok": True, "fetched": len(posts), "added": new_count}
+    return {
+        "ok": True, "fetched": len(posts), "added": new_count,
+        "profile": prof,
+    }
 
 
 class _SeenReq(BaseModel):

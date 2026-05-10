@@ -50,7 +50,7 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
     if (!postsByCreator[cid] && !postsLoading.has(cid)) {
       setPostsLoading((p) => new Set(p).add(cid));
       try {
-        const r = await fetch(`/api/monitor/creators/${cid}/posts?limit=60`, { headers });
+        const r = await fetch(`/api/monitor/creators/${cid}/posts?limit=200`, { headers });
         const d = await r.json().catch(() => ({}));
         if (r.ok) setPostsByCreator((s) => ({ ...s, [cid]: d.posts || [] }));
       } finally {
@@ -407,37 +407,37 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
                               : "扩展首次抓取该博主时还没收集到作品；下一轮检测会更新。"}
                           </p>
                         ) : (
-                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                            {postsByCreator[c.id].slice(0, 12).map((p: any) => (
-                              <a key={p.id} href={p.note_url || p.short_url || "#"} target="_blank" rel="noopener noreferrer"
-                                className="block rounded-md overflow-hidden border border-default-100 hover:border-default-300 transition">
-                                {p.cover_url ? (
-                                  <img src={p.cover_url} alt="" referrerPolicy="no-referrer"
-                                    className="w-full aspect-[4/5] object-cover bg-default-100" />
-                                ) : (
-                                  <div className="w-full aspect-[4/5] bg-default-100 flex items-center justify-center text-default-300 text-[10px]">
-                                    无封面
-                                  </div>
-                                )}
-                                <div className="p-1.5">
-                                  <p className="text-[11px] text-default-700 line-clamp-2 leading-snug">
-                                    {p.title || "(无标题)"}
-                                  </p>
-                                  {(p.liked_count !== undefined && p.liked_count !== null) && (
-                                    <p className="text-[10px] text-default-400 mt-0.5">
-                                      ❤ {fmt(p.liked_count || 0)}
-                                      {p.comment_count ? ` · 💬 ${fmt(p.comment_count)}` : ""}
-                                    </p>
+                          <>
+                            <p className="text-[11px] text-default-500 mb-2">
+                              共 <b>{postsByCreator[c.id].length}</b> 篇作品
+                            </p>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                              {postsByCreator[c.id].map((p: any) => (
+                                <a key={p.id} href={p.note_url || p.short_url || "#"} target="_blank" rel="noopener noreferrer"
+                                  className="block rounded-md overflow-hidden border border-default-100 hover:border-default-300 transition">
+                                  {p.cover_url ? (
+                                    <img src={p.cover_url} alt="" referrerPolicy="no-referrer"
+                                      className="w-full aspect-[4/5] object-cover bg-default-100" />
+                                  ) : (
+                                    <div className="w-full aspect-[4/5] bg-default-100 flex items-center justify-center text-default-300 text-[10px]">
+                                      无封面
+                                    </div>
                                   )}
-                                </div>
-                              </a>
-                            ))}
-                          </div>
-                        )}
-                        {postsByCreator[c.id]?.length > 12 && (
-                          <p className="text-[10px] text-default-400 mt-2 text-center">
-                            仅展示最近 12 篇，更多请去帖子监控页查看
-                          </p>
+                                  <div className="p-1.5">
+                                    <p className="text-[11px] text-default-700 line-clamp-2 leading-snug">
+                                      {p.title || "(无标题)"}
+                                    </p>
+                                    {(p.liked_count !== undefined && p.liked_count !== null) && (
+                                      <p className="text-[10px] text-default-400 mt-0.5">
+                                        ❤ {fmt(p.liked_count || 0)}
+                                        {p.comment_count ? ` · 💬 ${fmt(p.comment_count)}` : ""}
+                                      </p>
+                                    )}
+                                  </div>
+                                </a>
+                              ))}
+                            </div>
+                          </>
                         )}
                       </div>
                     )}
