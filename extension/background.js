@@ -940,17 +940,81 @@ async function runDouyinCreatorPosts(payload) {
 
     let finalUrl = "";
     try { finalUrl = (await chrome.tabs.get(tabId)).url || ""; } catch {}
-    if (!resp || (!resp.ok && (resp.hits?.length || 0) === 0)) {
+
+    // XHR 抓到的内容（可能为空）
+    let { posts, profile } = extractDouyinCreatorPosts((resp && resp.hits) || []);
+
+    // ─── DOM 兜底 ─────────────────────────────────────────────────────
+    // 抖音博主主页 aweme/post 走 IntersectionObserver 懒加载，popup window 经常触发不到。
+    // 但 DOM 里 SSR 已经渲染了基础信息（粉丝/作品数/前几条作品），直接读够判断「有没有更新」。
+    // 见用户截图：data-e2e="user-info-{follow,fans,like}" 是稳定 hook
+    let domDebug = null;
+    try {
+      const dom = await chrome.tabs.sendMessage(tabId, { from: "bg", action: "read_dom_creator" });
+      domDebug = dom?.debug || null;
+      if (dom) {
+        // profile 合并：XHR 优先；DOM 文本字段兜底（fans_text → followers_count 等）
+        const merged = { ...profile };
+        const dp = dom.profile || {};
+        if (!merged.creator_name && dp.creator_name) merged.creator_name = dp.creator_name;
+        if (!merged.avatar_url && dp.avatar_url) merged.avatar_url = dp.avatar_url;
+        if (!merged.desc && dp.desc_text) merged.desc = dp.desc_text;
+        if (!merged.followers_count && dp.fans_text) merged.followers_count = parseCount(dp.fans_text);
+        if (!merged.following_count && dp.follows_text) merged.following_count = parseCount(dp.follows_text);
+        if (!merged.likes_count && dp.likes_text) merged.likes_count = parseCount(dp.likes_text);
+        if (!merged.notes_count && dp.notes_text) merged.notes_count = parseCount(dp.notes_text);
+        profile = merged;
+
+        // posts 合并：XHR 抓到的为主，没抓到时全用 DOM；都有时按 post_id 合并（DOM 补缺封面）
+        const normalizeDom = (p) => ({
+          post_id: p.post_id,
+          url: p.url,
+          title: p.title || "",
+          cover_url: p.cover_url || "",
+          // DOM 抓到的点赞数文本 → parseCount 解析
+          liked_count: p.liked_count_text ? parseCount(p.liked_count_text) : 0,
+          creator_name: profile.creator_name || "",
+        });
+        if ((dom.posts || []).length) {
+          if (posts.length === 0) {
+            posts = dom.posts.map(normalizeDom);
+          } else {
+            const byId = new Map(posts.map((p) => [p.post_id, p]));
+            for (const dp of dom.posts) {
+              if (!byId.has(dp.post_id)) {
+                byId.set(dp.post_id, normalizeDom(dp));
+              } else {
+                const ex = byId.get(dp.post_id);
+                if (!ex.cover_url && dp.cover_url) ex.cover_url = dp.cover_url;
+                if (!ex.title && dp.title) ex.title = dp.title;
+                if (!ex.liked_count && dp.liked_count_text) ex.liked_count = parseCount(dp.liked_count_text);
+              }
+            }
+            posts = Array.from(byId.values());
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[pulse] douyin creator DOM fallback failed:", e?.message || e);
+    }
+
+    // 完全空才算失败 —— XHR + DOM 都没有任何数据
+    if (posts.length === 0 && !profile.creator_name && !profile.followers_count && !profile.notes_count) {
       const code = classifyFailure(resp, finalUrl);
       const e = new Error(code);
-      e.debug = { seen_urls: resp?.seen_urls || [], final_tab_url: finalUrl };
+      e.debug = {
+        seen_urls: (resp && resp.seen_urls) || [],
+        final_tab_url: finalUrl,
+        dom_debug: domDebug,
+      };
       throw e;
     }
-    const { posts, profile } = extractDouyinCreatorPosts(resp.hits || []);
+
     return {
-      url, raw_hits: (resp.hits || []).length, total: posts.length, posts,
+      url, raw_hits: ((resp && resp.hits) || []).length, total: posts.length, posts,
       profile,
-      seen_urls_sample: (resp.seen_urls || []).slice(-30),
+      seen_urls_sample: ((resp && resp.seen_urls) || []).slice(-30),
+      dom_debug: domDebug,
     };
   } finally {
     await closeWorkerWindow(windowId);
@@ -1438,3 +1502,96 @@ chrome.storage.onChanged.addListener((changes, area) => {
     connect();
   });
 });
+
+
+// ===== 公众号客户端凭证自动捕获 =====
+//
+// 公众号阅读数 / 在看数 / 打赏数走 mp.weixin.qq.com/mp/getappmsgext，需要
+// 30 分钟一过期的 uin / key / pass_ticket / appmsg_token 四个 query 参数。
+// 老路径靠用户从抓包工具拷出来手动粘贴，体验差且经常忘。
+//
+// 这里用 chrome.webRequest 监听 mp.weixin.qq.com/* 的所有请求（用户打开任意
+// 公众号文章就会触发），从 URL 提取 4 字段，4 字段齐就 PUT /api/auth/me/mp-auth
+// 推到 Pulse 后端，用户感知是"打开过几次文章 → 监控就一直是新鲜凭证"。
+
+const _mpAuthCache = { uin: "", key: "", pass_ticket: "", appmsg_token: "" };
+let _mpAuthLastSyncAt = 0;
+const MP_AUTH_THROTTLE_MS = 60 * 1000; // 60s 内只推一次
+
+function _extractMpAuthFromUrl(url) {
+  try {
+    const u = new URL(url);
+    const out = {};
+    for (const k of ["uin", "key", "pass_ticket", "appmsg_token"]) {
+      const v = u.searchParams.get(k);
+      if (v) out[k] = v;
+    }
+    return out;
+  } catch (_e) {
+    return {};
+  }
+}
+
+async function _maybeSyncMpAuth() {
+  if (!_mpAuthCache.uin || !_mpAuthCache.key || !_mpAuthCache.pass_ticket) {
+    return; // 4 字段齐才推（appmsg_token 可空）
+  }
+  const now = Date.now();
+  if (now - _mpAuthLastSyncAt < MP_AUTH_THROTTLE_MS) return;
+
+  const cfg = await loadConfig();
+  if (!cfg.serverUrl || !cfg.token) return;
+
+  _mpAuthLastSyncAt = now;
+  try {
+    const resp = await fetch(`${cfg.serverUrl}/api/auth/me/mp-auth`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cfg.token}`,
+      },
+      body: JSON.stringify({
+        uin: _mpAuthCache.uin,
+        key: _mpAuthCache.key,
+        pass_ticket: _mpAuthCache.pass_ticket,
+        appmsg_token: _mpAuthCache.appmsg_token || "",
+      }),
+    });
+    const ok = resp.ok;
+    const errText = ok ? "" : await resp.text().catch(() => "");
+    await chrome.storage.local.set({
+      lastMpAuthSync: { ok, ts: now, error: errText.slice(0, 200) },
+    });
+    notifyPopup("mp_auth_synced", { ok, ts: now, error: errText.slice(0, 200) });
+    console.log(`[Helper] mp_auth ${ok ? "ok" : "failed"}`);
+  } catch (e) {
+    console.warn("[Helper] mp_auth sync error:", e);
+    await chrome.storage.local.set({
+      lastMpAuthSync: { ok: false, ts: now, error: String(e).slice(0, 200) },
+    });
+  }
+}
+
+if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
+  chrome.webRequest.onBeforeRequest.addListener(
+    (details) => {
+      const fields = _extractMpAuthFromUrl(details.url);
+      let updated = false;
+      for (const k of Object.keys(fields)) {
+        if (fields[k] && fields[k] !== _mpAuthCache[k]) {
+          _mpAuthCache[k] = fields[k];
+          updated = true;
+        }
+      }
+      if (updated) {
+        // fire-and-forget；service worker 异步不阻塞请求
+        _maybeSyncMpAuth();
+      }
+    },
+    {
+      urls: [
+        "*://mp.weixin.qq.com/*",
+      ],
+    },
+  );
+}

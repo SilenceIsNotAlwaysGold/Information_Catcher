@@ -78,10 +78,45 @@ function escapeHtml(s) {
 // 直接从 chrome.storage 读真实数据（解决 SW 销毁导致 background 内存状态丢失的问题）
 async function readStorage() {
   return new Promise((resolve) => {
-    chrome.storage.local.get(["serverUrl", "token", "lastTaskLog"], (items) => {
-      resolve(items || {});
-    });
+    chrome.storage.local.get(
+      ["serverUrl", "token", "lastTaskLog", "lastMpAuthSync"],
+      (items) => resolve(items || {}),
+    );
   });
+}
+
+function fmtAgo(ts) {
+  if (!ts) return "未同步";
+  const diff = Math.max(0, Date.now() - ts);
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return "刚刚";
+  if (m < 60) return `${m} 分钟前`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} 小时前`;
+  return `${Math.floor(h / 24)} 天前`;
+}
+
+function renderMpAuth(last) {
+  const el = $("mp-auth-status");
+  if (!el) return;
+  if (!last) {
+    el.style.background = "#f8fafc";
+    el.style.borderColor = "#e2e8f0";
+    el.style.color = "#64748b";
+    el.textContent = "打开任意一篇 mp.weixin.qq.com 文章即自动同步";
+    return;
+  }
+  if (last.ok) {
+    el.style.background = "#f0fdf4";
+    el.style.borderColor = "#86efac";
+    el.style.color = "#166534";
+    el.textContent = `✅ 凭证已同步 · ${fmtAgo(last.ts)}（30 分钟内有效）`;
+  } else {
+    el.style.background = "#fef2f2";
+    el.style.borderColor = "#fca5a5";
+    el.style.color = "#991b1b";
+    el.textContent = `❌ 同步失败 · ${fmtAgo(last.ts)}${last.error ? "：" + last.error.slice(0, 60) : ""}`;
+  }
 }
 
 async function refresh() {
@@ -94,6 +129,7 @@ async function refresh() {
   };
   renderStatus(merged);
   renderTasks(merged.tasks);
+  renderMpAuth(stored.lastMpAuthSync);
 }
 
 // 严格清洗服务器地址：只保留 protocol + host[:port]，丢掉所有 path / 重复 protocol 残留
