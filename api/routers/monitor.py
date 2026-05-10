@@ -1972,11 +1972,17 @@ async def sync_trending_to_bitable(
             results.append({"note_id": nid, "ok": False, "reason": str(e)})
 
     # 同步成功 → 给「飞书消息同步」专属群发卡片（开关开 + lazy 建群，与 image_gen 同步一致）
+    # 兼容：用户没开 bitable_push_enabled 但 profile 里绑过 feishu_chat_id 时，兜底推到那个群，
+    # 避免出现"明明绑了 chat，同步成功却没收到提示"的困惑。
     ok_count = sum(1 for r in results if r.get("ok"))
     fail_count = len(results) - ok_count
-    if ok_count > 0 and current_user.get("bitable_push_enabled"):
-        from ..services.feishu import provisioning as _prov
-        chat_id = await _prov.ensure_feature_chat(current_user, "bitable") or ""
+    chat_id = ""
+    if ok_count > 0:
+        if current_user.get("bitable_push_enabled"):
+            from ..services.feishu import provisioning as _prov
+            chat_id = await _prov.ensure_feature_chat(current_user, "bitable") or ""
+        elif current_user.get("feishu_chat_id"):
+            chat_id = current_user.get("feishu_chat_id") or ""
         if chat_id:
             try:
                 from ..services.feishu import bitable as feishu_bitable_v2_2
