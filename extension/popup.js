@@ -4,15 +4,21 @@ const $ = (id) => document.getElementById(id);
 // 检查当前是不是独立窗口模式（detached）
 const IS_DETACHED = new URLSearchParams(location.search).get("detached") === "1";
 
-async function rpc(action, payload = {}) {
+async function rpc(action, payload = {}, timeoutMs = 1500) {
+  // SW 可能在异步过程中被回收，sendResponse 永远不来 —— 必须超时兜底，
+  // 否则任何 await rpc(...) 都可能让 popup 卡死
   return new Promise((resolve) => {
+    let done = false;
+    const finish = (r) => { if (!done) { done = true; resolve(r); } };
+    const timer = setTimeout(() => finish({ _timeout: true }), timeoutMs);
     try {
       chrome.runtime.sendMessage({ from: "popup", action, ...payload }, (resp) => {
-        // 即使 background 没正常响应，也 resolve 一个空对象，不要卡住
-        resolve(resp || {});
+        clearTimeout(timer);
+        finish(resp || {});
       });
     } catch (e) {
-      resolve({});
+      clearTimeout(timer);
+      finish({});
     }
   });
 }
@@ -90,27 +96,63 @@ async function refresh() {
   renderTasks(merged.tasks);
 }
 
+// 严格清洗服务器地址：只保留 protocol + host[:port]，丢掉所有 path / 重复 protocol 残留
+// 例：
+//   "https://x.com/"                   → "https://x.com"
+//   "  https://x.com/api  "            → "https://x.com"
+//   "https://x.comhttps://x.com"       → "https://x.com"  ← 这次的脏数据元凶
+//   "x.com:8080"                       → "https://x.com:8080"
+function cleanServerUrl(input) {
+  let s = String(input || "").trim();
+  if (!s) return "";
+  if (!/^https?:\/\//i.test(s)) s = "https://" + s;
+  const protoMatch = s.match(/^(https?:\/\/)/i);
+  const proto = protoMatch[1].toLowerCase();
+  let rest = s.slice(protoMatch[1].length);
+  // 关键修复：找第二次出现的 http(s):// —— 那里之后全是脏数据
+  const dup = rest.search(/https?:\/\//i);
+  if (dup >= 0) {
+    rest = rest.slice(0, dup);
+    // 末尾可能残留无 :// 的 "http" / "https"
+    rest = rest.replace(/(https?)$/i, "");
+  }
+  // 切掉 path / query / fragment
+  rest = rest.split(/[/?#]/)[0];
+  // 末尾的标点
+  rest = rest.replace(/[.\-]+$/, "");
+  // 合法 host[:port] 校验
+  if (!/^[A-Za-z0-9\-._]+(?::\d+)?$/.test(rest)) return "";
+  return proto + rest;
+}
+
 $("save").addEventListener("click", async () => {
-  const serverUrl = $("server-url").value.trim().replace(/\/+$/, ""); // 去尾部斜杠
+  const serverUrl = cleanServerUrl($("server-url").value);
   const token = $("token").value.trim();
   if (!serverUrl) {
-    alert("请填写服务器地址");
+    alert("服务器地址格式不正确，示例：https://your-tunnel.trycloudflare.com");
     return;
   }
-  // 仅当用户输入了新 token 才覆盖；空输入保持原值
-  const payload = { serverUrl };
-  if (token) payload.token = token;
+  // 把清洗后的值回填到输入框，让用户看到实际生效的 URL
+  $("server-url").value = serverUrl;
 
   $("save").textContent = "保存中…";
   $("save").disabled = true;
-  await rpc("set_config", payload);
-  $("token").value = "";
-  // 给 background 一点时间完成 ws 握手再 refresh，让用户看到状态变化
-  setTimeout(async () => {
+  try {
+    // 1) 直接写 chrome.storage（稳定 API，永远 resolve）
+    const patch = { serverUrl };
+    if (token) patch.token = token;
+    await new Promise((resolve) => chrome.storage.local.set(patch, resolve));
+    $("token").value = "";
+
+    // 2) 通知 background 重连（fire-and-forget，rpc 自带 1.5s 超时不会卡）
+    rpc("set_config", patch).catch(() => {});
+
+    // 3) 立即刷新 UI（refresh 调用的 rpc 也有超时兜底）
     await refresh();
+  } finally {
     $("save").textContent = "保存并连接";
     $("save").disabled = false;
-  }, 1500);
+  }
 });
 
 $("reconnect").addEventListener("click", async () => {

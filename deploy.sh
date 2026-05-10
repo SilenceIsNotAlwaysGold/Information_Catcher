@@ -115,15 +115,15 @@ deploy_frontend() {
 
 deploy_extension() {
   echo "▶ 同步浏览器扩展源码..."
-  if [[ ! -d web/extensions ]]; then
-    echo "（无 web/extensions/，跳过）"
+  if [[ ! -d extension ]]; then
+    echo "（无 extension/，跳过）"
     return 0
   fi
-  $SSH "mkdir -p ${TARGET_PATH}/web/extensions" || true
+  $SSH "mkdir -p ${TARGET_PATH}/extension" || true
   sshpass -p "$PASSWORD" rsync -avz --no-perms --no-times --omit-dir-times \
     -e "ssh ${SSH_OPTS[*]}" \
-    web/extensions/ "${USER}@${HOST}:${TARGET_PATH}/web/extensions/" | tail -6
-  echo "✓ 扩展同步完成"
+    extension/ "${USER}@${HOST}:${TARGET_PATH}/extension/" | tail -6
+  echo "✓ 扩展同步完成（服务端 /api/extension/version 会读 extension/manifest.json）"
 }
 
 restart_service() {

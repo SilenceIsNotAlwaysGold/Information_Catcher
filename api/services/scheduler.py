@@ -773,8 +773,9 @@ async def run_ext_task_retry():
     if timed_out:
         logger.info(f"[ext-retry] reset {timed_out} stuck running tasks → pending")
 
-    # 2. 取 pending 任务，最多 100 条
-    pending = await db.ext_task_get_pending(limit=100)
+    # 2. 取 pending 任务：每分钟最多派 5 条
+    # 之前是 100，扩展长时间离线后上线会被堆积任务雪崩，窗口反复弹影响用户体验
+    pending = await db.ext_task_get_pending(limit=5)
     if pending:
         for task in pending:
             uid = task["user_id"]

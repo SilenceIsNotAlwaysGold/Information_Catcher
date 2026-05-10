@@ -19,9 +19,35 @@ let serverUrl = "";
 let token = "";
 let lastTaskLog = []; // popup 展示，最多 10 条
 
+// 与 popup.js 的 cleanServerUrl 保持一致：剥掉 path、查询串、重复 protocol 残留
+// 找第二次出现的 http(s):// 是关键 —— 字符类贪婪匹配会吃掉 "https" 五个字母停不住
+function cleanServerUrl(raw) {
+  let s = String(raw || "").trim();
+  if (!s) return "";
+  if (!/^https?:\/\//i.test(s)) s = "https://" + s;
+  const protoMatch = s.match(/^(https?:\/\/)/i);
+  const proto = protoMatch[1].toLowerCase();
+  let rest = s.slice(protoMatch[1].length);
+  const dup = rest.search(/https?:\/\//i);
+  if (dup >= 0) {
+    rest = rest.slice(0, dup);
+    rest = rest.replace(/(https?)$/i, "");
+  }
+  rest = rest.split(/[/?#]/)[0];
+  rest = rest.replace(/[.\-]+$/, "");
+  if (!/^[A-Za-z0-9\-._]+(?::\d+)?$/.test(rest)) return "";
+  return proto + rest;
+}
+
 async function loadConfig() {
   const cfg = await chrome.storage.local.get(["serverUrl", "token"]);
-  serverUrl = cfg.serverUrl || "";
+  const cleaned = cleanServerUrl(cfg.serverUrl);
+  // 如果 storage 里的值是脏的（含重复 protocol / 多余 path），写回清洗后的值
+  if (cleaned && cleaned !== cfg.serverUrl) {
+    try { await chrome.storage.local.set({ serverUrl: cleaned }); } catch {}
+    console.log("[pulse] cleaned dirty serverUrl:", cfg.serverUrl, "→", cleaned);
+  }
+  serverUrl = cleaned;
   token = cfg.token || "";
 }
 
@@ -40,8 +66,15 @@ function notifyPopup(action, data = {}) {
 // ===== WebSocket 管理 =====
 function buildWsUrl() {
   if (!serverUrl || !token) return "";
-  // serverUrl 形如 http://127.0.0.1:8080 或 https://example.com
-  const u = new URL(serverUrl);
+  // 双保险：建 ws 那一刻再洗一次 serverUrl，杜绝任何脏数据漏过来
+  const cleaned = cleanServerUrl(serverUrl);
+  if (!cleaned) return "";
+  if (cleaned !== serverUrl) {
+    console.warn("[pulse] runtime sanitize serverUrl:", serverUrl, "→", cleaned);
+    serverUrl = cleaned;
+    try { chrome.storage.local.set({ serverUrl: cleaned }); } catch {}
+  }
+  const u = new URL(cleaned);
   const proto = u.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${u.host}/api/extension/ws?token=${encodeURIComponent(token)}`;
 }
@@ -92,12 +125,17 @@ function connect() {
   };
 
   ws.onerror = (e) => {
-    console.warn("[pulse] ws error", e);
+    console.warn("[pulse] ws error", e?.message || e);
   };
 
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     connected = false;
-    console.log("[pulse] ws closed");
+    // 打出 close code / reason / wasClean 以便诊断
+    console.log("[pulse] ws closed", {
+      code: ev?.code,
+      reason: ev?.reason,
+      wasClean: ev?.wasClean,
+    });
     notifyPopup("status", { connected: false });
     chrome.alarms.clear(HEARTBEAT_ALARM);
     scheduleReconnect();
@@ -236,8 +274,7 @@ async function runXhsSearch(payload) {
   // hook 由 manifest content_scripts 在 document_start 自动注入到 MAIN world，
   // content/xhs.js 在 document_idle 注入到 isolated world —— 这里不需要再 executeScript。
   const url = `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(keyword)}&source=web_explore_feed&type=51`;
-  const tab = await chrome.tabs.create({ url, active: false });
-  const tabId = tab.id;
+  const { tabId, windowId } = await openWorkerTab(url);
 
   try {
     // 等导航完成（content/xhs.js 也在 idle 时已经注入好）
@@ -300,12 +337,92 @@ async function runXhsSearch(payload) {
       seen_urls_sample: (resp.seen_urls || []).slice(-30),
     };
   } finally {
-    try { await chrome.tabs.remove(tabId); } catch {}
+    await closeWorkerWindow(windowId);
   }
 }
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// ===== 抓取用 worker tab 创建：绕过后台 tab Timer Throttling =====
+//
+// 为什么不用 chrome.tabs.create({active:false}):
+//   后台 hidden tab 在 Chrome 里会被 Timer Throttling — setTimeout/setInterval
+//   被降到 1/min。SPA 内部用 setTimeout 触发的 fetch 会被推迟，导致 hook
+//   30 秒等不到 search/notes / user_posted 接口。
+//
+// 解决：用 chrome.windows.create 开一个独立的 minimized + unfocused popup 窗口，
+// 这种窗口里的 tab 不被节流，SPA 全速运行。用户视觉上不会被打扰（最小化）。
+//
+// 返回 { tabId, windowId }，后续 finally 用 chrome.windows.remove(windowId) 关掉。
+// 全局复用一个 worker window，避免每次抓取都新开窗口闪用户屏幕。
+// 抓取流程：
+//   1. 检查 _workerWindow 是否还存在且活着 → 是，update({focused:true,url}) 复用
+//   2. 不存在或已关闭 → 创建新 popup window
+//   3. 抓完不关闭，update({state:"minimized"}) 转后台（用户视觉上是 dock 里一个小图标）
+let _workerWindow = null;  // {windowId, tabId}
+
+async function _isWindowAlive(windowId) {
+  if (!windowId) return false;
+  try {
+    await chrome.windows.get(windowId);
+    return true;
+  } catch { return false; }
+}
+
+// 安全 bounds：800x550 足够小，在常见显示器（含 13" 笔记本）都能容纳 ≥50% 可见区
+const SAFE_BOUNDS = { left: 80, top: 80, width: 800, height: 550 };
+
+async function openWorkerTab(url) {
+  // 复用：worker window 还在 → 先恢复成 normal+focused 状态，再 navigate 新 URL。
+  // 顺序很重要：如果在 minimized 状态下 navigate，SPA 会被 timer throttling 拦住。
+  if (_workerWindow && await _isWindowAlive(_workerWindow.windowId)) {
+    try {
+      // 1. 先恢复 + 显式拉回安全 bounds，避免 Chrome 用旧 bounds（可能在屏幕外）校验失败
+      await chrome.windows.update(_workerWindow.windowId, {
+        focused: true, state: "normal", ...SAFE_BOUNDS,
+      });
+      // 2. 等一帧让窗口状态切换生效
+      await sleep(150);
+      // 3. 再导航 tab
+      await chrome.tabs.update(_workerWindow.tabId, { url, active: true });
+      return { tabId: _workerWindow.tabId, windowId: _workerWindow.windowId };
+    } catch (e) {
+      // 旧 worker window 不可恢复（bounds 失败 / tab 已挂）→ 销毁后重建
+      try { await chrome.windows.remove(_workerWindow.windowId); } catch {}
+      _workerWindow = null;
+    }
+  }
+  // 新建：focused=true 让 SPA 不被 throttle 跑通首屏；
+  // 走过的弯路：minimized/屏幕外/active:false 都被 timer throttling 拦住或 API 拒绝。
+  let win;
+  try {
+    win = await chrome.windows.create({
+      url, type: "popup", focused: true, ...SAFE_BOUNDS,
+    });
+  } catch (e) {
+    // 极端情况下 bounds 还是被拒（屏幕分辨率太小），让 Chrome 自己决定位置
+    win = await chrome.windows.create({ url, type: "popup", focused: true });
+  }
+  const tab = win.tabs && win.tabs[0];
+  if (!tab) throw new Error("failed to create worker window");
+  _workerWindow = { windowId: win.id, tabId: tab.id };
+  return { tabId: tab.id, windowId: win.id };
+}
+
+// 抓完不真正关掉，转后台 minimize。下次抓取时 focus 复活。
+async function closeWorkerWindow(windowId) {
+  if (!windowId) return;
+  try {
+    // minimize 而非 remove —— 复用，避免每次都开新窗口
+    await chrome.windows.update(windowId, { state: "minimized" });
+  } catch {
+    // window 已经被用户关掉了，重置
+    if (_workerWindow && _workerWindow.windowId === windowId) {
+      _workerWindow = null;
+    }
+  }
 }
 
 // 把抓取失败原因归类为后端能翻译的稳定 code。优先级：
@@ -320,22 +437,47 @@ function classifyFailure(resp, finalUrl) {
   return resp?.error || "no_response_captured";
 }
 
-function waitForTabComplete(tabId, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(listener);
-      reject(new Error("tab navigation timeout"));
-    }, timeoutMs);
-    const listener = (id, info) => {
-      if (id !== tabId) return;
-      if (info.status === "complete") {
-        clearTimeout(timer);
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
+// 宽松版 ready 检测：
+//   - 不要求 tab status='complete'（SPA 轮询/直播流永远不 complete）
+//   - 不强制 content script ping 成功
+//   - 至多等 timeoutMs，能 ping 通就提前 resolve；ping 不通也 resolve（让后续 capture 自己 try）
+//   - 永远不 reject —— 抓不到的最差结果是 capture 阶段超时，错误提示更精准
+function waitForTabReady(tabId, timeoutMs = 18000) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    let resolved = false;
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      resolve();
     };
-    chrome.tabs.onUpdated.addListener(listener);
+    const tryPing = async () => {
+      if (resolved) return;
+      try {
+        const resp = await chrome.tabs.sendMessage(tabId, { from: "bg", action: "__ping" });
+        if (resp?.pong || resp?.ok) {
+          // ping 通了，再多给 1.5 秒让 SPA 跑首屏 fetch
+          setTimeout(done, 1500);
+          return;
+        }
+      } catch {
+        // 还没注入，下个 tick 重试
+      }
+      if (Date.now() - start >= timeoutMs) {
+        // 超时，无脑放行（capture 阶段会自己处理）
+        done();
+        return;
+      }
+      setTimeout(tryPing, 600);
+    };
+    // 启动后等 1 秒再首次 ping，给 content_script 一点注入时间
+    setTimeout(tryPing, 1000);
   });
+}
+
+// 兼容旧调用点
+function waitForTabComplete(tabId, timeoutMs) {
+  return waitForTabReady(tabId, timeoutMs || 18000);
 }
 
 function extractXhsNotes(hits) {
@@ -379,8 +521,7 @@ async function runDouyinSearch(payload) {
   const pages = Math.max(1, Math.min(5, Number(payload?.pages || 2)));
 
   const url = `https://www.douyin.com/search/${encodeURIComponent(keyword)}?type=video`;
-  const tab = await chrome.tabs.create({ url, active: false });
-  const tabId = tab.id;
+  const { tabId, windowId } = await openWorkerTab(url);
 
   try {
     await waitForTabComplete(tabId, 18000);
@@ -428,7 +569,7 @@ async function runDouyinSearch(payload) {
       seen_urls_sample: (resp.seen_urls || []).slice(-30),
     };
   } finally {
-    try { await chrome.tabs.remove(tabId); } catch {}
+    await closeWorkerWindow(windowId);
   }
 }
 
@@ -483,15 +624,15 @@ function extractDouyinItems(hits) {
 async function runXhsCreatorPosts(payload) {
   const url = String(payload?.url || "").trim();
   if (!url) throw new Error("url required");
-  const tab = await chrome.tabs.create({ url, active: false });
-  const tabId = tab.id;
+  const { tabId, windowId } = await openWorkerTab(url);
   try {
     await waitForTabComplete(tabId, 15000);
     await sleep(800);
     const resp = await chrome.tabs.sendMessage(tabId, {
       from: "bg",
       action: "capture_xhs",
-      urlPattern: ["/v1/user_posted", "/v1/feed"],
+      // 同时拦帖子列表 + 博主元信息（粉丝数 / 获赞 / 头像在 user/otherinfo）
+      urlPattern: ["/v1/user_posted", "/v1/feed", "/user/otherinfo"],
       timeout_ms: payload?.timeout_ms || 25000,
       min_hits: 1,
     });
@@ -503,21 +644,52 @@ async function runXhsCreatorPosts(payload) {
       e.debug = { seen_urls: resp?.seen_urls || [], final_tab_url: finalUrl };
       throw e;
     }
-    const posts = extractXhsCreatorPosts(resp.hits || []);
+    const { posts, profile } = extractXhsCreatorPosts(resp.hits || []);
     return {
       url, raw_hits: (resp.hits || []).length, total: posts.length, posts,
+      profile,
       seen_urls_sample: (resp.seen_urls || []).slice(-30),
     };
   } finally {
-    try { await chrome.tabs.remove(tabId); } catch {}
+    await closeWorkerWindow(windowId);
   }
 }
 
 function extractXhsCreatorPosts(hits) {
   const out = [];
   const seen = new Set();
+  let profile = {};
+
   for (const h of hits) {
+    const url = h.url || "";
     const body = h.body || {};
+
+    // 1) /user/otherinfo → 博主元信息（粉丝、获赞、头像、简介、性别等）
+    if (url.includes("/user/otherinfo")) {
+      const data = body?.data || body || {};
+      const interactions = data.interactions || data.interaction_info || [];
+      const interMap = {};
+      for (const it of interactions) {
+        if (it && it.type) interMap[String(it.type).toLowerCase()] = it.count;
+      }
+      profile = {
+        creator_name: data.nickname || data.basic_info?.nickname || profile.creator_name || "",
+        avatar_url:
+          data.images?.[0] ||
+          data.imageb ||
+          data.basic_info?.imageb ||
+          data.basic_info?.images?.[0] ||
+          profile.avatar_url || "",
+        followers_count: parseCount(interMap.fans || data.fans || data.basic_info?.fans),
+        following_count: parseCount(interMap.follows || data.follows),
+        likes_count: parseCount(interMap.interaction || data.interactions_count),
+        notes_count: parseCount(data.notes || data.basic_info?.notes),
+        desc: (data.desc || data.basic_info?.desc || "").slice(0, 200),
+      };
+      continue;
+    }
+
+    // 2) /v1/user_posted → 帖子列表（原逻辑）
     const notes = body?.data?.notes || body?.notes || [];
     for (const n of notes) {
       if (!n || typeof n !== "object") continue;
@@ -527,6 +699,13 @@ function extractXhsCreatorPosts(hits) {
       const tok = n.xsec_token || "";
       const user = n.user || {};
       const cover = n.cover || {};
+      // user_posted 里 user 通常只有 nickname + image；先 fallback 给 profile
+      if (!profile.creator_name && (user.nick_name || user.nickname || user.name)) {
+        profile.creator_name = user.nick_name || user.nickname || user.name;
+      }
+      if (!profile.avatar_url && (user.image || user.images)) {
+        profile.avatar_url = user.image || user.images;
+      }
       out.push({
         post_id: String(nid),
         url: `https://www.xiaohongshu.com/explore/${nid}?xsec_token=${tok}&xsec_source=app_share`,
@@ -539,21 +718,20 @@ function extractXhsCreatorPosts(hits) {
       });
     }
   }
-  return out;
+  return { posts: out, profile };
 }
 
 async function runDouyinCreatorPosts(payload) {
   const url = String(payload?.url || "").trim();
   if (!url) throw new Error("url required");
-  const tab = await chrome.tabs.create({ url, active: false });
-  const tabId = tab.id;
+  const { tabId, windowId } = await openWorkerTab(url);
   try {
     await waitForTabComplete(tabId, 18000);
     await sleep(1200);
     const resp = await chrome.tabs.sendMessage(tabId, {
       from: "bg",
       action: "capture_douyin",
-      urlPattern: ["/aweme/v1/web/aweme/post"],
+      urlPattern: ["/aweme/v1/web/aweme/post", "/aweme/v1/web/user/profile"],
       timeout_ms: payload?.timeout_ms || 25000,
       min_hits: 1,
     });
@@ -565,21 +743,43 @@ async function runDouyinCreatorPosts(payload) {
       e.debug = { seen_urls: resp?.seen_urls || [], final_tab_url: finalUrl };
       throw e;
     }
-    const posts = extractDouyinCreatorPosts(resp.hits || []);
+    const { posts, profile } = extractDouyinCreatorPosts(resp.hits || []);
     return {
       url, raw_hits: (resp.hits || []).length, total: posts.length, posts,
+      profile,
       seen_urls_sample: (resp.seen_urls || []).slice(-30),
     };
   } finally {
-    try { await chrome.tabs.remove(tabId); } catch {}
+    await closeWorkerWindow(windowId);
   }
 }
 
 function extractDouyinCreatorPosts(hits) {
   const out = [];
   const seen = new Set();
+  let profile = {};
   for (const h of hits) {
+    const url = h.url || "";
     const body = h.body || {};
+
+    // 抖音 user/profile/other 接口（粉丝、获赞、头像、签名）
+    if (url.includes("/aweme/v1/web/user/profile")) {
+      const u = body.user || body.user_info || {};
+      profile = {
+        creator_name: u.nickname || profile.creator_name || "",
+        avatar_url:
+          u.avatar_larger?.url_list?.[0] ||
+          u.avatar_thumb?.url_list?.[0] ||
+          profile.avatar_url || "",
+        followers_count: parseCount(u.follower_count),
+        following_count: parseCount(u.following_count),
+        likes_count: parseCount(u.total_favorited),
+        notes_count: parseCount(u.aweme_count),
+        desc: (u.signature || "").slice(0, 200),
+      };
+      continue;
+    }
+
     const list = body.aweme_list || [];
     for (const aw of list) {
       if (!aw || typeof aw !== "object") continue;
@@ -587,6 +787,13 @@ function extractDouyinCreatorPosts(hits) {
       if (!aid || seen.has(aid)) continue;
       seen.add(aid);
       const author = aw.author || {};
+      // 兜底从 author 拿头像
+      if (!profile.creator_name && author.nickname) profile.creator_name = author.nickname;
+      if (!profile.avatar_url) {
+        profile.avatar_url =
+          author.avatar_larger?.url_list?.[0] ||
+          author.avatar_thumb?.url_list?.[0] || "";
+      }
       out.push({
         post_id: String(aid),
         url: `https://www.douyin.com/video/${aid}`,
@@ -598,7 +805,7 @@ function extractDouyinCreatorPosts(hits) {
       });
     }
   }
-  return out;
+  return { posts: out, profile };
 }
 
 // ===== 评论拉取（xhs / 抖音）=====
@@ -612,8 +819,7 @@ async function runXhsFetchComments(payload) {
   if (!noteId) throw new Error("note_id required");
   const url = `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=${xsec}&xsec_source=app_share`;
 
-  const tab = await chrome.tabs.create({ url, active: false });
-  const tabId = tab.id;
+  const { tabId, windowId } = await openWorkerTab(url);
   try {
     await waitForTabComplete(tabId, 15000);
     await sleep(1200);
@@ -634,7 +840,7 @@ async function runXhsFetchComments(payload) {
     const comments = extractXhsComments(resp.hits || []);
     return { note_id: noteId, total: comments.length, comments };
   } finally {
-    try { await chrome.tabs.remove(tabId); } catch {}
+    await closeWorkerWindow(windowId);
   }
 }
 
@@ -666,8 +872,7 @@ async function runDouyinFetchComments(payload) {
   const aid = String(payload?.aweme_id || payload?.note_id || "").trim();
   if (!aid) throw new Error("aweme_id required");
   const url = `https://www.douyin.com/video/${aid}`;
-  const tab = await chrome.tabs.create({ url, active: false });
-  const tabId = tab.id;
+  const { tabId, windowId } = await openWorkerTab(url);
   try {
     await waitForTabComplete(tabId, 18000);
     await sleep(1500);
@@ -688,7 +893,7 @@ async function runDouyinFetchComments(payload) {
     const comments = extractDouyinComments(resp.hits || []);
     return { aweme_id: aid, total: comments.length, comments };
   } finally {
-    try { await chrome.tabs.remove(tabId); } catch {}
+    await closeWorkerWindow(windowId);
   }
 }
 
@@ -720,8 +925,7 @@ function extractDouyinComments(hits) {
 async function runDouyinLiveStatus(payload) {
   const liveUrl = String(payload?.live_url || "").trim();
   if (!liveUrl) throw new Error("live_url required");
-  const tab = await chrome.tabs.create({ url: liveUrl, active: false });
-  const tabId = tab.id;
+  const { tabId, windowId } = await openWorkerTab(liveUrl);
   try {
     await waitForTabComplete(tabId, 15000);
     await sleep(2000);
@@ -747,7 +951,7 @@ async function runDouyinLiveStatus(payload) {
       status: room.status || 0,  // 2=直播中, 4=已结束
     };
   } finally {
-    try { await chrome.tabs.remove(tabId); } catch {}
+    await closeWorkerWindow(windowId);
   }
 }
 
@@ -758,8 +962,7 @@ async function runXhsNoteDetail(payload) {
   const xsec = payload?.xsec_token || "";
   if (!noteId) throw new Error("note_id required");
   const url = `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=${xsec}&xsec_source=app_share`;
-  const tab = await chrome.tabs.create({ url, active: false });
-  const tabId = tab.id;
+  const { tabId, windowId } = await openWorkerTab(url);
   try {
     await waitForTabComplete(tabId, 15000);
     await sleep(800);
@@ -804,7 +1007,7 @@ async function runXhsNoteDetail(payload) {
     }
     return { note_id: noteId, ...detail };
   } finally {
-    try { await chrome.tabs.remove(tabId); } catch {}
+    await closeWorkerWindow(windowId);
   }
 }
 
@@ -857,8 +1060,7 @@ async function runDouyinNoteDetail(payload) {
   const aid = String(payload?.aweme_id || payload?.note_id || "").trim();
   if (!aid) throw new Error("aweme_id required");
   const url = `https://www.douyin.com/video/${aid}`;
-  const tab = await chrome.tabs.create({ url, active: false });
-  const tabId = tab.id;
+  const { tabId, windowId } = await openWorkerTab(url);
   try {
     await waitForTabComplete(tabId, 18000);
     await sleep(1500);
@@ -889,7 +1091,7 @@ async function runDouyinNoteDetail(payload) {
     }
     return { aweme_id: aid, ...detail };
   } finally {
-    try { await chrome.tabs.remove(tabId); } catch {}
+    await closeWorkerWindow(windowId);
   }
 }
 
@@ -931,8 +1133,7 @@ async function runPublishTask(type, payload) {
   if (!url) throw new Error(`unknown publish platform ${platform}`);
 
   // 让 content/publish_<platform>.js 完成具体填表 + 提交（active:true 让用户能看到/介入）
-  const tab = await chrome.tabs.create({ url, active: false });
-  const tabId = tab.id;
+  const { tabId, windowId } = await openWorkerTab(url);
   try {
     await waitForTabComplete(tabId, 20000);
     await sleep(2000);
@@ -977,12 +1178,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         tasks: lastTaskLog,
       });
     } else if (msg.action === "set_config") {
-      await chrome.storage.local.set({
-        serverUrl: msg.serverUrl || "",
-        token: msg.token || "",
-      });
+      // 只覆盖明确传入的字段：popup 在用户没输入新 token 时不会传 token，
+      // 此时保留原值（避免每次保存把 token 抹成空字符串）
+      const patch = {};
+      if (typeof msg.serverUrl === "string") patch.serverUrl = msg.serverUrl;
+      if (typeof msg.token === "string" && msg.token) patch.token = msg.token;
+      if (Object.keys(patch).length) await chrome.storage.local.set(patch);
       await loadConfig();
-      // 重连
+      // 重连（fire-and-forget，让 popup 立刻收到响应）
       try { ws?.close(); } catch (e) {}
       connect();
       sendResponse({ ok: true });
@@ -1014,3 +1217,13 @@ chrome.runtime.onStartup.addListener(async () => {
 
 // SW 冷启动时也尝试连一次（onInstalled/onStartup 在某些时机不触发）
 loadConfig().then(connect);
+
+// popup 直接写 storage 后兜底重连（RPC 路径失败也不影响）
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (!("serverUrl" in changes) && !("token" in changes)) return;
+  loadConfig().then(() => {
+    try { ws?.close(); } catch (e) {}
+    connect();
+  });
+});
