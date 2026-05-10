@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
@@ -161,6 +161,29 @@ async def batch_delete_posts(
         except Exception:
             pass
     return {"ok": True, "deleted": deleted}
+
+
+class BatchMoveGroupRequest(BaseModel):
+    note_ids: List[str]
+    group_id: Optional[int] = None  # None 表示移到「未分组」
+
+
+@router.post("/posts/batch-move-group", summary="批量移动帖子到指定分组")
+async def batch_move_group(
+    req: BatchMoveGroupRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    if not req.note_ids:
+        return {"ok": True, "moved": 0}
+    uid = _scope_uid(current_user)
+    moved = 0
+    for nid in req.note_ids:
+        try:
+            await db.update_post_group(nid, req.group_id, user_id=uid)
+            moved += 1
+        except Exception:
+            pass
+    return {"ok": True, "moved": moved}
 
 
 @router.get("/posts/{note_id}/video", summary="获取帖子视频直链（抖音支持去水印）")

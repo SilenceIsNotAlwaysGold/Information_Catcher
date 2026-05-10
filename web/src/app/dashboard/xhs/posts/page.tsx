@@ -22,6 +22,10 @@ import { TableSkeleton } from "@/components/TableSkeleton";
 import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
 import { MonitorPaceButton } from "@/components/MonitorPaceButton";
 import { MoveGroupButton } from "@/components/MoveGroupButton";
+import {
+  Dropdown, DropdownTrigger, DropdownMenu, DropdownItem,
+} from "@nextui-org/dropdown";
+import { FolderInput } from "lucide-react";
 import { toastOk, toastErr } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { useAccounts, useGroups, usePosts, useAlerts, useMe, mutatePosts, mutateAlerts } from "@/lib/useApi";
@@ -251,13 +255,54 @@ export default function XhsPostsPage() {
         <h2 className="text-lg font-semibold">监控帖子（共 {filteredPosts.length} 条）</h2>
         <div className="flex gap-2">
           {selectedKeys.size > 0 && (
-            <Button
-              size="sm" color="danger" variant="flat"
-              startContent={<Trash2 size={14} />}
-              onPress={handleBatchDelete}
-            >
-              删除选中 ({selectedKeys.size})
-            </Button>
+            <>
+              <Dropdown placement="bottom-end">
+                <DropdownTrigger>
+                  <Button size="sm" color="primary" variant="flat"
+                    startContent={<FolderInput size={14} />}>
+                    移动到 ({selectedKeys.size})
+                  </Button>
+                </DropdownTrigger>
+                <DropdownMenu
+                  aria-label="批量移动到分组"
+                  onAction={async (key) => {
+                    const v = String(key);
+                    const gid = v === "_none" ? null : parseInt(v, 10);
+                    const noteIds = Array.from(selectedKeys).map(
+                      (k) => k.split("__").slice(1).join("__"),
+                    );
+                    try {
+                      const r = await fetch(API("/posts/batch-move-group"), {
+                        method: "POST", headers,
+                        body: JSON.stringify({ note_ids: noteIds, group_id: gid }),
+                      });
+                      const data = await r.json().catch(() => ({}));
+                      if (!r.ok) { toastErr(data.detail || `HTTP ${r.status}`); return; }
+                      const target = gid == null
+                        ? "未分组"
+                        : (groups.find((g: any) => g.id === gid)?.name || "新分组");
+                      toastOk(`已移动 ${data.moved || 0} 条到「${target}」`);
+                      setSelectedKeys(new Set());
+                      await mutatePosts();
+                    } catch (e: any) { toastErr(`移动失败：${e?.message || e}`); }
+                  }}
+                >
+                  <>
+                    <DropdownItem key="_none">未分组</DropdownItem>
+                    {(groups || []).map((g: any) => (
+                      <DropdownItem key={String(g.id)}>{g.name}</DropdownItem>
+                    ))}
+                  </>
+                </DropdownMenu>
+              </Dropdown>
+              <Button
+                size="sm" color="danger" variant="flat"
+                startContent={<Trash2 size={14} />}
+                onPress={handleBatchDelete}
+              >
+                删除选中 ({selectedKeys.size})
+              </Button>
+            </>
           )}
           <Input
             size="sm" variant="bordered"
