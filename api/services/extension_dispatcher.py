@@ -226,6 +226,8 @@ async def dispatch_xhs_creator_posts(
         "profile": (result or {}).get("profile") or {},
         "raw_hits": (result or {}).get("raw_hits", 0),
         "ssr_debug": (result or {}).get("ssr_debug"),
+        "otherinfo_debug": (result or {}).get("otherinfo_debug"),
+        "dom_debug": (result or {}).get("dom_debug"),
     }
 
 

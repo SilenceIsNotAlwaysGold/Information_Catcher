@@ -371,8 +371,9 @@ async function _isWindowAlive(windowId) {
   } catch { return false; }
 }
 
-// 安全 bounds：800x550 足够小，在常见显示器（含 13" 笔记本）都能容纳 ≥50% 可见区
-const SAFE_BOUNDS = { left: 80, top: 80, width: 800, height: 550 };
+// 安全 bounds：抖音博主主页 header ≈ 300px，太小的窗口会让 post grid 出 viewport，
+// IntersectionObserver 拒绝触发 aweme/post。1100×720 在 13" 笔记本 (1440×900) 下仍 ≥50% 可见
+const SAFE_BOUNDS = { left: 60, top: 60, width: 1100, height: 720 };
 
 async function openWorkerTab(url) {
   // 复用：worker window 还在 → 先恢复成 normal+focused 状态，再 navigate 新 URL。
@@ -638,7 +639,7 @@ async function runXhsCreatorPosts(payload) {
     });
     let finalUrl = "";
     try { finalUrl = (await chrome.tabs.get(tabId)).url || ""; } catch {}
-    let { posts, profile } = extractXhsCreatorPosts(resp?.hits || []);
+    let { posts, profile, otherinfo_debug } = extractXhsCreatorPosts(resp?.hits || []);
     let ssrDebug = null;
     // XHR 完全没拿到时不要立刻 throw —— 博主主页大多 SSR 不发 user_posted XHR，
     // 先尝试从 window.__INITIAL_STATE__ 读 SSR 数据，能拿到就当成功。
@@ -681,7 +682,49 @@ async function runXhsCreatorPosts(payload) {
     } catch (e) {
       console.warn("[pulse] xhs SSR fallback failed:", e?.message || e);
     }
-    // XHR + SSR 都拿不到任何东西才算失败
+    // 兜底：直接扫 DOM 抓 stats + posts（用户截图确认 .user-interactions / section.note-item 稳定）
+    let domDebug = null;
+    try {
+      const dom = await chrome.tabs.sendMessage(tabId, {
+        from: "bg", action: "read_dom_stats",
+      }).catch(() => null);
+      domDebug = dom ? { ...dom, posts: undefined, posts_count: dom.posts?.length || 0 } : null;
+      if (dom) {
+        // 补 stats（已有非 0 值不覆盖）
+        if (!profile?.followers_count && dom.fans_text) profile.followers_count = parseCount(dom.fans_text);
+        if (!profile?.likes_count && dom.interactions_text) profile.likes_count = parseCount(dom.interactions_text);
+        if (!profile?.notes_count && dom.notes_text) profile.notes_count = parseCount(dom.notes_text);
+        if (!profile?.following_count && dom.follows_text) profile.following_count = parseCount(dom.follows_text);
+        // 合并 posts（DOM 抓到的封面/标题对缺失字段做补全）
+        if (Array.isArray(dom.posts) && dom.posts.length) {
+          const byId = new Map(posts.map((p) => [p.post_id, p]));
+          for (const dp of dom.posts) {
+            const ex = byId.get(dp.post_id);
+            if (!ex) {
+              byId.set(dp.post_id, {
+                post_id: dp.post_id,
+                title: dp.title,
+                url: dp.url,
+                xsec_token: dp.xsec_token,
+                cover_url: dp.cover_url,
+                liked_count: parseCount(dp.liked_count_text),
+                note_type: "normal",
+                creator_name: profile?.creator_name || "",
+              });
+            } else {
+              if (!ex.cover_url && dp.cover_url) ex.cover_url = dp.cover_url;
+              if (!ex.title && dp.title) ex.title = dp.title;
+              if (!ex.xsec_token && dp.xsec_token) ex.xsec_token = dp.xsec_token;
+              if (!ex.liked_count && dp.liked_count_text) ex.liked_count = parseCount(dp.liked_count_text);
+            }
+          }
+          posts = Array.from(byId.values());
+        }
+      }
+    } catch (e) {
+      console.warn("[pulse] DOM fallback failed:", e?.message || e);
+    }
+    // XHR + SSR + DOM 都拿不到任何东西才算失败
     if (posts.length === 0 && !(profile && profile.creator_name)) {
       const code = classifyFailure(resp, finalUrl);
       const e = new Error(code);
@@ -692,6 +735,8 @@ async function runXhsCreatorPosts(payload) {
       url, raw_hits: (resp?.hits || []).length, total: posts.length, posts,
       profile,
       ssr_debug: ssrDebug,
+      otherinfo_debug,
+      dom_debug: domDebug,
       seen_urls_sample: (resp?.seen_urls || []).slice(-30),
     };
   } finally {
@@ -760,6 +805,7 @@ function extractXhsCreatorPosts(hits) {
   const out = [];
   const seen = new Set();
   let profile = {};
+  let otherinfoDebug = null;
 
   for (const h of hits) {
     const url = h.url || "";
@@ -767,12 +813,39 @@ function extractXhsCreatorPosts(hits) {
 
     // 1) /user/otherinfo → 博主元信息（粉丝、获赞、头像、简介、性别等）
     if (url.includes("/user/otherinfo")) {
-      const data = body?.data || body || {};
-      const interactions = data.interactions || data.interaction_info || [];
+      // 解多层 wrapper：body / body.data / body.result.data
+      const data = body?.data || body?.result?.data || body || {};
+      // interactions 字段名候选 + element 形态候选
+      const interactions =
+        data.interactions || data.interaction_info || data.interactionInfo ||
+        data.basic_info?.interactions || [];
       const interMap = {};
       for (const it of interactions) {
-        if (it && it.type) interMap[String(it.type).toLowerCase()] = it.count;
+        if (!it) continue;
+        const t = String(it.type || it.name || "").toLowerCase();
+        if (t) interMap[t] = it.count ?? it.value ?? it.num;
       }
+      // 收集 debug 信息：第一层 body keys + data 层 keys + interactions raw
+      otherinfoDebug = {
+        body_keys: Object.keys(body).slice(0, 20),
+        data_keys: Object.keys(data).slice(0, 30),
+        interactions_raw: Array.isArray(interactions) ? interactions.slice(0, 8) : interactions,
+        inter_map: interMap,
+      };
+      const fansCount =
+        interMap.fans || interMap.fan || interMap.follower || interMap.followers ||
+        data.fans || data.fansCount || data.followerCount || data.followersCount ||
+        data.basic_info?.fans;
+      const followsCount =
+        interMap.follows || interMap.follow || interMap.following ||
+        data.follows || data.followCount || data.followingCount;
+      const likesCount =
+        interMap.interaction || interMap.interactions || interMap.liked || interMap.likes ||
+        interMap.received_likes || interMap.received_likes_and_collects ||
+        data.interactionsCount || data.interactions_count || data.likesCount || data.totalLikes;
+      const notesCount =
+        data.notes || data.notesCount || data.noteCount || data.basic_info?.notes ||
+        interMap.notes;
       profile = {
         creator_name: data.nickname || data.basic_info?.nickname || profile.creator_name || "",
         avatar_url:
@@ -781,10 +854,10 @@ function extractXhsCreatorPosts(hits) {
           data.basic_info?.imageb ||
           data.basic_info?.images?.[0] ||
           profile.avatar_url || "",
-        followers_count: parseCount(interMap.fans || data.fans || data.basic_info?.fans),
-        following_count: parseCount(interMap.follows || data.follows),
-        likes_count: parseCount(interMap.interaction || data.interactions_count),
-        notes_count: parseCount(data.notes || data.basic_info?.notes),
+        followers_count: parseCount(fansCount),
+        following_count: parseCount(followsCount),
+        likes_count: parseCount(likesCount),
+        notes_count: parseCount(notesCount),
         desc: (data.desc || data.basic_info?.desc || "").slice(0, 200),
       };
       continue;
@@ -819,7 +892,7 @@ function extractXhsCreatorPosts(hits) {
       });
     }
   }
-  return { posts: out, profile };
+  return { posts: out, profile, otherinfo_debug: otherinfoDebug };
 }
 
 async function runDouyinCreatorPosts(payload) {
@@ -827,11 +900,7 @@ async function runDouyinCreatorPosts(payload) {
   if (!url) throw new Error("url required");
   const { tabId, windowId } = await openWorkerTab(url);
   try {
-    await waitForTabComplete(tabId, 18000);
-    // 抖音博主主页 SPA 启动慢 + 「作品」走 IntersectionObserver 懒加载，
-    // 给 React 多 1.5s 把「作品」tab 渲染出来，content/douyin.js 的 scroll_mode=creator 会去点 tab + 渐进滚动
-    await sleep(2000);
-    const resp = await chrome.tabs.sendMessage(tabId, {
+    const captureMsg = {
       from: "bg",
       action: "capture_douyin",
       urlPattern: ["/aweme/v1/web/aweme/post", "/aweme/v1/web/user/profile"],
@@ -839,7 +908,36 @@ async function runDouyinCreatorPosts(payload) {
       timeout_ms: payload?.timeout_ms || 40000,
       min_hits: 1,
       scroll_mode: "creator",
-    });
+    };
+
+    let resp = null;
+    let lastErr = null;
+    // 重试 ×2：抖音博主主页偶尔会 redirect / 重渲染，content script 被销毁，
+    // 表现为 "message channel closed before a response was received"。第二次往往就好
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await waitForTabComplete(tabId, 18000);
+        // 给 React 多 2s 把「作品」tab 渲染出来；
+        // content/douyin.js 的 scroll_mode=creator 会去点 tab + 渐进滚动触发 IntersectionObserver
+        await sleep(2000);
+        resp = await chrome.tabs.sendMessage(tabId, captureMsg);
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        const m = String(e?.message || e);
+        if (!m.includes("message channel closed") && !m.includes("Could not establish connection")) {
+          throw e;
+        }
+        if (attempt === 0) {
+          console.warn("[pulse] douyin creator: channel closed, reload tab and retry once");
+          try { await chrome.tabs.update(tabId, { url, active: true }); } catch {}
+          await sleep(1500);
+        }
+      }
+    }
+    if (lastErr) throw lastErr;
+
     let finalUrl = "";
     try { finalUrl = (await chrome.tabs.get(tabId)).url || ""; } catch {}
     if (!resp || (!resp.ok && (resp.hits?.length || 0) === 0)) {

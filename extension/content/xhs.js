@@ -106,6 +106,79 @@ async function readInitialStateUser(timeoutMs = 1500) {
   });
 }
 
+// DOM 兜底 —— 用户截图确认 selector 是 .user-interactions
+// 容器内文本形如："122 关注 631 粉丝 1677 获赞与收藏"
+function readDomCreatorStats() {
+  const out = { fans_text: "", interactions_text: "", notes_text: "", follows_text: "", debug: {} };
+  try {
+    const NUM = "([0-9][0-9.,]*\\s*[万亿wWkK]?)";
+    const scope = document.querySelector(".user-interactions");
+    const scopeText = scope ? (scope.textContent || "").trim()
+                            : (document.body?.innerText || "").slice(0, 2000);
+    out.debug.scope_text = scopeText.slice(0, 200);
+    const labels = {
+      follows_text: ["关注"],
+      fans_text: ["粉丝"],
+      interactions_text: ["获赞与收藏", "获赞", "总获赞", "总点赞"],
+    };
+    for (const [field, ls] of Object.entries(labels)) {
+      for (const lab of ls) {
+        const re = new RegExp(`${NUM}\\s*${lab}\\b`);
+        const m = re.exec(scopeText);
+        if (m && m[1]) { out[field] = m[1].trim(); break; }
+      }
+    }
+    // 笔记数：tab 文字优先，否则用 .note-item 数量
+    for (const t of document.querySelectorAll("[class*='tab']")) {
+      const m = /笔记\s*([0-9][0-9.,]*\s*[万亿wWkK]?)/.exec(t.textContent || "");
+      if (m) { out.notes_text = m[1].trim(); break; }
+    }
+    if (!out.notes_text) {
+      const items = document.querySelectorAll("section.note-item");
+      if (items.length) out.notes_text = String(items.length);
+    }
+  } catch (e) {
+    out.debug.error = String(e?.message || e);
+  }
+  return out;
+}
+
+// 直接从 DOM 抓作品列表（含封面 + xsec_token）
+function readDomCreatorPosts() {
+  const posts = [];
+  try {
+    for (const item of document.querySelectorAll("section.note-item")) {
+      let noteId = "", xsecToken = "";
+      for (const a of item.querySelectorAll("a[href]")) {
+        const href = a.getAttribute("href") || "";
+        const m = href.match(/\/(?:explore|profile\/[^/]+)\/([a-f0-9]{24})/);
+        if (m) {
+          noteId = m[1];
+          const tm = href.match(/xsec_token=([^&]+)/);
+          if (tm && !xsecToken) xsecToken = decodeURIComponent(tm[1]);
+          if (xsecToken) break;
+        }
+      }
+      if (!noteId) continue;
+      const img = item.querySelector("img");
+      const footer = item.querySelector(".footer, [class*='footer']");
+      let title = footer ? (footer.textContent || "").trim() : "";
+      if (!title) title = (item.textContent || "").trim().split("\n")[0].trim();
+      const likeEl = item.querySelector("[class*='like']");
+      const likedText = likeEl ? (likeEl.textContent || "").trim() : "";
+      posts.push({
+        post_id: noteId,
+        xsec_token: xsecToken,
+        cover_url: img?.src || img?.getAttribute("data-src") || "",
+        title: title.slice(0, 200),
+        liked_count_text: likedText,
+        url: `https://www.xiaohongshu.com/explore/${noteId}${xsecToken ? "?xsec_token=" + xsecToken : ""}`,
+      });
+    }
+  } catch {}
+  return posts;
+}
+
 // 旧 SSR helper：search 页 first screen 兜底（保留以备将来）
 function extractInitialStateNotes() { return []; }
 
@@ -194,5 +267,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // background 通过 content 转发到 main world 拿 SSR 数据
     readInitialStateUser(msg.timeout_ms || 1500).then((r) => sendResponse(r));
     return true; // async
+  }
+  if (msg.action === "read_dom_stats") {
+    // 直接扫 DOM 找博主粉丝/获赞/笔记数 + 作品列表（最稳兜底）
+    const stats = readDomCreatorStats();
+    const posts = readDomCreatorPosts();
+    sendResponse({ ...stats, posts });
+    return false;
   }
 });
