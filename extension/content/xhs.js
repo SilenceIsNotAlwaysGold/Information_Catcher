@@ -270,10 +270,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true; // async
   }
   if (msg.action === "read_dom_stats") {
-    // 直接扫 DOM 找博主粉丝/获赞/笔记数 + 作品列表（最稳兜底）
-    const stats = readDomCreatorStats();
-    const posts = readDomCreatorPosts();
-    sendResponse({ ...stats, posts });
-    return false;
+    // 1. 先滚到底等懒加载稳定（连续 2 次 .note-item 数量不变就停）
+    // 2. 再读 stats + posts，这样作品数和封面才齐
+    (async () => {
+      try {
+        const el = document.scrollingElement || document.documentElement;
+        let last = -1, stable = 0;
+        const start = Date.now();
+        const maxMs = msg.scroll_max_ms || 12000;
+        while (Date.now() - start < maxMs) {
+          const cur = document.querySelectorAll("section.note-item").length;
+          if (cur === last) {
+            stable++;
+            if (stable >= 2) break;
+          } else { stable = 0; last = cur; }
+          el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+          await new Promise((r) => setTimeout(r, 1200));
+        }
+      } catch {}
+      const stats = readDomCreatorStats();
+      const posts = readDomCreatorPosts();
+      sendResponse({ ...stats, posts });
+    })();
+    return true; // async
   }
 });

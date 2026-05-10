@@ -9,6 +9,7 @@ import {
 } from "@nextui-org/table";
 import { Chip } from "@nextui-org/chip";
 import { Button } from "@nextui-org/button";
+import { Input } from "@nextui-org/input";
 import { Tooltip } from "@nextui-org/tooltip";
 import { BarChart2, ExternalLink, Users, Trash2, X as XIcon } from "lucide-react";
 import { PlatformSubNav, CreatorsCard } from "@/components/platform";
@@ -42,16 +43,30 @@ export default function XhsCreatorsPage() {
   // 博主追新的帖子：creator_id 不为 null（add_post 时关联到 monitor_creators.id）
   const allPosts = (rawPosts as Post[]).filter((p) => isXhs(p) && p.creator_id != null);
 
-  // 按作者筛选
+  // 筛选：博主 / 标题作者搜索 / 最低点赞
   const [authorFilter, setAuthorFilter] = useState<string>("");
+  const [search, setSearch] = useState<string>("");
+  const [minLikes, setMinLikes] = useState<string>("");
   const authorOptions = useMemo(() => {
     const s = new Set<string>();
     for (const p of allPosts) if (p.author) s.add(p.author);
     return Array.from(s).sort();
   }, [allPosts]);
-  const posts = authorFilter
-    ? allPosts.filter((p) => (p.author || "") === authorFilter)
-    : allPosts;
+  const posts = useMemo(() => {
+    const kw = search.trim().toLowerCase();
+    const minL = parseInt(minLikes || "0", 10);
+    return allPosts.filter((p) => {
+      if (authorFilter && (p.author || "") !== authorFilter) return false;
+      if (minL > 0 && (p.liked_count ?? 0) < minL) return false;
+      if (kw) {
+        const hay = `${p.title || ""} ${p.author || ""} ${p.note_id}`.toLowerCase();
+        if (!hay.includes(kw)) return false;
+      }
+      return true;
+    });
+  }, [allPosts, authorFilter, search, minLikes]);
+  const hasFilter = authorFilter || search || minLikes;
+  const resetFilters = () => { setAuthorFilter(""); setSearch(""); setMinLikes(""); };
   const { token } = useAuth();
 
   const handleDelete = async (note_id: string, title: string) => {
@@ -81,33 +96,43 @@ export default function XhsCreatorsPage() {
       <CreatorsCard platform="xhs" />
 
       <Card>
-        <CardHeader className="flex justify-between items-center gap-3 flex-wrap">
-          <div>
-            <p className="text-sm font-medium">已入库帖子（来自博主追新）</p>
-            <p className="text-xs text-default-400">
-              共 {allPosts.length} 条{authorFilter && `（筛选后 ${posts.length} 条）`}
-            </p>
-          </div>
-          {authorOptions.length > 0 && (
-            <div className="flex items-center gap-2">
-              <select
-                className="border border-divider rounded-md px-2 h-8 text-xs bg-background"
-                value={authorFilter}
-                onChange={(e) => setAuthorFilter(e.target.value)}
-              >
-                <option value="">全部博主</option>
-                {authorOptions.map((a) => (
-                  <option key={a} value={a}>{a}</option>
-                ))}
-              </select>
-              {authorFilter && (
-                <Button size="sm" variant="light" isIconOnly
-                  onPress={() => setAuthorFilter("")}>
-                  <XIcon size={14} />
-                </Button>
-              )}
+        <CardHeader className="flex flex-col items-stretch gap-3">
+          <div className="flex justify-between items-center gap-3 flex-wrap">
+            <div>
+              <p className="text-sm font-medium">已入库帖子（来自博主追新）</p>
+              <p className="text-xs text-default-400">
+                共 {allPosts.length} 条{hasFilter && `（筛选后 ${posts.length} 条）`}
+              </p>
             </div>
-          )}
+            {hasFilter && (
+              <Button size="sm" variant="light" startContent={<XIcon size={13} />}
+                onPress={resetFilters}>清除筛选</Button>
+            )}
+          </div>
+          <div className="flex flex-row flex-wrap items-end gap-3">
+            {authorOptions.length > 0 && (
+              <div className="min-w-[160px]">
+                <p className="text-xs text-default-500 mb-1">博主</p>
+                <select
+                  className="border border-divider rounded-md px-2 h-9 text-sm bg-background w-full"
+                  value={authorFilter}
+                  onChange={(e) => setAuthorFilter(e.target.value)}
+                >
+                  <option value="">全部博主</option>
+                  {authorOptions.map((a) => (
+                    <option key={a} value={a}>{a}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <Input size="sm" type="number" min={0} className="w-28"
+              label="点赞 ≥" labelPlacement="outside-left"
+              value={minLikes} onValueChange={setMinLikes} />
+            <Input size="sm" className="w-56"
+              label="搜索" labelPlacement="outside-left"
+              placeholder="标题 / 作者 / ID"
+              value={search} onValueChange={setSearch} />
+          </div>
         </CardHeader>
         <CardBody className="p-0">
           {loading ? (
