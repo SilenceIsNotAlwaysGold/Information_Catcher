@@ -1733,6 +1733,29 @@ async def log_fetch(
         pass
 
 
+async def list_fetch_log_for_trending_stats(
+    *, platform: str, user_tag: Optional[str] = None, limit: int = 200,
+) -> list:
+    """取最近 24h 该 platform 上的 trending fetch_log，可选按 note LIKE 'user=N %' 过滤。
+    返回按时间倒序的 [{created_at, status, note}, ...]。
+    """
+    sql = (
+        "SELECT created_at, status, note FROM fetch_log "
+        "WHERE task_type='trending' AND platform=? "
+        "  AND created_at >= datetime('now','localtime','-1 day') "
+    )
+    args: list = [platform]
+    if user_tag:
+        sql += "  AND note LIKE ? "
+        args.append(f"%{user_tag} %")
+    sql += "ORDER BY id DESC LIMIT ?"
+    args.append(int(limit))
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, args) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
 async def health_summary(days: int = 7) -> dict:
     """7 天内的抓取健康度聚合：按 platform / account / task_type 分组。"""
     async with aiosqlite.connect(DB_PATH) as db:

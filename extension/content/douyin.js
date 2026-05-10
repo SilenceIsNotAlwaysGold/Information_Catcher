@@ -55,37 +55,52 @@ function stopCapture() {
   window.postMessage({ __pulse: "control", action: "stop" }, "*");
 }
 
+// capture 期间自动滚到底，触发抖音瀑布流的翻页 XHR
+let _autoScrollTimer = null;
+function startAutoScroll() {
+  stopAutoScroll();
+  _autoScrollTimer = setInterval(() => {
+    try {
+      const el = document.scrollingElement || document.documentElement;
+      el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+      if (Math.random() < 0.15) {
+        setTimeout(() => el.scrollTo({ top: 0, behavior: "auto" }), 50);
+      }
+    } catch {}
+  }, 1200);
+}
+function stopAutoScroll() {
+  if (_autoScrollTimer) clearInterval(_autoScrollTimer);
+  _autoScrollTimer = null;
+}
+
 async function captureFor(urlPattern, timeoutMs, minHits = 1) {
   startCapture(urlPattern);
+  startAutoScroll();
   const start = Date.now();
   return new Promise((resolve) => {
+    const finish = async (extra) => {
+      stopCapture();
+      stopAutoScroll();
+      resolve({
+        ...extra,
+        hits: collectedHits.slice(),
+        seen_urls: await drainSeenUrls(),
+      });
+    };
     const tick = async () => {
       const elapsed = Date.now() - start;
       if (collectedHits.length >= minHits && elapsed >= 2000) {
-        stopCapture();
-        resolve({ ok: true, hits: collectedHits.slice(), seen_urls: await drainSeenUrls() });
+        await finish({ ok: true });
         return;
       }
-      // 风控 fail-fast
       if (captchaSignal && collectedHits.length === 0) {
-        stopCapture();
-        const seen = await drainSeenUrls();
-        resolve({
-          ok: false,
-          hits: [],
-          seen_urls: seen,
-          error: "captcha_required",
-          captcha_url: captchaSignal.url,
-        });
+        await finish({ ok: false, error: "captcha_required", captcha_url: captchaSignal.url });
         return;
       }
       if (elapsed >= timeoutMs) {
-        stopCapture();
-        const seen = await drainSeenUrls();
-        resolve({
+        await finish({
           ok: collectedHits.length > 0,
-          hits: collectedHits.slice(),
-          seen_urls: seen,
           error: collectedHits.length === 0 ? "no_response_captured" : undefined,
         });
         return;
@@ -98,15 +113,18 @@ async function captureFor(urlPattern, timeoutMs, minHits = 1) {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.from !== "bg") return;
+  if (msg.action === "__ping") {
+    sendResponse({ pong: true, host: location.hostname });
+    return false;
+  }
   if (msg.action === "capture_douyin") {
-    // 抖音搜索接口路径有几种历史变体，宽 pattern 全覆盖
     const pattern = msg.urlPattern || [
       "/aweme/v1/web/general/search/single",
       "/aweme/v1/web/search/item",
       "/aweme/v1/web/search/general",
     ];
     const timeout = msg.timeout_ms || 30000;
-    captureFor(pattern, timeout, msg.min_hits || 1).then(sendResponse);
+    captureFor(pattern, timeout, msg.min_hits ?? 0).then(sendResponse);
     return true;
   }
   if (msg.action === "scroll") {

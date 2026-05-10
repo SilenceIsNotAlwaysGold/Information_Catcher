@@ -1526,6 +1526,60 @@ async def manual_trending_check(
     }
 
 
+@router.get("/trending/stats", summary="热门抓取统计：最近一次尝试 / 最近一次成功 / 24h 摘要")
+async def trending_stats(
+    platform: str = "xhs",
+    current_user: dict = Depends(get_current_user),
+):
+    """从 fetch_log 表里聚合该用户在指定 platform 下的 trending 抓取情况。
+
+    返回：
+      - last_attempt: {ts, status, note}  最近一次尝试（不论成功失败）
+      - last_success: {ts, captured, keyword}  最近一次成功捕获到数据
+      - recent_24h:   {attempts, success, captured_total}  24 小时内汇总
+    """
+    target_uid = _scope_uid(current_user)
+    user_tag = f"user={target_uid}" if target_uid is not None else None
+    plat = (platform or "xhs").lower()
+    rows = await db.list_fetch_log_for_trending_stats(platform=plat, user_tag=user_tag)
+    last_attempt = None
+    last_success = None
+    attempts_24h = 0
+    success_24h = 0
+    captured_24h = 0
+    import re as _re
+    cap_re = _re.compile(r"captured=(\d+)")
+    kw_re  = _re.compile(r"kw=([^\s]+)")
+    for r in rows:
+        if last_attempt is None:
+            last_attempt = {"ts": r["created_at"], "status": r["status"], "note": r["note"] or ""}
+        if r["status"] == "ok" and last_success is None:
+            cap_m = cap_re.search(r["note"] or "")
+            kw_m = kw_re.search(r["note"] or "")
+            last_success = {
+                "ts": r["created_at"],
+                "captured": int(cap_m.group(1)) if cap_m else 0,
+                "keyword": kw_m.group(1) if kw_m else "",
+            }
+        # 24h 累计（rows 已按时间倒序，仅前 N 条）
+        attempts_24h += 1
+        if r["status"] == "ok":
+            success_24h += 1
+            cap_m = cap_re.search(r["note"] or "")
+            if cap_m:
+                captured_24h += int(cap_m.group(1))
+    return {
+        "platform": plat,
+        "last_attempt": last_attempt,
+        "last_success": last_success,
+        "recent_24h": {
+            "attempts": attempts_24h,
+            "success": success_24h,
+            "captured_total": captured_24h,
+        },
+    }
+
+
 # ── Rewrite Prompts (manage saved prompt templates) ──────────────────────────
 
 @router.get("/prompts", summary="改写 prompt 列表")

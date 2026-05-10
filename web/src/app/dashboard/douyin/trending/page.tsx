@@ -1,18 +1,23 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
 import { Chip } from "@nextui-org/chip";
 import { Select, SelectItem } from "@nextui-org/select";
+import { Input } from "@nextui-org/input";
 import { Checkbox } from "@nextui-org/checkbox";
+import { Pagination } from "@nextui-org/pagination";
 import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
 } from "@nextui-org/table";
 import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
 } from "@nextui-org/modal";
-import { RefreshCw, ExternalLink, Sparkles, Send, Download, TrendingUp, Trash2 } from "lucide-react";
+import {
+  RefreshCw, ExternalLink, Sparkles, Send, Download, TrendingUp, Trash2,
+  ArrowUp, ArrowDown, X as XIcon,
+} from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
@@ -71,15 +76,56 @@ export default function DouyinTrendingPage() {
   const [lockingIdx, setLockingIdx] = useState<number | null>(null);
   const [fetchingContent, setFetchingContent] = useState(false);
 
+  // 筛选 / 排序 / 分页
+  const [keywordFilter, setKeywordFilter] = useState<string>("");
+  const [rewriteFilter, setRewriteFilter] = useState<string>("");
+  const [syncFilter, setSyncFilter] = useState<string>("");
+  const [minLikes, setMinLikes] = useState<string>("");
+  const [minCollects, setMinCollects] = useState<string>("");
+  const [search, setSearch] = useState<string>("");
+  const [sortBy, setSortBy] = useState<"liked" | "collected" | "comment" | "found_at" | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(30);
+  const [stats, setStats] = useState<any>(null);
+
+  const toggleSort = (field: NonNullable<typeof sortBy>) => {
+    if (sortBy === field) setSortDir(sortDir === "asc" ? "desc" : "asc");
+    else { setSortBy(field); setSortDir("desc"); }
+  };
+  const sortIcon = (field: typeof sortBy) =>
+    sortBy === field
+      ? (sortDir === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)
+      : null;
+  const resetFilters = () => {
+    setKeywordFilter(""); setRewriteFilter(""); setSyncFilter("");
+    setMinLikes(""); setMinCollects("");
+    setSearch(""); setSortBy(null); setSortDir("desc");
+  };
+  const fmtAgo = (ts?: string) => {
+    if (!ts) return "—";
+    const t = new Date(ts.replace(" ", "T")).getTime();
+    if (!t) return ts;
+    const diff = Math.max(0, Date.now() - t);
+    const m = Math.floor(diff / 60000);
+    if (m < 1) return "刚刚";
+    if (m < 60) return `${m} 分钟前`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h} 小时前`;
+    return `${Math.floor(h / 24)} 天前`;
+  };
+
   // 静默刷新：不触发 loading state，避免轮询期间"刷新"按钮一直转圈
   const loadQuiet = useCallback(async () => {
-    const [pRes, prRes] = await Promise.all([
+    const [pRes, prRes, sRes] = await Promise.all([
       fetch(API("/trending?limit=200&platform=douyin"), { headers }).then((r) => r.json()),
       fetch(API("/prompts"),                              { headers }).then((r) => r.json()),
+      fetch(API("/trending/stats?platform=douyin"), { headers }).then((r) => r.ok ? r.json() : null).catch(() => null),
     ]);
     const newPosts = pRes.posts ?? [];
     setPosts(newPosts);
     setPrompts(prRes.prompts ?? []);
+    setStats(sRes);
     const def = (prRes.prompts ?? []).find((p: Prompt) => p.is_default) ?? (prRes.prompts ?? [])[0];
     if (def) setActivePromptId(String(def.id));
     return newPosts.length;
@@ -342,6 +388,57 @@ export default function DouyinTrendingPage() {
     );
   };
 
+  // 关键词选项
+  const keywordOptions = useMemo(() => {
+    const s = new Set<string>();
+    for (const p of posts) if (p.keyword) s.add(p.keyword);
+    return Array.from(s).sort();
+  }, [posts]);
+
+  const filteredPosts = useMemo(() => {
+    const kw = search.trim().toLowerCase();
+    const minL = parseInt(minLikes || "0", 10);
+    const minC = parseInt(minCollects || "0", 10);
+    return posts.filter((p) => {
+      if (keywordFilter && p.keyword !== keywordFilter) return false;
+      if (rewriteFilter === "done" && !p.rewritten_text) return false;
+      if (rewriteFilter === "pending" && p.rewritten_text) return false;
+      if (syncFilter === "yes" && !p.synced_to_bitable) return false;
+      if (syncFilter === "no" && p.synced_to_bitable) return false;
+      if (minL > 0 && (p.liked_count || 0) < minL) return false;
+      if (minC > 0 && (p.collected_count || 0) < minC) return false;
+      if (kw) {
+        const hay = `${p.title || ""} ${p.author || ""}`.toLowerCase();
+        if (!hay.includes(kw)) return false;
+      }
+      return true;
+    });
+  }, [posts, keywordFilter, rewriteFilter, syncFilter, minLikes, minCollects, search]);
+
+  const sortedPosts = useMemo(() => {
+    if (!sortBy) return filteredPosts;
+    const fld = sortBy === "liked" ? "liked_count"
+              : sortBy === "collected" ? "collected_count"
+              : sortBy === "comment" ? "comment_count"
+              : "found_at";
+    return [...filteredPosts].sort((a, b) => {
+      const av = (a as any)[fld] ?? (sortBy === "found_at" ? "" : 0);
+      const bv = (b as any)[fld] ?? (sortBy === "found_at" ? "" : 0);
+      const cmp = sortBy === "found_at"
+        ? String(av).localeCompare(String(bv))
+        : Number(av) - Number(bv);
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+  }, [filteredPosts, sortBy, sortDir]);
+
+  const totalCount = sortedPosts.length;
+  const pageCount = Math.max(1, Math.ceil(totalCount / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const pagedPosts = sortedPosts.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+  useEffect(() => { setPage(1); },
+    [keywordFilter, rewriteFilter, syncFilter, minLikes, minCollects, search, pageSize]);
+
   return (
     <div className="p-6 space-y-5 max-w-7xl">
       <PlatformSubNav platform="douyin" current="trending" />
@@ -352,6 +449,22 @@ export default function DouyinTrendingPage() {
           <p className="text-sm text-default-400 mt-1">
             选中视频 → 改写 → 同步飞书。每行支持「视频去水印下载」。
           </p>
+          {stats && (
+            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-default-500">
+              <span>上次尝试 <b className={stats.last_attempt?.status === "ok" ? "text-success-600" : "text-warning-600"}>
+                {fmtAgo(stats.last_attempt?.ts)}
+              </b>{stats.last_attempt && (
+                <Chip size="sm" variant="flat" className="ml-1"
+                  color={stats.last_attempt.status === "ok" ? "success" : "warning"}>
+                  {stats.last_attempt.status === "ok" ? "成功" : "失败"}
+                </Chip>
+              )}</span>
+              <span>上次成功 <b className="text-success-600">{fmtAgo(stats.last_success?.ts)}</b>
+                {stats.last_success && <span className="text-default-400">（捕获 {stats.last_success.captured} 条）</span>}
+              </span>
+              <span>24h 内 {stats.recent_24h.success}/{stats.recent_24h.attempts} 次成功，累计捕获 <b>{stats.recent_24h.captured_total}</b> 条</span>
+            </div>
+          )}
         </div>
         <div className="flex gap-2 flex-wrap">
           <TrendingSettingsButton platform="douyin" />
@@ -373,10 +486,75 @@ export default function DouyinTrendingPage() {
         </div>
       </div>
 
+      {/* 筛选条 */}
+      {posts.length > 0 && (
+        <Card>
+          <CardBody className="py-3 flex flex-row flex-wrap items-end gap-3">
+            <div className="min-w-[160px]">
+              <p className="text-xs text-default-500 mb-1">关键词</p>
+              <select
+                className="border border-divider rounded-md px-2 h-9 text-sm bg-background w-full"
+                value={keywordFilter}
+                onChange={(e) => setKeywordFilter(e.target.value)}
+              >
+                <option value="">全部关键词</option>
+                {keywordOptions.map((k) => (
+                  <option key={k} value={k}>{k}</option>
+                ))}
+              </select>
+            </div>
+            <div className="min-w-[120px]">
+              <p className="text-xs text-default-500 mb-1">改写状态</p>
+              <select
+                className="border border-divider rounded-md px-2 h-9 text-sm bg-background w-full"
+                value={rewriteFilter}
+                onChange={(e) => setRewriteFilter(e.target.value)}
+              >
+                <option value="">全部</option>
+                <option value="done">已改写</option>
+                <option value="pending">待改写</option>
+              </select>
+            </div>
+            <div className="min-w-[120px]">
+              <p className="text-xs text-default-500 mb-1">飞书同步</p>
+              <select
+                className="border border-divider rounded-md px-2 h-9 text-sm bg-background w-full"
+                value={syncFilter}
+                onChange={(e) => setSyncFilter(e.target.value)}
+              >
+                <option value="">全部</option>
+                <option value="yes">已同步</option>
+                <option value="no">未同步</option>
+              </select>
+            </div>
+            <Input size="sm" type="number" min={0} className="w-28"
+              label="点赞 ≥" labelPlacement="outside-left"
+              value={minLikes} onValueChange={setMinLikes} />
+            <Input size="sm" type="number" min={0} className="w-28"
+              label="收藏 ≥" labelPlacement="outside-left"
+              value={minCollects} onValueChange={setMinCollects} />
+            <Input size="sm" className="w-44"
+              label="搜索" labelPlacement="outside-left"
+              placeholder="标题 / 作者"
+              value={search} onValueChange={setSearch} />
+            {(keywordFilter || rewriteFilter || syncFilter
+              || minLikes || minCollects || search || sortBy) && (
+              <Button size="sm" variant="light" startContent={<XIcon size={13} />}
+                onPress={resetFilters}>
+                清除筛选
+              </Button>
+            )}
+            <span className="ml-auto text-xs text-default-500">
+              共 <b>{totalCount}</b> 条 · 第 {safePage} / {pageCount} 页
+            </span>
+          </CardBody>
+        </Card>
+      )}
+
       <Card>
         <CardHeader className="flex justify-between items-center">
           <span className="text-sm">
-            共 {posts.length} 条，已选 <strong>{selected.size}</strong> 条
+            筛选后 <b>{totalCount}</b> 条 / 全部 {posts.length} 条，已选 <strong>{selected.size}</strong> 条
           </span>
           <Button color="success" size="sm" variant="flat"
             startContent={<Send size={14} />}
@@ -406,11 +584,17 @@ export default function DouyinTrendingPage() {
             <TableHeader>
               <TableColumn className="w-10">
                 <Checkbox
-                  isSelected={posts.length > 0 && selected.size === posts.length}
-                  isIndeterminate={selected.size > 0 && selected.size < posts.length}
-                  onValueChange={(v) =>
-                    setSelected(v ? new Set(posts.map((p) => p.note_id)) : new Set())
+                  isSelected={pagedPosts.length > 0 && pagedPosts.every((p) => selected.has(p.note_id))}
+                  isIndeterminate={
+                    pagedPosts.some((p) => selected.has(p.note_id)) &&
+                    !pagedPosts.every((p) => selected.has(p.note_id))
                   }
+                  onValueChange={(v) => {
+                    const next = new Set(selected);
+                    if (v) pagedPosts.forEach((p) => next.add(p.note_id));
+                    else pagedPosts.forEach((p) => next.delete(p.note_id));
+                    setSelected(next);
+                  }}
                 />
               </TableColumn>
               <TableColumn>关键词</TableColumn>
@@ -418,14 +602,24 @@ export default function DouyinTrendingPage() {
               <TableColumn>标题</TableColumn>
               <TableColumn>文案</TableColumn>
               <TableColumn>作者</TableColumn>
-              <TableColumn>点赞</TableColumn>
-              <TableColumn>评论</TableColumn>
+              <TableColumn>
+                <button type="button" className="inline-flex items-center gap-1 text-xs"
+                  onClick={() => toggleSort("liked")}>
+                  点赞 {sortIcon("liked")}
+                </button>
+              </TableColumn>
+              <TableColumn>
+                <button type="button" className="inline-flex items-center gap-1 text-xs"
+                  onClick={() => toggleSort("comment")}>
+                  评论 {sortIcon("comment")}
+                </button>
+              </TableColumn>
               <TableColumn>状态</TableColumn>
               <TableColumn>改写预览</TableColumn>
               <TableColumn>操作</TableColumn>
             </TableHeader>
             <TableBody>
-              {posts.map((p) => (
+              {pagedPosts.map((p) => (
                 <TableRow key={p.note_id}>
                   <TableCell>
                     <Checkbox
@@ -512,6 +706,27 @@ export default function DouyinTrendingPage() {
           </Table>
           )}
         </CardBody>
+        {!loading && posts.length > 0 && (
+          <div className="flex items-center justify-between p-3 border-t border-divider">
+            <div className="flex items-center gap-2 text-xs text-default-500">
+              每页
+              <select
+                className="border border-divider rounded-md px-2 h-7 text-xs bg-background"
+                value={pageSize}
+                onChange={(e) => setPageSize(parseInt(e.target.value, 10))}
+              >
+                <option value={30}>30</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+              </select>
+            </div>
+            <Pagination
+              showControls size="sm" color="primary"
+              page={safePage} total={pageCount}
+              onChange={setPage}
+            />
+          </div>
+        )}
       </Card>
 
       {/* Detail / Rewrite Modal */}
