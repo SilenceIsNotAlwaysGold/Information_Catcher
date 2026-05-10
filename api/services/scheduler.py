@@ -389,18 +389,26 @@ async def _filter_by_user_pace(items: list, *, kind: str) -> tuple[list, int]:
     return kept, skipped
 
 
-async def run_monitor():
-    """Periodic job: check all active monitored posts."""
+async def run_monitor(*, manual: bool = False, only_user_id: Optional[int] = None):
+    """Periodic job: check all active monitored posts.
+
+    `manual=True`：用户主动触发，跳过 per-user pace 过滤 + 不跳过死帖（fail_count 5）。
+    `only_user_id`：只跑该用户的帖子（手动检测时只跑自己的，省算力）。
+    """
     settings = await db.get_all_settings()
 
-    posts = await db.get_active_posts()
-    # 按用户级抓取频率过滤：用户配了 monitor_interval_minutes > 0 时，
-    # 距上次跑没到点的用户的所有帖子都跳过，到点的用户跑完更新 last_run。
-    # 配 0 = 跟全局，不过滤。
-    posts, paced_skipped = await _filter_by_user_pace(posts, kind="monitor")
-    if paced_skipped:
-        logger.info(f"[monitor] paced-skip {paced_skipped} posts (per-user interval not reached)")
-    logger.info(f"[monitor] checking {len(posts)} posts")
+    posts = await db.get_active_posts(user_id=only_user_id)
+    if manual:
+        logger.info(f"[monitor] manual run user={only_user_id} posts={len(posts)} "
+                    f"(skip pace filter + dead post filter)")
+    else:
+        # 按用户级抓取频率过滤：用户配了 monitor_interval_minutes > 0 时，
+        # 距上次跑没到点的用户的所有帖子都跳过，到点的用户跑完更新 last_run。
+        # 配 0 = 跟全局，不过滤。
+        posts, paced_skipped = await _filter_by_user_pace(posts, kind="monitor")
+        if paced_skipped:
+            logger.info(f"[monitor] paced-skip {paced_skipped} posts (per-user interval not reached)")
+        logger.info(f"[monitor] checking {len(posts)} posts")
 
     # Pre-load distinct accounts to avoid one DB query per post (N+1).
     account_cache: dict = {}
@@ -439,7 +447,8 @@ async def run_monitor():
 
     async def _process(post):
         nonlocal skipped
-        if (post.get("fail_count") or 0) >= db.DEAD_POST_FAIL_THRESHOLD:
+        # 手动触发时不跳死帖（用户主动想再试一次）
+        if not manual and (post.get("fail_count") or 0) >= db.DEAD_POST_FAIL_THRESHOLD:
             skipped += 1
             return
         async with sem:
@@ -742,80 +751,6 @@ async def run_creator_check():
                     logger.warning(f"[creator_check] notify failed: {e}")
 
 
-async def run_live_check():
-    """直播间监控：通过浏览器扩展拉直播间状态（在线人数 / 主播信息）。
-
-    扩展跑在用户自己浏览器里，零封号风险。
-    """
-    from . import extension_dispatcher
-
-    lives = await db.list_lives()
-    if not lives:
-        return
-    logger.info(f"[live_check] checking {len(lives)} live rooms via extension")
-
-    from . import auth_service
-    import json as _json
-
-    online_cache: dict = {}
-
-    def _has_ext(uid):
-        if uid not in online_cache:
-            online_cache[uid] = extension_dispatcher.has_online_extension(uid)
-        return online_cache[uid]
-
-    for live in lives:
-        uid = live.get("user_id")
-        if not _has_ext(uid):
-            continue
-
-        try:
-            res = await extension_dispatcher.dispatch_douyin_live_status(
-                user_id=uid, live_url=live["room_url"],
-            )
-        except Exception as e:
-            logger.error(f"[live_check] {live['room_url']} dispatch error: {e}")
-            continue
-        if not res or not res.get("ok"):
-            continue
-        state = {
-            "online": res.get("online_count", 0),
-            "gifts": [],
-            "streamer_name": "",
-            "room_id": "",
-        }
-
-        prev_online = int(live.get("last_online") or 0)
-        new_online = int(state.get("online") or 0)
-        delta = new_online - prev_online
-        thr = int(live.get("online_alert_threshold") or 0)
-
-        await db.update_live_check(
-            live["id"], online=new_online,
-            gifts_json=_json.dumps(state.get("gifts") or [], ensure_ascii=False),
-            streamer_name=state.get("streamer_name") or "",
-            room_id=state.get("room_id") or "",
-        )
-
-        # 涨幅触发告警（推用户自己的 webhook / chat_id）
-        if thr > 0 and delta >= thr:
-            u = auth_service.get_user_by_id(uid) or {}
-            wecom = u.get("wecom_webhook_url", "")
-            feishu = u.get("feishu_webhook_url", "")
-            chat = u.get("feishu_chat_id", "")
-            if wecom or feishu or chat:
-                title = f"{state.get('streamer_name') or '直播间'} 在线人数 {prev_online}→{new_online}（+{delta}）"
-                try:
-                    await notifier.notify_metric(
-                        wecom, feishu, title, "", "",
-                        "[直播] 涨幅告警",
-                        f"房间：{live['room_url']}\n当前在线：{new_online}\n涨幅：+{delta}",
-                        feishu_chat_id=chat,
-                    )
-                except Exception as e:
-                    logger.warning(f"[live_check] notify error: {e}")
-
-
 async def run_cookie_health_check():
     """Deprecated: Pulse 已切扩展通道，cookie 不再驱动抓取流程。"""
     return
@@ -1005,17 +940,26 @@ async def run_trending_monitor(platform: Optional[str] = None, user_id: Optional
 
     for tu in targets:
         uid = tu["id"]
-        keywords_raw = (tu.get("trending_keywords") or "").strip()
-        if not keywords_raw:
+        # P10.4: per-platform 配置。合并 xhs / douyin / 全局 fallback 的所有 keywords，
+        # 每个 keyword 在该 platform 自己的 min_likes/max_per_keyword 下运行。
+        from . import auth_service as _auth_helper
+        cfg_xhs = _auth_helper.get_trending_for_platform(tu, "xhs")
+        cfg_dy  = _auth_helper.get_trending_for_platform(tu, "douyin")
+        kw_set = set()
+        for c in (cfg_xhs, cfg_dy):
+            if c["keywords"]:
+                kw_set.update(k.strip() for k in c["keywords"].replace("，", ",").split(",") if k.strip())
+        if not kw_set:
             continue
         # 用户级抓取频率：未到点跳过该用户（手动触发 user_id != None 时不过滤）
         user_interval = int(tu.get("trending_interval_minutes") or 0)
         if user_id is None and not await _user_should_run(uid, "trending", user_interval):
             logger.debug(f"[trending] uid={uid} paced skip (interval={user_interval}min)")
             continue
-        keywords = [k.strip() for k in keywords_raw.replace("，", ",").split(",") if k.strip()]
-        min_likes = int(tu.get("trending_min_likes") or 1000)
-        max_per_keyword = int(tu.get("trending_max_per_keyword") or 30)
+        keywords = list(kw_set)
+        # 兼容老变量名（cookie 通道 fallback 用）
+        min_likes = cfg_xhs.get("min_likes") or 1000
+        max_per_keyword = cfg_xhs.get("max_per_keyword") or 30
 
         # 该用户的推送渠道（chat_id 优先，webhook 兜底）
         full_user = auth_service.get_user_by_id(uid) or {}
@@ -1041,24 +985,30 @@ async def run_trending_monitor(platform: Optional[str] = None, user_id: Optional
                 use_ext = True
 
             if use_ext:
-                # 扩展现已支持 xhs + douyin。若用户传了 platform 参数就按它走，
-                # 否则按当前 keyword 模式跑两个平台（先 xhs 再 douyin）。
+                # 扩展现已支持 xhs + douyin。每个平台用自己 platform-specific 的
+                # min_likes / max_per_keyword 跑，且只在 keyword 属于该平台配置时才跑。
                 target_platforms = [platform] if platform in ("xhs", "douyin") else ["xhs", "douyin"]
                 import time as _t
                 for ext_platform in target_platforms:
+                    pcfg = cfg_dy if ext_platform == "douyin" else cfg_xhs
+                    pkw_list = [k.strip() for k in (pcfg["keywords"] or "").replace("，", ",").split(",") if k.strip()]
+                    if pkw_list and keyword not in pkw_list:
+                        continue  # 该关键词不在这个平台的配置里
+                    p_min_likes = pcfg["min_likes"]
+                    p_max_kw = pcfg["max_per_keyword"]
                     await db.cursor_mark_running("trending", cursor_key)
                     _t0 = _t.perf_counter()
                     try:
                         if ext_platform == "douyin":
                             res = await extension_dispatcher.dispatch_douyin_search(
-                                user_id=uid, keyword=keyword, min_likes=min_likes,
-                                max_results=max_per_keyword,
+                                user_id=uid, keyword=keyword, min_likes=p_min_likes,
+                                max_results=p_max_kw,
                                 timeout_ms=30000, overall_timeout=120.0,
                             )
                         else:
                             res = await extension_dispatcher.dispatch_xhs_search(
-                                user_id=uid, keyword=keyword, min_likes=min_likes,
-                                max_results=max_per_keyword,
+                                user_id=uid, keyword=keyword, min_likes=p_min_likes,
+                                max_results=p_max_kw,
                                 timeout_ms=30000, overall_timeout=90.0,
                             )
                         _ms = int((_t.perf_counter() - _t0) * 1000)
@@ -1296,9 +1246,11 @@ async def start_scheduler():
     # 之前 cookie 通道时设成 6h 是为防风控，现在切扩展通道后放到 1h 一次
     scheduler.add_job(run_creator_check, "interval", hours=1,
                       id="creator_check", replace_existing=True)
-    # 直播间状态轮询（每 5 分钟）
-    scheduler.add_job(run_live_check, "interval", minutes=5,
-                      id="live_check", replace_existing=True)
+    # 直播间监控已下线（2026-05-10）：删 add_job + 移除已注册的 live_check
+    try:
+        scheduler.remove_job("live_check")
+    except Exception:
+        pass
     # Cookie 健康度探针：已废弃（Pulse 已全面切扩展通道）。
     try:
         scheduler.remove_job("cookie_health")

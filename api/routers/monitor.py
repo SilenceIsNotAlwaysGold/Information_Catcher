@@ -24,7 +24,6 @@ from ..schemas.monitor import (
     CreateGroupRequest,
     UpdateGroupRequest,
     AddCreatorRequest,
-    AddLiveRequest,
 )
 from ..services import monitor_db as db
 from ..services import monitor_fetcher as fetcher
@@ -493,9 +492,16 @@ async def post_history(
 @router.post("/check", summary="立即检测一次")
 async def manual_check(
     background_tasks: BackgroundTasks,
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
-    background_tasks.add_task(sched.run_monitor)
+    """手动触发监控检测：
+    - 跳过 per-user pace filter（用户主动行为，立刻跑）
+    - 跳过死帖过滤（fail_count >= 5 也尝试一次）
+    - 仅跑当前用户的帖子（admin 也只跑自己的，全平台扫描走定时任务）
+    """
+    background_tasks.add_task(
+        sched.run_monitor, manual=True, only_user_id=current_user["id"],
+    )
     return {"ok": True, "message": "检测任务已触发"}
 
 
@@ -743,79 +749,10 @@ async def list_creator_posts_endpoint(
     return {"posts": posts, "creator_id": creator_id}
 
 
-# ── Lives / 直播间监控 v1 ───────────────────────────────────────────────────
-
-@router.get("/lives", summary="直播订阅列表")
-async def list_lives(current_user: dict = Depends(get_current_user)):
-    return {"lives": await db.list_lives(user_id=_scope_uid(current_user))}
-
-
-@router.post("/lives", summary="添加直播订阅")
-async def add_live(
-    req: AddLiveRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    if "live.douyin.com" not in (req.room_url or ""):
-        raise HTTPException(status_code=400, detail="目前只支持抖音直播 URL（live.douyin.com/{room_id}）")
-    lid = await db.add_live(
-        user_id=current_user["id"],
-        platform=req.platform or "douyin",
-        room_url=req.room_url.strip(),
-        streamer_name=req.streamer_name or "",
-        online_alert_threshold=req.online_alert_threshold or 0,
-    )
-    return {"ok": True, "id": lid}
-
-
-@router.delete("/lives/{live_id}", summary="取消直播订阅")
-async def delete_live(
-    live_id: int,
-    current_user: dict = Depends(get_current_user),
-):
-    await db.delete_live(live_id, user_id=_scope_uid(current_user))
-    return {"ok": True}
-
-
-@router.post("/lives/{live_id}/check", summary="立刻拉取直播间状态")
-async def check_live(
-    live_id: int,
-    current_user: dict = Depends(get_current_user),
-):
-    from ..services import extension_dispatcher
-    user_id = int(current_user["id"])
-    lives = await db.list_lives(user_id=_scope_uid(current_user))
-    live = next((l for l in lives if l["id"] == live_id), None)
-    if not live:
-        raise HTTPException(status_code=404, detail="直播订阅不存在")
-    if not extension_dispatcher.has_online_extension(user_id):
-        raise HTTPException(
-            status_code=503,
-            detail="未检测到在线浏览器扩展。请先安装 TrendPulse Helper 扩展，并在浏览器登录抖音。",
-        )
-    res = await extension_dispatcher.dispatch_douyin_live_status(
-        user_id=user_id, live_url=live["room_url"],
-    )
-    if not res.get("ok"):
-        raise HTTPException(
-            status_code=502,
-            detail=f"未抓到直播间状态：{res.get('error', '')[:200] or '可能未开播'}",
-        )
-    state = {
-        "online": res.get("online_count", 0),
-        "title": res.get("title", ""),
-        "streamer_name": "",
-        "room_id": "",
-        "gifts": [],
-    }
-    import json as _json
-    await db.update_live_check(
-        live_id,
-        online=int(state.get("online") or 0),
-        gifts_json=_json.dumps(state.get("gifts") or [], ensure_ascii=False),
-        streamer_name=state.get("streamer_name") or "",
-        room_id=state.get("room_id") or "",
-    )
-    return {"ok": True, "state": state}
+# ── Lives / 直播间监控（已下线，2026-05-10）─────────────────────────────────
+# 抖音直播间监控功能已停用。原 /lives 路由（GET/POST/DELETE/check）全部移除。
+# DB 表 monitor_lives 与 db helper（list_lives/add_live/delete_live/update_live_check）
+# 保留以避免历史数据丢失；如需恢复，重新挂回 /lives 路由即可。
 
 
 # ── Admin 全平台视图 ────────────────────────────────────────────────────────
@@ -846,14 +783,12 @@ async def admin_overview(current_user: dict = Depends(get_current_user)):
 
     accounts = await db.get_accounts(include_secrets=False)
     creators = await db.list_creators()
-    lives = await db.list_lives()
     return {
         "user_count": user_count,
         "active_user_count": active_users,
         "total_posts": total_posts,
         "total_accounts": len(accounts),
         "total_creators": len(creators),
-        "total_lives": len(lives),
         "posts_by_platform": by_platform,
         "posts_by_user_count": len([uid for uid, n in by_user.items() if n > 0]),
         "users_recent": users[:5],
@@ -866,11 +801,10 @@ async def admin_list_users(current_user: dict = Depends(get_current_user)):
     from ..services import auth_service
     users = auth_service.list_users()
 
-    # 一次性聚合统计：posts / accounts / alerts / creators / lives 按 user_id 分组
+    # 一次性聚合统计：posts / accounts / alerts / creators 按 user_id 分组
     posts = await db.get_posts()
     accounts = await db.get_accounts(include_secrets=False)
     creators = await db.list_creators()
-    lives = await db.list_lives()
 
     posts_by_uid: dict = {}
     plat_by_uid: dict = {}
@@ -895,11 +829,6 @@ async def admin_list_users(current_user: dict = Depends(get_current_user)):
         uid = c.get("user_id") or 0
         creators_by_uid[uid] = creators_by_uid.get(uid, 0) + 1
 
-    lives_by_uid: dict = {}
-    for l in lives:
-        uid = l.get("user_id") or 0
-        lives_by_uid[uid] = lives_by_uid.get(uid, 0) + 1
-
     out = []
     for u in users:
         uid = u["id"]
@@ -908,7 +837,6 @@ async def admin_list_users(current_user: dict = Depends(get_current_user)):
             "post_count": posts_by_uid.get(uid, 0),
             "account_count": accounts_by_uid.get(uid, 0),
             "creator_count": creators_by_uid.get(uid, 0),
-            "live_count": lives_by_uid.get(uid, 0),
             "posts_by_platform": plat_by_uid.get(uid, {}),
             "last_post_at": last_post_at_by_uid.get(uid, ""),
         })

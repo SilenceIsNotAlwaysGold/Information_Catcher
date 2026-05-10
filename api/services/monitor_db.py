@@ -1337,15 +1337,21 @@ async def update_post_group(note_id: str, group_id: Optional[int], user_id: Opti
         await db.commit()
 
 
-async def get_active_posts() -> List[Dict]:
+async def get_active_posts(user_id: Optional[int] = None) -> List[Dict]:
+    """监控中（is_active=1）的帖子。`user_id` 非空时仅返回该用户的帖子。"""
+    sql = (
+        "SELECT p.*, a.cookie AS account_cookie "
+        "FROM monitor_posts p "
+        "LEFT JOIN monitor_accounts a ON p.account_id = a.id "
+        "WHERE p.is_active = 1"
+    )
+    args: list = []
+    if user_id is not None:
+        sql += " AND p.user_id = ?"
+        args.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("""
-            SELECT p.*, a.cookie AS account_cookie
-            FROM monitor_posts p
-            LEFT JOIN monitor_accounts a ON p.account_id = a.id
-            WHERE p.is_active = 1
-        """) as cur:
+        async with db.execute(sql, args) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
 

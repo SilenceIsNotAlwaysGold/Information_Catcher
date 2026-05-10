@@ -21,6 +21,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
 import { MonitorPaceButton } from "@/components/MonitorPaceButton";
+import { MoveGroupButton } from "@/components/MoveGroupButton";
 import { toastOk, toastErr } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { useAccounts, useGroups, usePosts, useAlerts, useMe, mutatePosts, mutateAlerts } from "@/lib/useApi";
@@ -371,6 +372,13 @@ export default function XhsPostsPage() {
                             <BarChart2 size={15} />
                           </Button>
                         </Tooltip>
+                        <MoveGroupButton
+                          noteId={p.note_id}
+                          currentGroupId={p.group_id ?? null}
+                          groups={groups}
+                          onMoved={() => mutatePosts()}
+                          ownerUserId={p.user_id}
+                        />
                         <Tooltip content="删除" color="danger">
                           <Button isIconOnly size="sm" variant="light" color="danger"
                             onPress={() => handleDelete(p.note_id, p.user_id)}>
@@ -445,9 +453,17 @@ export default function XhsPostsPage() {
                             </span>
                           </TableCell>
                           <TableCell>
-                            <Button isIconOnly size="sm" variant="light" color="danger" onPress={() => handleDelete(p.note_id)}>
-                              <Trash2 size={14} />
-                            </Button>
+                            <div className="flex items-center gap-0.5">
+                              <MoveGroupButton
+                                noteId={p.note_id}
+                                currentGroupId={p.group_id ?? null}
+                                groups={groups}
+                                onMoved={() => mutatePosts()}
+                              />
+                              <Button isIconOnly size="sm" variant="light" color="danger" onPress={() => handleDelete(p.note_id)}>
+                                <Trash2 size={14} />
+                              </Button>
+                            </div>
                           </TableCell>
                         </TableRow>
                       ))}
@@ -529,6 +545,12 @@ export default function XhsPostsPage() {
                                   <BarChart2 size={15} />
                                 </Button>
                               </Tooltip>
+                              <MoveGroupButton
+                                noteId={p.note_id}
+                                currentGroupId={p.group_id ?? null}
+                                groups={groups}
+                                onMoved={() => mutatePosts()}
+                              />
                               <Tooltip content="删除" color="danger">
                                 <Button isIconOnly size="sm" variant="light" color="danger"
                                   onPress={() => handleDelete(p.note_id)}>
