@@ -116,16 +116,10 @@ async def list_posts(
     platform: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    # admin 看全平台所有用户的帖子；普通用户只看自己的
-    is_admin = (current_user.get("role") or "user") == "admin"
-    uid = None if is_admin else _scope_uid(current_user)
-    posts = await db.get_posts(user_id=uid, platform=platform)
-    if is_admin and posts:
-        from ..services import auth_service
-        user_map = {u["id"]: u.get("username") or u.get("email") or str(u["id"])
-                    for u in auth_service.list_users()}
-        for p in posts:
-            p["owner_username"] = user_map.get(p.get("user_id"), "?")
+    """监控帖子列表：所有角色（含 admin）都只看自己的帖子。
+    admin 想看其它用户的帖子请用 /api/auth/admin/users/{user_id}/posts。
+    """
+    posts = await db.get_posts(user_id=_scope_uid(current_user), platform=platform)
     return {"posts": posts}
 
 

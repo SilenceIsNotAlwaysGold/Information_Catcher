@@ -250,6 +250,7 @@ export default function XhsPostsPage() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(30);
+  const [alertsOpen, setAlertsOpen] = useState(false);
 
   const toggleSort = (field: "liked" | "collected" | "comment" | "checked") => {
     if (sortBy === field) setSortDir(sortDir === "asc" ? "desc" : "asc");
@@ -444,6 +445,78 @@ export default function XhsPostsPage() {
         </Card>
       ) : (
       <>
+        {/* 告警记录（顶部 banner，默认折叠以省空间；点击展开看详情） */}
+        {alerts.length > 0 && (
+          <Card className="border-warning/40 bg-warning/5">
+            <CardHeader
+              className="flex justify-between items-center py-2 cursor-pointer select-none"
+              onClick={() => setAlertsOpen((v) => !v)}
+            >
+              <div className="flex items-center gap-2 text-warning-700">
+                <span className="text-base">⚠️</span>
+                <span className="text-sm font-medium">
+                  告警记录（{alerts.length} 条未处理）
+                </span>
+                <span className="text-xs text-default-500">
+                  {alertsOpen ? "点击折叠" : "点击展开"}
+                </span>
+              </div>
+              <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                <Button size="sm" variant="flat" color="danger"
+                  startContent={<Trash2 size={14} />}
+                  onPress={handleClearAlerts}>
+                  清空
+                </Button>
+                <Button size="sm" variant="light" isIconOnly
+                  onPress={() => setAlertsOpen((v) => !v)}>
+                  {alertsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                </Button>
+              </div>
+            </CardHeader>
+            {alertsOpen && (
+              <CardBody className="p-0 border-t border-divider">
+                <Table aria-label="alerts" removeWrapper>
+                  <TableHeader>
+                    <TableColumn>类型</TableColumn>
+                    <TableColumn>帖子</TableColumn>
+                    <TableColumn>消息</TableColumn>
+                    <TableColumn>时间</TableColumn>
+                    <TableColumn>操作</TableColumn>
+                  </TableHeader>
+                  <TableBody>
+                    {alerts.map((a) => (
+                      <TableRow key={a.id}>
+                        <TableCell>
+                          <Chip size="sm" color={alertTypeColor(a.alert_type)} variant="flat">
+                            {alertTypeLabel(a.alert_type)}
+                          </Chip>
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-sm truncate max-w-xs block">
+                            {a.title || a.note_id}
+                          </span>
+                        </TableCell>
+                        <TableCell><span className="text-sm">{a.message}</span></TableCell>
+                        <TableCell>
+                          <span className="text-xs text-default-400">{a.created_at?.slice(0, 16)}</span>
+                        </TableCell>
+                        <TableCell>
+                          <Tooltip content="删除" color="danger">
+                            <Button isIconOnly size="sm" variant="light" color="danger"
+                              onPress={() => handleDeleteAlert(a.id)}>
+                              <Trash2 size={15} />
+                            </Button>
+                          </Tooltip>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardBody>
+            )}
+          </Card>
+        )}
+
         {/* 筛选条 */}
         <Card>
           <CardBody className="py-3 flex flex-row flex-wrap items-end gap-3">
@@ -515,7 +588,7 @@ export default function XhsPostsPage() {
                 </TableColumn>
                 <TableColumn>标题 / ID</TableColumn>
                 <TableColumn>分组</TableColumn>
-                {isAdmin ? <TableColumn>所属用户</TableColumn> : <></>}
+                {/* admin 也只看自己的帖子；查别人帖子走 /admin/users/{id}/posts */}
                 <TableColumn>状态</TableColumn>
                 <TableColumn>
                   <button onClick={() => toggleSort("liked")} className="inline-flex items-center gap-1 hover:text-foreground">
@@ -569,11 +642,6 @@ export default function XhsPostsPage() {
                         {groupNameOf(p.group_id ?? null)}
                       </Chip>
                     </TableCell>
-                    {isAdmin ? (
-                      <TableCell>
-                        <Chip size="sm" variant="flat" color="secondary">{p.owner_username ?? "—"}</Chip>
-                      </TableCell>
-                    ) : <></>}
                     <TableCell>{fetchStatusChip(p)}</TableCell>
                     <TableCell><span className="font-medium">{p.liked_count ?? "—"}</span></TableCell>
                     <TableCell><span className="font-medium">{p.collected_count ?? "—"}</span></TableCell>
@@ -643,58 +711,6 @@ export default function XhsPostsPage() {
           )}
         </Card>
 
-        {/* 告警记录（独立 section） */}
-        {alerts.length > 0 && (
-          <Card>
-            <CardHeader className="flex justify-between items-center py-2">
-              <span className="text-sm font-medium">告警记录（{alerts.length} 条）</span>
-              <Button size="sm" variant="flat" color="danger"
-                startContent={<Trash2 size={14} />}
-                onPress={handleClearAlerts}>
-                清空告警
-              </Button>
-            </CardHeader>
-            <CardBody className="p-0">
-              <Table aria-label="alerts" removeWrapper>
-                <TableHeader>
-                  <TableColumn>类型</TableColumn>
-                  <TableColumn>帖子</TableColumn>
-                  <TableColumn>消息</TableColumn>
-                  <TableColumn>时间</TableColumn>
-                  <TableColumn>操作</TableColumn>
-                </TableHeader>
-                <TableBody>
-                  {alerts.map((a) => (
-                    <TableRow key={a.id}>
-                      <TableCell>
-                        <Chip size="sm" color={alertTypeColor(a.alert_type)} variant="flat">
-                          {alertTypeLabel(a.alert_type)}
-                        </Chip>
-                      </TableCell>
-                      <TableCell>
-                        <span className="text-sm truncate max-w-xs block">
-                          {a.title || a.note_id}
-                        </span>
-                      </TableCell>
-                      <TableCell><span className="text-sm">{a.message}</span></TableCell>
-                      <TableCell>
-                        <span className="text-xs text-default-400">{a.created_at?.slice(0, 16)}</span>
-                      </TableCell>
-                      <TableCell>
-                        <Tooltip content="删除" color="danger">
-                          <Button isIconOnly size="sm" variant="light" color="danger"
-                            onPress={() => handleDeleteAlert(a.id)}>
-                            <Trash2 size={15} />
-                          </Button>
-                        </Tooltip>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </CardBody>
-          </Card>
-        )}
       </>
       )}
 
