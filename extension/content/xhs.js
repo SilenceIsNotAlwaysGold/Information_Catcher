@@ -129,15 +129,10 @@ function readDomCreatorStats() {
         if (m && m[1]) { out[field] = m[1].trim(); break; }
       }
     }
-    // 笔记数：tab 文字优先，否则用 .note-item 数量
-    for (const t of document.querySelectorAll("[class*='tab']")) {
-      const m = /笔记\s*([0-9][0-9.,]*\s*[万亿wWkK]?)/.exec(t.textContent || "");
-      if (m) { out.notes_text = m[1].trim(); break; }
-    }
-    if (!out.notes_text) {
-      const items = document.querySelectorAll("section.note-item");
-      if (items.length) out.notes_text = String(items.length);
-    }
+    // 笔记数：直接用 DOM 上实际加载的 .note-item 数量（read_dom_stats 调用前会等懒加载稳定）
+    // 之前优先取 tab 文字会命中"笔记 14"这种 badge 误差值，远小于实际数。
+    const items = document.querySelectorAll("section.note-item");
+    if (items.length) out.notes_text = String(items.length);
   } catch (e) {
     out.debug.error = String(e?.message || e);
   }
