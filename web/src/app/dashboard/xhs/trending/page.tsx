@@ -80,6 +80,28 @@ export default function XhsTrendingPage() {
   const [fetchingContent, setFetchingContent] = useState(false);
   const [backfilling, setBackfilling] = useState(false);
 
+  // 静默刷新：不触发 loading state（避免轮询期间刷新按钮一直转圈），
+  // 返回最新 posts.length 给调用方做"任务是否还在新增数据"判断
+  const loadQuiet = useCallback(async () => {
+    const [pRes, prRes] = await Promise.all([
+      fetch(API("/trending?limit=200&platform=xhs"), { headers }).then((r) => r.json()),
+      fetch(API("/prompts"),               { headers }).then((r) => r.json()),
+    ]);
+    const newPosts = pRes.posts ?? [];
+    setPosts(newPosts);
+    setPrompts(prRes.prompts ?? []);
+    const def = (prRes.prompts ?? []).find((p: Prompt) => p.is_default) ?? (prRes.prompts ?? [])[0];
+    if (def) setActivePromptId(String(def.id));
+    return newPosts.length;
+  }, [token]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { await loadQuiet(); } finally { setLoading(false); }
+  }, [loadQuiet]);
+
+  useEffect(() => { load(); }, [load]);
+
   const backfillMedia = async () => {
     setBackfilling(true);
     try {
@@ -90,34 +112,15 @@ export default function XhsTrendingPage() {
       if (!r.ok) {
         toastErr(d.detail || "触发失败"); return;
       }
-      // 后台异步执行；轮询刷新
+      // 后台异步执行；轮询刷新（静默，不让"刷新"按钮跟着转）
       for (let i = 0; i < 6; i++) {
         await new Promise((r) => setTimeout(r, 8000));
-        await load();
+        await loadQuiet();
       }
     } finally {
       setBackfilling(false);
     }
   };
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [pRes, prRes] = await Promise.all([
-        fetch(API("/trending?limit=200&platform=xhs"), { headers }).then((r) => r.json()),
-        fetch(API("/prompts"),               { headers }).then((r) => r.json()),
-      ]);
-      setPosts(pRes.posts ?? []);
-      setPrompts(prRes.prompts ?? []);
-      // pick default prompt
-      const def = (prRes.prompts ?? []).find((p: Prompt) => p.is_default) ?? (prRes.prompts ?? [])[0];
-      if (def) setActivePromptId(String(def.id));
-    } finally {
-      setLoading(false);
-    }
-  }, [token]);
-
-  useEffect(() => { load(); }, [load]);
 
   const triggerCheck = async () => {
     setTriggering(true);
@@ -125,21 +128,27 @@ export default function XhsTrendingPage() {
     try {
       // 必须带 platform=xhs，否则 scheduler 会同时跑 xhs+douyin
       await fetch(API("/trending/check?platform=xhs"), { method: "POST", headers });
-      // 扩展抓取需要 15-60 秒。每 5 秒 reload 让用户实时看到数据增长，最多 60 秒
+      // 静默轮询：连续 2 次（10s）数据量稳定就提前退出，最多 60s
+      let last = before;
+      let stable = 0;
+      let final = before;
       for (let i = 0; i < 12; i++) {
         await new Promise((r) => setTimeout(r, 5000));
-        await load();
+        const cur = await loadQuiet();
+        final = cur;
+        if (cur === last) {
+          stable += 1;
+          if (stable >= 2) break;
+        } else {
+          stable = 0;
+          last = cur;
+        }
       }
+      const delta = final - before;
+      if (delta > 0) toastOk(`抓取完成，新增 ${delta} 条`);
+      else toastOk("抓取完成（无新增）");
     } finally {
-      await load();
       setTriggering(false);
-      const r = await fetch(API("/trending?limit=200&platform=xhs"), { headers });
-      if (r.ok) {
-        const d = await r.json();
-        const delta = (d.posts?.length ?? 0) - before;
-        if (delta > 0) toastOk(`抓取完成，新增 ${delta} 条`);
-        else toastOk("抓取完成（无新增）");
-      }
     }
   };
 
