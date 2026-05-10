@@ -1,7 +1,7 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -1174,7 +1174,10 @@ _ADMIN_ONLY_SETTING_KEYS = {
 
 
 @router.get("/settings", summary="获取设置")
-async def get_settings(current_user: dict = Depends(get_current_user)):
+async def get_settings(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
     """settings 接口现在混合返回：
        - 全局 monitor_settings（admin only 字段对普通用户屏蔽）
        - 当前用户自己的 webhook（feishu_webhook_url / webhook_url），覆盖全局值
@@ -1217,8 +1220,11 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
 @router.put("/settings", summary="更新设置")
 async def update_settings(
     req: UpdateSettingsRequest,
+    request: Request,
     current_user: dict = Depends(get_current_user),
 ):
+    # ?platform=xhs|douyin 时 trending 字段写入 per-platform 列；否则写全局列
+    _platform = (request.query_params.get("platform") or "").lower()
     is_admin = (current_user.get("role") or "user") == "admin"
     bool_val = lambda v: "1" if v else "0"
 
@@ -1246,6 +1252,7 @@ async def update_settings(
             max_per_keyword=req.trending_max_per_keyword,
             monitor_interval_minutes=req.monitor_interval_minutes,
             trending_interval_minutes=req.trending_interval_minutes,
+            platform=_platform if _platform in ("xhs", "douyin") else None,
         )
 
     # per-feature 飞书推送开关：直接通过 update_user_feishu 写入（_FEISHU_FIELDS 已含）
@@ -1930,6 +1937,39 @@ async def sync_trending_to_bitable(
             results.append({"note_id": nid, "ok": True})
         except Exception as e:
             results.append({"note_id": nid, "ok": False, "reason": str(e)})
+
+    # 同步成功 → 给「飞书消息同步」专属群发卡片（开关开 + lazy 建群，与 image_gen 同步一致）
+    ok_count = sum(1 for r in results if r.get("ok"))
+    fail_count = len(results) - ok_count
+    if ok_count > 0 and current_user.get("bitable_push_enabled"):
+        from ..services.feishu import provisioning as _prov
+        chat_id = await _prov.ensure_feature_chat(current_user, "bitable") or ""
+        if chat_id:
+            try:
+                from ..services.feishu import bitable as feishu_bitable_v2_2
+                tables = await feishu_bitable_v2_2.list_tables(bitable_app_token)
+                table_name = next(
+                    (t["name"] for t in tables if t["table_id"] == bitable_table_id),
+                    "热门内容表",
+                )
+            except Exception:
+                table_name = "热门内容表"
+            try:
+                from ..services.feishu import chat as chat_api
+                bitable_url = f"https://feishu.cn/base/{bitable_app_token}?table={bitable_table_id}"
+                content = (
+                    f"已同步 **{ok_count}** 条爆款到表「**{table_name}**」"
+                    + (f"，{fail_count} 条失败" if fail_count else "")
+                    + f"\n\n[👉 打开飞书表格]({bitable_url})"
+                )
+                card = chat_api.build_alert_card(
+                    "🔥 热门内容同步完成", content,
+                    template="green" if fail_count == 0 else "orange",
+                )
+                await chat_api.send_card(chat_id, card)
+            except Exception as e:
+                logger.warning(f"[trending sync] post-sync chat notify failed: {e}")
+
     return {"results": results, "target": target["source"]}
 
 
