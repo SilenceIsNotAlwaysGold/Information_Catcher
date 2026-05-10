@@ -9,7 +9,7 @@ import { Tooltip } from "@nextui-org/tooltip";
 import {
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure,
 } from "@nextui-org/modal";
-import { Plus, RefreshCw, X, Settings, Bell, BellOff } from "lucide-react";
+import { Plus, RefreshCw, X, Settings, Bell, BellOff, ChevronDown, ChevronUp } from "lucide-react";
 import { Switch } from "@nextui-org/switch";
 import { useAuth } from "@/contexts/AuthContext";
 import { CreatorRow, PlatformKey, PLATFORM_LABEL } from "./types";
@@ -34,6 +34,30 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
   const [loading, setLoading] = useState(true);
   // 用 ref 记录已经"标记已读"过的 creator id，避免每次 setState 又触发重复 POST
   const seenIdsRef = useRef<Set<number>>(new Set());
+
+  // 折叠展开：哪些博主当前展开了作品列表，以及作品缓存
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [postsByCreator, setPostsByCreator] = useState<Record<number, any[]>>({});
+  const [postsLoading, setPostsLoading] = useState<Set<number>>(new Set());
+
+  const toggleExpand = async (cid: number) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(cid)) next.delete(cid); else next.add(cid);
+      return next;
+    });
+    // 第一次展开时拉作品；之后用缓存
+    if (!postsByCreator[cid] && !postsLoading.has(cid)) {
+      setPostsLoading((p) => new Set(p).add(cid));
+      try {
+        const r = await fetch(`/api/monitor/creators/${cid}/posts?limit=60`, { headers });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) setPostsByCreator((s) => ({ ...s, [cid]: d.posts || [] }));
+      } finally {
+        setPostsLoading((p) => { const n = new Set(p); n.delete(cid); return n; });
+      }
+    }
+  };
 
   const followModal = useDisclosure();
   const [followInput, setFollowInput] = useState("");
@@ -353,6 +377,13 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
                       {/* actions */}
                       <div className="flex flex-col gap-0.5 flex-shrink-0">
                         <Button size="sm" variant="light" isIconOnly
+                          onPress={() => toggleExpand(c.id)}
+                          aria-label={expanded.has(c.id) ? "收起作品" : "展开作品"}
+                          className="min-w-0 w-7 h-7"
+                          title={expanded.has(c.id) ? "收起作品列表" : "展开作品列表"}>
+                          {expanded.has(c.id) ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                        </Button>
+                        <Button size="sm" variant="light" isIconOnly
                           onPress={() => checkOne(c.id)}
                           aria-label="立刻刷新" className="min-w-0 w-7 h-7">
                           <RefreshCw size={13} />
@@ -364,6 +395,52 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
                         </Button>
                       </div>
                     </div>
+                    {/* 展开后展示作品列表 */}
+                    {expanded.has(c.id) && (
+                      <div className="mt-3 pt-3 border-t border-default-100">
+                        {postsLoading.has(c.id) ? (
+                          <p className="text-xs text-default-400">加载中…</p>
+                        ) : !postsByCreator[c.id] || postsByCreator[c.id].length === 0 ? (
+                          <p className="text-xs text-default-400">
+                            还没抓到作品。{notes > 0
+                              ? "点上方刷新按钮触发一次抓取。"
+                              : "扩展首次抓取该博主时还没收集到作品；下一轮检测会更新。"}
+                          </p>
+                        ) : (
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                            {postsByCreator[c.id].slice(0, 12).map((p: any) => (
+                              <a key={p.id} href={p.note_url || p.short_url || "#"} target="_blank" rel="noopener noreferrer"
+                                className="block rounded-md overflow-hidden border border-default-100 hover:border-default-300 transition">
+                                {p.cover_url ? (
+                                  <img src={p.cover_url} alt="" referrerPolicy="no-referrer"
+                                    className="w-full aspect-[4/5] object-cover bg-default-100" />
+                                ) : (
+                                  <div className="w-full aspect-[4/5] bg-default-100 flex items-center justify-center text-default-300 text-[10px]">
+                                    无封面
+                                  </div>
+                                )}
+                                <div className="p-1.5">
+                                  <p className="text-[11px] text-default-700 line-clamp-2 leading-snug">
+                                    {p.title || "(无标题)"}
+                                  </p>
+                                  {(p.liked_count !== undefined && p.liked_count !== null) && (
+                                    <p className="text-[10px] text-default-400 mt-0.5">
+                                      ❤ {fmt(p.liked_count || 0)}
+                                      {p.comment_count ? ` · 💬 ${fmt(p.comment_count)}` : ""}
+                                    </p>
+                                  )}
+                                </div>
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                        {postsByCreator[c.id]?.length > 12 && (
+                          <p className="text-[10px] text-default-400 mt-2 text-center">
+                            仅展示最近 12 篇，更多请去帖子监控页查看
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}

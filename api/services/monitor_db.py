@@ -754,6 +754,9 @@ async def _migrate(db):
     # copyright_stat: '11' = 原创, '100' = 转载, 其他/空 = 普通
     await _ensure_column(db, "monitor_posts", "copyright_stat", "TEXT DEFAULT ''")
     await _ensure_column(db, "monitor_posts", "source_url", "TEXT DEFAULT ''")
+    # 关联到博主（来自博主追新的帖子才有；普通监控帖为 NULL）
+    # 用于在 CreatorsCard 折叠展开时展示该博主的作品列表
+    await _ensure_column(db, "monitor_posts", "creator_id", "INTEGER")
     # New: custom monitor groups. group_id references monitor_groups.id.
     await _ensure_column(db, "monitor_posts", "group_id", "INTEGER")
     # 告警规则 JSON：[{type, metric, threshold, ...}, ...]
@@ -1215,10 +1218,12 @@ async def add_post(
     group_id: Optional[int] = None,
     user_id: Optional[int] = None,
     platform: str = "xhs",
+    creator_id: Optional[int] = None,
 ) -> int:
     """添加监控帖子。多租户场景下同一 note_id 可被多个用户独立添加。
 
     note_id 字段在不同平台语义不同（xhs note_id / douyin aweme_id / 公众号文章 mid+idx）。
+    creator_id：来自博主追新时关联到 monitor_creators.id；普通监控为 NULL。
     """
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
@@ -1232,22 +1237,54 @@ async def add_post(
             await db.execute(
                 "UPDATE monitor_posts SET title=?, short_url=?, note_url=?, "
                 "xsec_token=?, xsec_source=?, account_id=?, post_type=?, "
-                "group_id=?, platform=?, is_active=1 WHERE id=?",
+                "group_id=?, platform=?, "
+                "creator_id=COALESCE(?, creator_id), "
+                "is_active=1 WHERE id=?",
                 (title, short_url, note_url, xsec_token, xsec_source,
-                 account_id, post_type, group_id, platform, existing_id),
+                 account_id, post_type, group_id, platform, creator_id, existing_id),
             )
             await db.commit()
             return existing_id
         cur = await db.execute(
             """INSERT INTO monitor_posts
                (note_id, title, short_url, note_url, xsec_token, xsec_source,
-                account_id, post_type, group_id, user_id, platform, is_active)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,1)""",
+                account_id, post_type, group_id, user_id, platform, creator_id, is_active)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)""",
             (note_id, title, short_url, note_url, xsec_token, xsec_source,
-             account_id, post_type, group_id, user_id, platform),
+             account_id, post_type, group_id, user_id, platform, creator_id),
         )
         await db.commit()
         return cur.lastrowid
+
+
+async def list_creator_posts(
+    creator_id: int, user_id: Optional[int] = None, limit: int = 60,
+) -> List[Dict]:
+    """查某博主名下的所有帖子（用于 CreatorsCard 折叠展开列表）。
+
+    按 creator_id 精确关联（add_post 时存的）；老数据 creator_id=NULL 用 author 兜底。
+    """
+    sql_parts = [
+        "SELECT p.*, "
+        "       (SELECT s.liked_count FROM monitor_snapshots s "
+        "        WHERE s.note_id=p.note_id ORDER BY s.captured_at DESC LIMIT 1) AS liked_count, "
+        "       (SELECT s.comment_count FROM monitor_snapshots s "
+        "        WHERE s.note_id=p.note_id ORDER BY s.captured_at DESC LIMIT 1) AS comment_count "
+        "FROM monitor_posts p"
+    ]
+    where = ["p.is_active=1", "p.creator_id=?"]
+    args: list = [creator_id]
+    if user_id is not None:
+        where.append("p.user_id=?")
+        args.append(user_id)
+    sql_parts.append("WHERE " + " AND ".join(where))
+    sql_parts.append("ORDER BY p.id DESC LIMIT ?")
+    args.append(limit)
+    sql = " ".join(sql_parts)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, args) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
 
 async def get_posts(

@@ -730,6 +730,19 @@ async def mark_creators_seen(
     return {"ok": True, "affected": affected}
 
 
+@router.get("/creators/{creator_id}/posts", summary="某博主名下的作品列表（CreatorsCard 折叠展开用）")
+async def list_creator_posts_endpoint(
+    creator_id: int,
+    limit: int = 60,
+    current_user: dict = Depends(get_current_user),
+):
+    is_admin = (current_user.get("role") or "user") == "admin"
+    scope_uid = None if is_admin else current_user["id"]
+    posts = await db.list_creator_posts(creator_id, user_id=scope_uid,
+                                          limit=max(1, min(limit, 200)))
+    return {"posts": posts, "creator_id": creator_id}
+
+
 # ── Lives / 直播间监控 v1 ───────────────────────────────────────────────────
 
 @router.get("/lives", summary="直播订阅列表")
@@ -1171,16 +1184,23 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     base = all_settings if is_admin else {
         k: v for k, v in all_settings.items() if k not in _ADMIN_ONLY_SETTING_KEYS
     }
-    # 用户自己的 webhook 覆盖（多租户隔离）
     from ..services import auth_service
     me = auth_service.get_user_by_id(current_user["id"]) or {}
     base["feishu_webhook_url"] = me.get("feishu_webhook_url", "") or ""
     base["webhook_url"] = me.get("wecom_webhook_url", "") or ""
-    # trending 三件套：从 users 表读，覆盖全局值（每用户独立的关键词 / 开关 / 阈值）
-    base["trending_keywords"] = me.get("trending_keywords", "") or ""
-    base["trending_enabled"] = "1" if me.get("trending_enabled") else "0"
-    base["trending_min_likes"] = str(me.get("trending_min_likes") or 1000)
-    base["trending_max_per_keyword"] = str(me.get("trending_max_per_keyword") or 30)
+    # trending 三件套：支持 ?platform=xhs|douyin 读取 per-platform 字段，
+    # 没传 platform 则读全局字段（向后兼容）
+    pf = (request.query_params.get("platform") or "").lower() if request else ""
+    cfg = auth_service.get_trending_for_platform(me, pf) if pf in ("xhs", "douyin") else {
+        "keywords": me.get("trending_keywords", "") or "",
+        "enabled":  bool(me.get("trending_enabled")),
+        "min_likes": int(me.get("trending_min_likes") or 1000),
+        "max_per_keyword": int(me.get("trending_max_per_keyword") or 30),
+    }
+    base["trending_keywords"] = cfg["keywords"]
+    base["trending_enabled"]  = "1" if cfg["enabled"] else "0"
+    base["trending_min_likes"] = str(cfg["min_likes"])
+    base["trending_max_per_keyword"] = str(cfg["max_per_keyword"])
     # 用户级抓取频率（0 = 跟随全局 check_interval_minutes）
     base["monitor_interval_minutes"] = str(me.get("monitor_interval_minutes") or 0)
     base["trending_interval_minutes"] = str(me.get("trending_interval_minutes") or 0)

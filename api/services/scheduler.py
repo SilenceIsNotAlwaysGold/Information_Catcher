@@ -682,6 +682,7 @@ async def run_creator_check():
                     account_id=None, post_type="own",
                     user_id=uid,
                     platform=platform_name,
+                    creator_id=creator["id"],   # 关联到 monitor_creators.id
                 )
                 added += 1
                 new_posts.append(p)
@@ -1040,31 +1041,38 @@ async def run_trending_monitor(platform: Optional[str] = None, user_id: Optional
                 use_ext = True
 
             if use_ext:
-                ext_platform = "xhs"  # 当前扩展只实现了 xhs.search；douyin 在 P4 落地后扩展这里
-                if platform and platform != ext_platform:
-                    # 用户手动指定了非 xhs 平台 → 扩展暂不支持，跳过
-                    continue
-                await db.cursor_mark_running("trending", cursor_key)
+                # 扩展现已支持 xhs + douyin。若用户传了 platform 参数就按它走，
+                # 否则按当前 keyword 模式跑两个平台（先 xhs 再 douyin）。
+                target_platforms = [platform] if platform in ("xhs", "douyin") else ["xhs", "douyin"]
                 import time as _t
-                _t0 = _t.perf_counter()
-                try:
-                    res = await extension_dispatcher.dispatch_xhs_search(
-                        user_id=uid, keyword=keyword, min_likes=min_likes,
-                        max_results=max_per_keyword,
-                        timeout_ms=30000, overall_timeout=90.0,
-                    )
-                    _ms = int((_t.perf_counter() - _t0) * 1000)
-                    await db.log_fetch(
-                        platform=ext_platform, task_type="trending",
-                        status="ok" if res.get("ok") else "error",
-                        latency_ms=_ms,
-                        account_id=None,
-                        note=f"user={uid} kw={keyword} via=extension captured={res.get('captured', 0)} new={res.get('inserted', 0)} err={res.get('error','')[:120]}",
-                    )
-                    await db.cursor_mark_done("trending", cursor_key)
-                except Exception as e:
-                    logger.error(f"[trending-ext] user={uid} keyword='{keyword}' error: {e}")
-                    await db.cursor_mark_failed("trending", cursor_key, str(e))
+                for ext_platform in target_platforms:
+                    await db.cursor_mark_running("trending", cursor_key)
+                    _t0 = _t.perf_counter()
+                    try:
+                        if ext_platform == "douyin":
+                            res = await extension_dispatcher.dispatch_douyin_search(
+                                user_id=uid, keyword=keyword, min_likes=min_likes,
+                                max_results=max_per_keyword,
+                                timeout_ms=30000, overall_timeout=120.0,
+                            )
+                        else:
+                            res = await extension_dispatcher.dispatch_xhs_search(
+                                user_id=uid, keyword=keyword, min_likes=min_likes,
+                                max_results=max_per_keyword,
+                                timeout_ms=30000, overall_timeout=90.0,
+                            )
+                        _ms = int((_t.perf_counter() - _t0) * 1000)
+                        await db.log_fetch(
+                            platform=ext_platform, task_type="trending",
+                            status="ok" if res.get("ok") else "error",
+                            latency_ms=_ms,
+                            account_id=None,
+                            note=f"user={uid} kw={keyword} via=extension captured={res.get('captured', 0)} new={res.get('inserted', 0)} err={(res.get('error') or '')[:120]}",
+                        )
+                    except Exception as e:
+                        logger.error(f"[trending-ext] user={uid} kw='{keyword}' platform={ext_platform} error: {e}")
+                        await db.cursor_mark_failed("trending", cursor_key, str(e))
+                await db.cursor_mark_done("trending", cursor_key)
                 continue  # 扩展通道处理完进入下一个 keyword
 
             # 走原 cookie 账号通道
