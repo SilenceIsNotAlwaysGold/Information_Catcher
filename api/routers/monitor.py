@@ -752,6 +752,39 @@ async def check_creator(
     await db.mark_creator_status(creator_id, "ok")
     if new_count:
         await db.add_creator_unread(creator_id, new_count)
+        # 与 scheduler.run_creator_check 一致：有新帖 → per-feature 推送 + lazy 建群
+        push_on = int(creator.get("push_enabled") if creator.get("push_enabled") is not None else 1)
+        from ..services import auth_service
+        full_user = auth_service.get_user_by_id(user_id) or {}
+        if push_on:
+            wecom_url  = full_user.get("wecom_webhook_url", "") or ""
+            feishu_url = full_user.get("feishu_webhook_url", "") or ""
+            push_chat = ""
+            if full_user.get("creator_push_enabled"):
+                from ..services.feishu import provisioning as _prov
+                push_chat = await _prov.ensure_feature_chat(
+                    full_user, "creator", platform=platform_name,
+                ) or ""
+            elif full_user.get("feishu_chat_id"):
+                # 用户没开 creator_push_enabled 但绑了老 chat_id → 兜底推到那里
+                push_chat = full_user.get("feishu_chat_id") or ""
+            if push_chat or wecom_url or feishu_url:
+                try:
+                    from ..services import notifier
+                    new_posts_data = [p for p in posts[:new_count]]
+                    await notifier.notify_creator_new_posts(
+                        wecom_url, feishu_url,
+                        creator_name=(
+                            creator.get("creator_name")
+                            or (posts[0].get("creator_name") if posts else "")
+                            or creator.get("creator_url", "")
+                        ),
+                        platform=platform_name,
+                        posts=new_posts_data,
+                        feishu_chat_id=push_chat,
+                    )
+                except Exception as e:
+                    logger.warning(f"[creator manual check] notify failed: {e}")
     return {
         "ok": True, "fetched": len(posts), "added": new_count,
         "profile": prof,
@@ -921,19 +954,27 @@ async def health_dashboard(
 # ── Alerts ───────────────────────────────────────────────────────────────────
 
 @router.get("/alerts", summary="告警记录")
-async def list_alerts(limit: int = 50, current_user: dict = Depends(get_current_user)):
+async def list_alerts(
+    limit: int = 50,
+    platform: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """?platform=xhs|douyin|mp 按平台过滤；不传则返回所有平台。"""
     is_admin = (current_user.get("role") or "user") == "admin"
     uid = None if is_admin else _scope_uid(current_user)
-    return {"alerts": await db.get_alerts(limit, user_id=uid)}
+    return {"alerts": await db.get_alerts(limit, user_id=uid, platform=platform)}
 
 
 @router.delete("/alerts", summary="清空告警记录")
-async def clear_all_alerts(current_user: dict = Depends(get_current_user)):
-    # admin 看到的是全平台 alerts（list_alerts 里 admin 走 user_id=None），
-    # 所以清空也走 user_id=None；普通用户只清自己的。否则 admin 看见的删不掉。
+async def clear_all_alerts(
+    platform: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """?platform=xhs|douyin|mp 只清该平台的；不传清全部。
+    admin 看到的是全平台 alerts，清空也走 user_id=None 才能删 admin 视图里的所有项。"""
     is_admin = (current_user.get("role") or "user") == "admin"
     uid = None if is_admin else _scope_uid(current_user)
-    deleted = await db.clear_alerts(user_id=uid)
+    deleted = await db.clear_alerts(user_id=uid, platform=platform)
     return {"ok": True, "deleted": deleted}
 
 
