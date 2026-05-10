@@ -123,7 +123,8 @@ function readDomCreatorStats() {
     };
     for (const [field, ls] of Object.entries(labels)) {
       for (const lab of ls) {
-        const re = new RegExp(`${NUM}\\s*${lab}\\b`);
+        // 注意：JS \b 对中文字符不生效（中文是 non-word），不要加 \b
+        const re = new RegExp(`${NUM}\\s*${lab}`);
         const m = re.exec(scopeText);
         if (m && m[1]) { out[field] = m[1].trim(); break; }
       }
