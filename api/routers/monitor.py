@@ -754,6 +754,7 @@ async def check_creator(
     return {
         "ok": True, "fetched": len(posts), "added": new_count,
         "profile": prof,
+        "ssr_debug": res.get("ssr_debug"),
     }
 
 

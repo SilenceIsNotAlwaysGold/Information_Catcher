@@ -639,15 +639,17 @@ async function runXhsCreatorPosts(payload) {
     let finalUrl = "";
     try { finalUrl = (await chrome.tabs.get(tabId)).url || ""; } catch {}
     let { posts, profile } = extractXhsCreatorPosts(resp?.hits || []);
+    let ssrDebug = null;
     // XHR 完全没拿到时不要立刻 throw —— 博主主页大多 SSR 不发 user_posted XHR，
     // 先尝试从 window.__INITIAL_STATE__ 读 SSR 数据，能拿到就当成功。
     // SSR 兜底：博主主页大多 SSR，user/otherinfo XHR 不一定发。
     // 让 content 透 window.__INITIAL_STATE__.user 出来，从中补 profile + 缺封面的 posts。
     try {
       const ssrResp = await chrome.tabs.sendMessage(tabId, {
-        from: "bg", action: "get_initial_state", timeout_ms: 1500,
+        from: "bg", action: "get_initial_state", timeout_ms: 2000,
       });
       const ssrUser = ssrResp?.data;
+      ssrDebug = ssrResp?.debug || null;
       if (ssrUser) {
         const ssr = extractXhsCreatorFromSsr(ssrUser);
         // profile：缺什么补什么（XHR 拿到的优先）
@@ -689,7 +691,8 @@ async function runXhsCreatorPosts(payload) {
     return {
       url, raw_hits: (resp?.hits || []).length, total: posts.length, posts,
       profile,
-      seen_urls_sample: (resp.seen_urls || []).slice(-30),
+      ssr_debug: ssrDebug,
+      seen_urls_sample: (resp?.seen_urls || []).slice(-30),
     };
   } finally {
     await closeWorkerWindow(windowId);

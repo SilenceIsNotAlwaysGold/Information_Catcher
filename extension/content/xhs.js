@@ -92,7 +92,7 @@ let _initialStateResolver = null;
 window.addEventListener("message", (e) => {
   if (e.source !== window) return;
   if (e.data?.__pulse === "initial_state" && _initialStateResolver) {
-    _initialStateResolver(e.data.data || null);
+    _initialStateResolver({ data: e.data.data || null, debug: e.data.debug || null });
     _initialStateResolver = null;
   }
 });
@@ -101,7 +101,7 @@ async function readInitialStateUser(timeoutMs = 1500) {
     _initialStateResolver = resolve;
     window.postMessage({ __pulse: "control", action: "read_initial_state" }, "*");
     setTimeout(() => {
-      if (_initialStateResolver) { _initialStateResolver(null); _initialStateResolver = null; }
+      if (_initialStateResolver) { _initialStateResolver({ data: null, debug: null }); _initialStateResolver = null; }
     }, timeoutMs);
   });
 }
@@ -181,7 +181,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   if (msg.action === "get_initial_state") {
     // background 通过 content 转发到 main world 拿 SSR 数据
-    readInitialStateUser(msg.timeout_ms || 1500).then((data) => sendResponse({ data }));
+    readInitialStateUser(msg.timeout_ms || 1500).then((r) => sendResponse(r));
     return true; // async
   }
 });

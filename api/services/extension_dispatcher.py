@@ -220,7 +220,13 @@ async def dispatch_xhs_creator_posts(
         result = await _registry().dispatch(int(user_id), task, timeout=overall_timeout)
     except Exception as e:
         return {"ok": False, "stage": "dispatch", "error": str(e), "detail": translate_error(str(e))}
-    return {"ok": True, "posts": (result or {}).get("posts") or [], "raw_hits": (result or {}).get("raw_hits", 0)}
+    return {
+        "ok": True,
+        "posts": (result or {}).get("posts") or [],
+        "profile": (result or {}).get("profile") or {},
+        "raw_hits": (result or {}).get("raw_hits", 0),
+        "ssr_debug": (result or {}).get("ssr_debug"),
+    }
 
 
 async def dispatch_douyin_creator_posts(
@@ -234,7 +240,12 @@ async def dispatch_douyin_creator_posts(
         result = await _registry().dispatch(int(user_id), task, timeout=overall_timeout)
     except Exception as e:
         return {"ok": False, "stage": "dispatch", "error": str(e), "detail": translate_error(str(e))}
-    return {"ok": True, "posts": (result or {}).get("posts") or [], "raw_hits": (result or {}).get("raw_hits", 0)}
+    return {
+        "ok": True,
+        "posts": (result or {}).get("posts") or [],
+        "profile": (result or {}).get("profile") or {},
+        "raw_hits": (result or {}).get("raw_hits", 0),
+    }
 
 
 async def dispatch_xhs_fetch_comments(

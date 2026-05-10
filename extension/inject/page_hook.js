@@ -15,6 +15,29 @@
   if (window.__PULSE_HOOKED__) return;
   window.__PULSE_HOOKED__ = true;
 
+  // ─── 抢救 __INITIAL_STATE__：必须在 SSR <script> 跑之前 hook setter ───
+  // 现象：小红书 React hydrate 后会把 window.__INITIAL_STATE__ 清成 undefined，
+  // content script 之后再读就是空的。document_start 阶段定义 getter/setter，
+  // 第一次赋值就深拷贝缓存下来。
+  let _capturedInitialState = null;
+  try {
+    let _v = undefined;
+    Object.defineProperty(window, "__INITIAL_STATE__", {
+      configurable: true,
+      get() { return _v; },
+      set(value) {
+        _v = value;
+        if (!_capturedInitialState && value && typeof value === "object") {
+          // 浅引用即可（page 后面就算 = undefined 也只清 _v 这层，引用还在我们手上）
+          _capturedInitialState = value;
+          console.log("[pulse-hook] __INITIAL_STATE__ captured, keys:", Object.keys(value).slice(0, 20));
+        }
+      },
+    });
+  } catch (e) {
+    console.warn("[pulse-hook] __INITIAL_STATE__ hook failed:", e);
+  }
+
   // ──── 后台 tab 节流绕过 ─────────────────────────────────────────────
   // 扩展用 chrome.tabs.create({active:false}) 开背景 tab，
   // 浏览器把 document.visibilityState 设为 'hidden' / document.hidden=true。
@@ -168,15 +191,45 @@
       // 诊断：把 hook 看到过的所有 URL 吐回 content
       window.postMessage({ __pulse: "seen_urls", urls: seenUrls.slice() }, "*");
     } else if (m.action === "read_initial_state") {
-      // 主世界读 window.__INITIAL_STATE__，剪裁 user 子树（避免 1MB+ 巨对象跨 world）
+      // 拿 captured 的 __INITIAL_STATE__（可能已被页面清空），递归找 user-like 对象
       let payload = null;
+      const debug = { topKeys: [], foundPath: null, hasCaptured: !!_capturedInitialState };
       try {
-        const s = window.__INITIAL_STATE__ || {};
-        // 小红书博主主页 SSR 把博主信息放在 state.user 下；不同版本路径有差异
-        // 整个 user 子树通常 < 50KB，安全可传
-        payload = s.user || s.userPage || null;
-      } catch {}
-      window.postMessage({ __pulse: "initial_state", data: payload }, "*");
+        const state = _capturedInitialState || window.__INITIAL_STATE__ || {};
+        debug.topKeys = Object.keys(state).slice(0, 30);
+        // BFS：找含 nickname / basicInfo / interactions 的对象
+        const queue = [{ obj: state, path: "" }];
+        const seen = new Set();
+        let walked = 0;
+        while (queue.length && walked < 500) {
+          walked++;
+          const { obj, path } = queue.shift();
+          if (!obj || typeof obj !== "object") continue;
+          if (seen.has(obj)) continue;
+          seen.add(obj);
+          const keys = Object.keys(obj);
+          const userLike =
+            keys.includes("basicInfo") ||
+            (keys.includes("nickname") && (keys.includes("imageb") || keys.includes("desc") || keys.includes("interactions"))) ||
+            (keys.includes("interactions") && Array.isArray(obj.interactions) && obj.interactions.length > 0 && obj.interactions[0]?.type);
+          if (userLike) {
+            payload = obj;
+            debug.foundPath = path || "<root>";
+            break;
+          }
+          for (const k of keys.slice(0, 80)) {
+            try {
+              const v = obj[k];
+              if (v && typeof v === "object") queue.push({ obj: v, path: path + "." + k });
+            } catch {}
+          }
+        }
+        debug.walked = walked;
+        if (!payload) payload = state.user || state.userPage || null;
+      } catch (e) {
+        debug.error = String(e?.message || e);
+      }
+      window.postMessage({ __pulse: "initial_state", data: payload, debug }, "*");
     }
   });
 
