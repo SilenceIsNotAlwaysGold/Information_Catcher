@@ -353,11 +353,14 @@ export function CreatorsCard({ platform }: { platform: PlatformKey }) {
                             </span>
                           )}
                         </div>
-                        {/* 数据条：粉丝 / 获赞 / 笔记数 */}
+                        {/* 数据条：粉丝 / 获赞（不显示作品数 — 小红书没有可靠的总数字段，
+                            折叠展开后会显示真实的"共 N 篇作品"） */}
                         <div className="flex gap-3 mt-1 text-[11px] text-default-600">
                           <span><span className="text-default-400">粉丝</span> <strong>{fmt(followers)}</strong></span>
                           <span><span className="text-default-400">获赞</span> <strong>{fmt(likes)}</strong></span>
-                          <span><span className="text-default-400">作品</span> <strong>{fmt(notes)}</strong></span>
+                          {platform !== "xhs" && (
+                            <span><span className="text-default-400">作品</span> <strong>{fmt(notes)}</strong></span>
+                          )}
                         </div>
                         {/* 简介 */}
                         {desc && (
