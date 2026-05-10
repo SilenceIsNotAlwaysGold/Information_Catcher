@@ -677,9 +677,10 @@ async def check_creator(
             timeout_ms=25000, overall_timeout=60.0,
         )
     else:
+        # 抖音博主主页 aweme/post 走 IntersectionObserver 懒加载，超时给到 40s
         res = await extension_dispatcher.dispatch_douyin_creator_posts(
             user_id=user_id, url=creator["creator_url"],
-            timeout_ms=25000, overall_timeout=60.0,
+            timeout_ms=40000, overall_timeout=75.0,
         )
 
     if not res.get("ok"):

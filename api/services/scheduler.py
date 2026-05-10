@@ -639,9 +639,10 @@ async def run_creator_check():
                     timeout_ms=25000, overall_timeout=60.0,
                 )
             elif platform_name == "douyin":
+                # 抖音博主主页 aweme/post 接口 IntersectionObserver 懒加载，需要更长超时
                 res = await extension_dispatcher.dispatch_douyin_creator_posts(
                     user_id=uid, url=creator["creator_url"],
-                    timeout_ms=25000, overall_timeout=60.0,
+                    timeout_ms=40000, overall_timeout=75.0,
                 )
             else:
                 await db.cursor_mark_failed("creator", ck, f"unknown platform {platform_name}")

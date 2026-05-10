@@ -170,7 +170,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     const pattern = msg.urlPattern || "/api/sns/web/v1/search/notes";
     const timeout = msg.timeout_ms || 30000;
     // 默认 min_hits=0 = 宽松模式：超时就把已抓到的吐回，不强制至少 N 条
-    captureFor(pattern, timeout, msg.min_hits ?? 0).then(sendResponse);
+    // 永远兜底 sendResponse，否则 captureFor 任何 reject → bg 收到 "message channel closed"
+    captureFor(pattern, timeout, msg.min_hits ?? 0)
+      .then((r) => sendResponse(r))
+      .catch((e) => {
+        try { stopCapture(); stopAutoScroll(); } catch {}
+        sendResponse({
+          ok: false,
+          error: "capture_threw: " + String(e?.message || e),
+          hits: collectedHits.slice(),
+          seen_urls: collectedSeenUrls.slice(),
+        });
+      });
     return true; // async
   }
   if (msg.action === "scroll") {

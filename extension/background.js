@@ -828,13 +828,17 @@ async function runDouyinCreatorPosts(payload) {
   const { tabId, windowId } = await openWorkerTab(url);
   try {
     await waitForTabComplete(tabId, 18000);
-    await sleep(1200);
+    // 抖音博主主页 SPA 启动慢 + 「作品」走 IntersectionObserver 懒加载，
+    // 给 React 多 1.5s 把「作品」tab 渲染出来，content/douyin.js 的 scroll_mode=creator 会去点 tab + 渐进滚动
+    await sleep(2000);
     const resp = await chrome.tabs.sendMessage(tabId, {
       from: "bg",
       action: "capture_douyin",
       urlPattern: ["/aweme/v1/web/aweme/post", "/aweme/v1/web/user/profile"],
-      timeout_ms: payload?.timeout_ms || 25000,
+      // 加长到 40s — DevEye 实测博主主页 aweme/post 延迟可达 12-25s
+      timeout_ms: payload?.timeout_ms || 40000,
       min_hits: 1,
+      scroll_mode: "creator",
     });
     let finalUrl = "";
     try { finalUrl = (await chrome.tabs.get(tabId)).url || ""; } catch {}
@@ -1307,7 +1311,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // ===== 启动 =====
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details) => {
+  // 扩展更新或首次安装时关掉旧 worker window —— 避免复用还在跑老 page_hook
+  // 的小红书/抖音 tab（拿不到 captured __INITIAL_STATE__）。
+  if (details?.reason === "update" || details?.reason === "install") {
+    if (_workerWindow) {
+      try { await chrome.windows.remove(_workerWindow.windowId); } catch {}
+      _workerWindow = null;
+    }
+  }
   await loadConfig();
   connect();
 });

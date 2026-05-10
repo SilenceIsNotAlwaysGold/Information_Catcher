@@ -230,7 +230,7 @@ async def dispatch_xhs_creator_posts(
 
 
 async def dispatch_douyin_creator_posts(
-    *, user_id: int, url: str, timeout_ms: int = 25000, overall_timeout: float = 60.0,
+    *, user_id: int, url: str, timeout_ms: int = 40000, overall_timeout: float = 75.0,
 ) -> Dict[str, Any]:
     """通过扩展拉抖音博主主页发布列表。"""
     if not has_online_extension(user_id):

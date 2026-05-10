@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TrendPulse Helper",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "TrendPulse 浏览器助手 - 在你已登录的浏览器里执行小红书/抖音搜索与博主追新任务，规避封号风险。",
   "minimum_chrome_version": "111",
 
