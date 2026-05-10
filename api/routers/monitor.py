@@ -707,14 +707,19 @@ async def check_creator(
         }
 
     # 入库 + 计 unread
+    # 注意：不要在命中 last_post_id 时直接 break — add_post 内部 UPDATE 用 COALESCE
+    # 回填 creator_id，让旧版本无 creator_id 入库的帖子也能被关联回博主。
+    # 命中 last_post_id 之后的帖子继续 add_post（修旧数据）但不再计入 unread。
     new_count = 0
     newest = last_post_id
+    hit_known = False
     for p in posts:
         pid = p.get("post_id")
         if not pid:
             continue
+        is_new_for_unread = (not hit_known) and pid != last_post_id
         if pid == last_post_id:
-            break
+            hit_known = True
         await db.add_post(
             note_id=pid, title=p.get("title") or "",
             short_url=p.get("url") or "", note_url=p.get("url") or "",
@@ -724,9 +729,10 @@ async def check_creator(
             platform=platform_name,
             creator_id=creator_id,   # 关联到 monitor_creators.id（CreatorsCard 折叠列表用）
         )
-        new_count += 1
-        if not newest:
-            newest = pid
+        if is_new_for_unread:
+            new_count += 1
+            if not newest or newest == last_post_id:
+                newest = pid
 
     # 与 scheduler.run_creator_check 一致：把扩展抓到的博主元信息也落库
     prof = res.get("profile") or {}
@@ -1307,8 +1313,16 @@ async def update_settings(
 # ── Monitor Groups ───────────────────────────────────────────────────────────
 
 @router.get("/groups", summary="监控分组列表")
-async def list_groups(current_user: dict = Depends(get_current_user)):
-    return {"groups": await db.list_groups(user_id=_scope_uid(current_user))}
+async def list_groups(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    # ?platform=xhs|douyin|mp 时只返回该平台 + 跨平台分组
+    pf = (request.query_params.get("platform") or "").lower() or None
+    return {"groups": await db.list_groups(
+        user_id=_scope_uid(current_user),
+        platform=pf if pf in ("xhs", "douyin", "mp") else None,
+    )}
 
 
 @router.post("/groups", summary="新建分组")
@@ -1337,8 +1351,21 @@ async def create_group(req: CreateGroupRequest, current_user: dict = Depends(get
         if admin_open and admin_open != current_user["feishu_open_id"]:
             members.append(admin_open)
 
-        chat_name = f"TrendPulse 监控帖子 - {name}"
-        chat_desc = f"用户 {current_user.get('username') or current_user['id']} 创建的「{name}」监控告警群"
+        # 群名带平台前缀，便于在飞书里区分
+        platform_label = {
+            "xhs": "小红书",
+            "douyin": "抖音",
+            "mp": "公众号",
+        }.get((req.platform or "").lower(), "")
+        chat_name = (
+            f"TrendPulse · {platform_label} 监控 - {name}"
+            if platform_label
+            else f"TrendPulse · 监控帖子 - {name}"
+        )
+        chat_desc = (
+            f"用户 {current_user.get('username') or current_user['id']} 创建的"
+            f"{('「' + platform_label + '」') if platform_label else ''}「{name}」监控告警群"
+        )
         try:
             result = await chat_api.create_chat(
                 name=chat_name,
@@ -1401,10 +1428,12 @@ async def create_group(req: CreateGroupRequest, current_user: dict = Depends(get
         raise HTTPException(status_code=400, detail=f"未知模式：{mode}")
 
     try:
+        platform = (req.platform or "").lower()
         gid = await db.create_group(
             name, user_id=current_user["id"],
             feishu_chat_id=feishu_chat_id,
             feishu_webhook_url=feishu_webhook_url,
+            platform=platform if platform in ("xhs", "douyin", "mp") else "",
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"创建失败：{e}")
