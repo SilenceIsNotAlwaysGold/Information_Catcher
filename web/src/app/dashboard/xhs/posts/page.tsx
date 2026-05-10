@@ -24,6 +24,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
 import { MonitorPaceButton } from "@/components/MonitorPaceButton";
+import { MoveGroupButton } from "@/components/MoveGroupButton";
 import {
   Dropdown, DropdownTrigger, DropdownMenu, DropdownItem,
 } from "@nextui-org/dropdown";
