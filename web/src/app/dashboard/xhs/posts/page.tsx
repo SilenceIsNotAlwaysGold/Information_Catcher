@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
@@ -12,16 +12,18 @@ import {
 import { Chip } from "@nextui-org/chip";
 import { Checkbox } from "@nextui-org/checkbox";
 import { useDisclosure } from "@nextui-org/modal";
-import { Tabs, Tab } from "@nextui-org/tabs";
 import { Tooltip } from "@nextui-org/tooltip";
-import { Plus, RefreshCw, Trash2, BarChart2, Settings, Search, FileText, Inbox } from "lucide-react";
+import { Select, SelectItem } from "@nextui-org/select";
+import {
+  Plus, RefreshCw, Trash2, BarChart2, Settings, Search, FileText, Inbox,
+  ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight, X as XIcon,
+} from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
 import { MonitorPaceButton } from "@/components/MonitorPaceButton";
-import { MoveGroupButton } from "@/components/MoveGroupButton";
 import {
   Dropdown, DropdownTrigger, DropdownMenu, DropdownItem,
 } from "@nextui-org/dropdown";
@@ -237,14 +239,99 @@ export default function XhsPostsPage() {
     await mutatePosts();
   };
 
-  // 搜索过滤：标题 / note_id / 作者
+  // ── 筛选 + 排序 + 分页 状态 ────────────────────────────────────────────────
+  const [groupFilter, setGroupFilter] = useState<string>("");   // "" 全部 / "_none" 未分组 / "<gid>"
+  const [statusFilter, setStatusFilter] = useState<string>(""); // "" / ok / error / deleted / login_required / dead / untested
+  const [minLikes, setMinLikes] = useState<string>("");
+  const [minCollects, setMinCollects] = useState<string>("");
+  const [minComments, setMinComments] = useState<string>("");
+  const [sortBy, setSortBy] = useState<"liked" | "collected" | "comment" | "checked" | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(30);
+
+  const toggleSort = (field: "liked" | "collected" | "comment" | "checked") => {
+    if (sortBy === field) setSortDir(sortDir === "asc" ? "desc" : "asc");
+    else { setSortBy(field); setSortDir("desc"); }
+  };
+  const sortIcon = (field: typeof sortBy) =>
+    sortBy === field
+      ? (sortDir === "asc" ? <ChevronUp size={12} /> : <ChevronDown size={12} />)
+      : <ChevronsUpDown size={12} className="text-default-300" />;
+
+  const resetFilters = () => {
+    setSearch(""); setGroupFilter(""); setStatusFilter("");
+    setMinLikes(""); setMinCollects(""); setMinComments("");
+    setSortBy(null); setPage(1);
+  };
+
+  // 状态判断函数（沿用 fetchStatusChip 的判定逻辑）
+  const matchStatus = (p: Post, target: string): boolean => {
+    const fc = p.fail_count ?? 0;
+    const s = p.last_fetch_status || "";
+    if (target === "dead") return fc >= 5;
+    if (target === "login_required") return s === "login_required" && fc < 5;
+    if (target === "deleted") return s === "deleted";
+    if (target === "error") return s === "error";
+    if (target === "ok") return s === "ok";
+    if (target === "untested") return !s;
+    return true;
+  };
+
+  // 复合筛选
   const kw = search.trim().toLowerCase();
-  const filteredPosts = kw
-    ? posts.filter((p) =>
+  const filteredPosts = posts
+    .filter((p) => {
+      if (kw && !(
         (p.title || "").toLowerCase().includes(kw) ||
         (p.note_id || "").toLowerCase().includes(kw) ||
-        (p.account_name || "").toLowerCase().includes(kw))
-    : posts;
+        (p.account_name || "").toLowerCase().includes(kw)
+      )) return false;
+      if (groupFilter === "_none") { if (p.group_id) return false; }
+      else if (groupFilter) { if (String(p.group_id ?? "") !== groupFilter) return false; }
+      if (statusFilter && !matchStatus(p, statusFilter)) return false;
+      const minL = parseInt(minLikes || "0", 10);
+      if (minL > 0 && (p.liked_count ?? 0) < minL) return false;
+      const minC = parseInt(minCollects || "0", 10);
+      if (minC > 0 && (p.collected_count ?? 0) < minC) return false;
+      const minM = parseInt(minComments || "0", 10);
+      if (minM > 0 && (p.comment_count ?? 0) < minM) return false;
+      return true;
+    });
+
+  // 排序（在筛选后做，避免无意义计算）
+  const sortedPosts = sortBy
+    ? [...filteredPosts].sort((a, b) => {
+        const fld = sortBy === "liked" ? "liked_count"
+                  : sortBy === "collected" ? "collected_count"
+                  : sortBy === "comment" ? "comment_count"
+                  : "checked_at";
+        const av = (a as any)[fld] ?? (sortBy === "checked" ? "" : 0);
+        const bv = (b as any)[fld] ?? (sortBy === "checked" ? "" : 0);
+        const cmp = sortBy === "checked"
+          ? String(av).localeCompare(String(bv))
+          : (Number(av) - Number(bv));
+        return sortDir === "asc" ? cmp : -cmp;
+      })
+    : filteredPosts;
+
+  // 分页
+  const totalCount = sortedPosts.length;
+  const pageCount = Math.max(1, Math.ceil(totalCount / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const pagedPosts = sortedPosts.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+  // 筛选 / 排序 / pageSize 变化时回到第 1 页；page 越界时也夹回
+  useEffect(() => { setPage(1); },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [kw, groupFilter, statusFilter, minLikes, minCollects, minComments, pageSize]);
+  useEffect(() => { if (page !== safePage) setPage(safePage); }, [page, safePage]);
+
+  // 分组名查找（用于 chip 显示）
+  const groupNameOf = (gid: number | null): string => {
+    if (!gid) return "未分组";
+    return (groups as any[]).find((g) => g.id === gid)?.name || `#${gid}`;
+  };
 
   return (
     <div className="p-6 space-y-4">
@@ -354,33 +441,111 @@ export default function XhsPostsPage() {
             />
           </CardBody>
         </Card>
-      ) : isAdmin ? (
-        /* Admin 平铺视图：所有用户帖子 + 所属用户列 */
+      ) : (
+      <>
+        {/* 筛选条 */}
+        <Card>
+          <CardBody className="py-3 flex flex-row flex-wrap items-end gap-3">
+            <div className="min-w-[140px]">
+              <p className="text-xs text-default-500 mb-1">分组</p>
+              <select
+                className="border border-divider rounded-md px-2 h-9 text-sm bg-background w-full"
+                value={groupFilter}
+                onChange={(e) => setGroupFilter(e.target.value)}
+              >
+                <option value="">全部分组</option>
+                <option value="_none">未分组</option>
+                {(groups as any[]).map((g) => (
+                  <option key={g.id} value={String(g.id)}>{g.name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="min-w-[140px]">
+              <p className="text-xs text-default-500 mb-1">状态</p>
+              <select
+                className="border border-divider rounded-md px-2 h-9 text-sm bg-background w-full"
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+              >
+                <option value="">全部状态</option>
+                <option value="ok">正常</option>
+                <option value="error">抓取异常</option>
+                <option value="login_required">需登录</option>
+                <option value="deleted">已删除</option>
+                <option value="dead">已停抓</option>
+                <option value="untested">未检测</option>
+              </select>
+            </div>
+            <Input size="sm" type="number" min={0} className="w-28"
+              label="点赞 ≥" labelPlacement="outside-left"
+              value={minLikes} onValueChange={setMinLikes} />
+            <Input size="sm" type="number" min={0} className="w-28"
+              label="收藏 ≥" labelPlacement="outside-left"
+              value={minCollects} onValueChange={setMinCollects} />
+            <Input size="sm" type="number" min={0} className="w-28"
+              label="评论 ≥" labelPlacement="outside-left"
+              value={minComments} onValueChange={setMinComments} />
+            {(search || groupFilter || statusFilter || minLikes || minCollects || minComments || sortBy) && (
+              <Button size="sm" variant="light" startContent={<XIcon size={13} />}
+                onPress={resetFilters}>
+                清除筛选
+              </Button>
+            )}
+            <span className="ml-auto text-xs text-default-500">
+              共 <b>{totalCount}</b> 条 · 第 {safePage} / {pageCount} 页
+            </span>
+          </CardBody>
+        </Card>
+
+        {/* 数据表 */}
         <Card>
           <CardBody className="p-0">
-            <Table aria-label="all-posts-admin" removeWrapper>
+            <Table aria-label="posts-table" removeWrapper>
               <TableHeader>
                 <TableColumn className="w-12">
                   <Checkbox
-                    isSelected={filteredPosts.length > 0 && filteredPosts.every((p) => selectedKeys.has(postKey(p)))}
+                    isSelected={pagedPosts.length > 0 && pagedPosts.every((p) => selectedKeys.has(postKey(p)))}
                     isIndeterminate={
-                      filteredPosts.some((p) => selectedKeys.has(postKey(p))) &&
-                      !filteredPosts.every((p) => selectedKeys.has(postKey(p)))
+                      pagedPosts.some((p) => selectedKeys.has(postKey(p))) &&
+                      !pagedPosts.every((p) => selectedKeys.has(postKey(p)))
                     }
-                    onValueChange={() => togglePageAll(filteredPosts)}
+                    onValueChange={() => togglePageAll(pagedPosts)}
                   />
                 </TableColumn>
                 <TableColumn>标题 / ID</TableColumn>
-                <TableColumn>所属用户</TableColumn>
+                <TableColumn>分组</TableColumn>
+                {isAdmin ? <TableColumn>所属用户</TableColumn> : <></>}
                 <TableColumn>状态</TableColumn>
-                <TableColumn>点赞</TableColumn>
-                <TableColumn>收藏</TableColumn>
-                <TableColumn>评论</TableColumn>
-                <TableColumn>最后检测</TableColumn>
+                <TableColumn>
+                  <button onClick={() => toggleSort("liked")} className="inline-flex items-center gap-1 hover:text-foreground">
+                    点赞 {sortIcon("liked")}
+                  </button>
+                </TableColumn>
+                <TableColumn>
+                  <button onClick={() => toggleSort("collected")} className="inline-flex items-center gap-1 hover:text-foreground">
+                    收藏 {sortIcon("collected")}
+                  </button>
+                </TableColumn>
+                <TableColumn>
+                  <button onClick={() => toggleSort("comment")} className="inline-flex items-center gap-1 hover:text-foreground">
+                    评论 {sortIcon("comment")}
+                  </button>
+                </TableColumn>
+                <TableColumn>
+                  <button onClick={() => toggleSort("checked")} className="inline-flex items-center gap-1 hover:text-foreground">
+                    最后检测 {sortIcon("checked")}
+                  </button>
+                </TableColumn>
                 <TableColumn>操作</TableColumn>
               </TableHeader>
-              <TableBody emptyContent={<EmptyState icon={FileText} title="暂无帖子" hint="还没有任何用户添加帖子。" />}>
-                {filteredPosts.map((p) => (
+              <TableBody emptyContent={
+                <EmptyState
+                  icon={Inbox}
+                  title={posts.length === 0 ? "还没有监控帖子" : "没有符合筛选条件的帖子"}
+                  hint={posts.length === 0 ? "点右上角「添加小红书帖子」开始" : "调整筛选或点「清除筛选」"}
+                />
+              }>
+                {pagedPosts.map((p) => (
                   <TableRow key={postKey(p)}>
                     <TableCell>
                       <Checkbox
@@ -398,8 +563,16 @@ export default function XhsPostsPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Chip size="sm" variant="flat" color="secondary">{p.owner_username ?? "—"}</Chip>
+                      <Chip size="sm" variant="flat"
+                        color={p.group_id ? "primary" : "default"}>
+                        {groupNameOf(p.group_id ?? null)}
+                      </Chip>
                     </TableCell>
+                    {isAdmin ? (
+                      <TableCell>
+                        <Chip size="sm" variant="flat" color="secondary">{p.owner_username ?? "—"}</Chip>
+                      </TableCell>
+                    ) : <></>}
                     <TableCell>{fetchStatusChip(p)}</TableCell>
                     <TableCell><span className="font-medium">{p.liked_count ?? "—"}</span></TableCell>
                     <TableCell><span className="font-medium">{p.collected_count ?? "—"}</span></TableCell>
@@ -410,7 +583,7 @@ export default function XhsPostsPage() {
                       </span>
                     </TableCell>
                     <TableCell>
-                      <div className="flex gap-1">
+                      <div className="flex items-center gap-0.5">
                         <Tooltip content="历史数据">
                           <Button isIconOnly size="sm" variant="light"
                             as={Link} href={`/dashboard/xhs/posts/history?note_id=${p.note_id}`}>
@@ -437,189 +610,45 @@ export default function XhsPostsPage() {
               </TableBody>
             </Table>
           </CardBody>
+          {totalCount > 0 && (
+            <CardBody className="border-t border-divider py-2 flex flex-row items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-xs text-default-500">
+                每页
+                <select
+                  className="border border-divider rounded px-1.5 py-0.5 text-xs bg-background"
+                  value={String(pageSize)}
+                  onChange={(e) => setPageSize(parseInt(e.target.value, 10))}
+                >
+                  <option value="30">30</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+                条
+              </div>
+              <div className="flex items-center gap-1">
+                <Button size="sm" variant="flat" isIconOnly
+                  isDisabled={safePage <= 1}
+                  onPress={() => setPage(safePage - 1)}>
+                  <ChevronLeft size={14} />
+                </Button>
+                <span className="text-xs text-default-600 px-2">{safePage} / {pageCount}</span>
+                <Button size="sm" variant="flat" isIconOnly
+                  isDisabled={safePage >= pageCount}
+                  onPress={() => setPage(safePage + 1)}>
+                  <ChevronRight size={14} />
+                </Button>
+              </div>
+            </CardBody>
+          )}
         </Card>
-      ) : (
-      <Tabs>
-        {(() => {
-          const ungrouped = filteredPosts.filter((p) => !p.group_id);
-          return ungrouped.length > 0 ? (
-            <Tab key="g-none" title={`未分组 (${ungrouped.length})`}>
-              <Card>
-                <CardBody className="p-0">
-                  <Table aria-label="group-none" removeWrapper>
-                    <TableHeader>
-                      <TableColumn className="w-12">
-                        <Checkbox
-                          isSelected={ungrouped.length > 0 && ungrouped.every((p) => selectedKeys.has(postKey(p)))}
-                          isIndeterminate={
-                            ungrouped.some((p) => selectedKeys.has(postKey(p))) &&
-                            !ungrouped.every((p) => selectedKeys.has(postKey(p)))
-                          }
-                          onValueChange={() => togglePageAll(ungrouped)}
-                        />
-                      </TableColumn>
-                      <TableColumn>标题 / ID</TableColumn>
-                      <TableColumn>状态</TableColumn>
-                      <TableColumn>点赞</TableColumn>
-                      <TableColumn>收藏</TableColumn>
-                      <TableColumn>评论</TableColumn>
-                      <TableColumn>账号</TableColumn>
-                      <TableColumn>最后检测</TableColumn>
-                      <TableColumn>操作</TableColumn>
-                    </TableHeader>
-                    <TableBody emptyContent={<EmptyState icon={Inbox} title="暂无未分组帖子" hint="" />}>
-                      {ungrouped.map((p) => (
-                        <TableRow key={postKey(p)}>
-                          <TableCell>
-                            <Checkbox
-                              isSelected={selectedKeys.has(postKey(p))}
-                              onValueChange={() => toggleKey(postKey(p))}
-                            />
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex flex-col">
-                              <a href={p.note_url} target="_blank" rel="noreferrer"
-                                className="text-primary text-sm truncate max-w-xs hover:underline">
-                                {p.title || p.note_id}
-                              </a>
-                              <span className="text-xs text-default-400">{p.note_id}</span>
-                            </div>
-                          </TableCell>
-                          <TableCell>{fetchStatusChip(p)}</TableCell>
-                          <TableCell><span className="font-medium">{p.liked_count ?? "—"}</span></TableCell>
-                          <TableCell>{p.collected_count ?? "—"}</TableCell>
-                          <TableCell>{p.comment_count ?? "—"}</TableCell>
-                          <TableCell>
-                            <span className="text-xs text-default-500">{p.account_name || "—"}</span>
-                          </TableCell>
-                          <TableCell>
-                            <span className="text-xs text-default-400">
-                              {p.checked_at ? p.checked_at.slice(0, 16) : "待检测"}
-                            </span>
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-0.5">
-                              <MoveGroupButton
-                                noteId={p.note_id}
-                                currentGroupId={p.group_id ?? null}
-                                groups={groups}
-                                onMoved={() => mutatePosts()}
-                              />
-                              <Button isIconOnly size="sm" variant="light" color="danger" onPress={() => handleDelete(p.note_id)}>
-                                <Trash2 size={14} />
-                              </Button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </CardBody>
-              </Card>
-            </Tab>
-          ) : null;
-        })()}
-        {groups.map((g) => {
-          const groupPosts = filteredPosts.filter((p) => p.group_id === g.id);
-          return (
-          <Tab
-            key={`g-${g.id}`}
-            title={`${g.name} (${groupPosts.length})`}
-          >
-            <Card>
-              <CardBody className="p-0">
-                <Table aria-label={`group-${g.id}`} removeWrapper>
-                  <TableHeader>
-                    <TableColumn className="w-12">
-                      <Checkbox
-                        isSelected={groupPosts.length > 0 && groupPosts.every((p) => selectedKeys.has(postKey(p)))}
-                        isIndeterminate={
-                          groupPosts.some((p) => selectedKeys.has(postKey(p))) &&
-                          !groupPosts.every((p) => selectedKeys.has(postKey(p)))
-                        }
-                        onValueChange={() => togglePageAll(groupPosts)}
-                      />
-                    </TableColumn>
-                    <TableColumn>标题 / ID</TableColumn>
-                    <TableColumn>状态</TableColumn>
-                    <TableColumn>点赞</TableColumn>
-                    <TableColumn>收藏</TableColumn>
-                    <TableColumn>评论</TableColumn>
-                    <TableColumn>账号</TableColumn>
-                    <TableColumn>最后检测</TableColumn>
-                    <TableColumn>操作</TableColumn>
-                  </TableHeader>
-                  <TableBody emptyContent={
-                    <EmptyState icon={Inbox} title={`「${g.name}」分组下暂无帖子`}
-                      hint={search ? "尝试清除搜索条件，或为该分组添加帖子。" : "在添加帖子时选择该分组，即可入组。"} />
-                  }>
-                    {groupPosts.map((p) => (
-                        <TableRow key={postKey(p)}>
-                          <TableCell>
-                            <Checkbox
-                              isSelected={selectedKeys.has(postKey(p))}
-                              onValueChange={() => toggleKey(postKey(p))}
-                            />
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex flex-col">
-                              <a href={p.note_url} target="_blank" rel="noreferrer"
-                                className="text-primary text-sm truncate max-w-xs hover:underline">
-                                {p.title || p.note_id}
-                              </a>
-                              <span className="text-xs text-default-400">{p.note_id}</span>
-                            </div>
-                          </TableCell>
-                          <TableCell>{fetchStatusChip(p)}</TableCell>
-                          <TableCell><span className="font-medium">{p.liked_count ?? "—"}</span></TableCell>
-                          <TableCell><span className="font-medium">{p.collected_count ?? "—"}</span></TableCell>
-                          <TableCell><span className="font-medium">{p.comment_count ?? "—"}</span></TableCell>
-                          <TableCell>
-                            <Chip size="sm" variant="flat">{p.account_name ?? "未绑定"}</Chip>
-                          </TableCell>
-                          <TableCell>
-                            <span className="text-xs text-default-400">
-                              {p.checked_at ? p.checked_at.slice(0, 16) : "待检测"}
-                            </span>
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex gap-1">
-                              <Tooltip content="历史数据">
-                                <Button isIconOnly size="sm" variant="light"
-                                  as={Link} href={`/dashboard/xhs/posts/history?note_id=${p.note_id}`}>
-                                  <BarChart2 size={15} />
-                                </Button>
-                              </Tooltip>
-                              <MoveGroupButton
-                                noteId={p.note_id}
-                                currentGroupId={p.group_id ?? null}
-                                groups={groups}
-                                onMoved={() => mutatePosts()}
-                              />
-                              <Tooltip content="删除" color="danger">
-                                <Button isIconOnly size="sm" variant="light" color="danger"
-                                  onPress={() => handleDelete(p.note_id)}>
-                                  <Trash2 size={15} />
-                                </Button>
-                              </Tooltip>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                  </TableBody>
-                </Table>
-              </CardBody>
-            </Card>
-          </Tab>
-          );
-        })}
 
-        <Tab key="alerts" title={`告警记录 (${alerts.length})`}>
+        {/* 告警记录（独立 section） */}
+        {alerts.length > 0 && (
           <Card>
-            <CardHeader className="flex justify-end py-2">
+            <CardHeader className="flex justify-between items-center py-2">
+              <span className="text-sm font-medium">告警记录（{alerts.length} 条）</span>
               <Button size="sm" variant="flat" color="danger"
                 startContent={<Trash2 size={14} />}
-                isDisabled={!alerts.length}
                 onPress={handleClearAlerts}>
                 清空告警
               </Button>
@@ -633,10 +662,7 @@ export default function XhsPostsPage() {
                   <TableColumn>时间</TableColumn>
                   <TableColumn>操作</TableColumn>
                 </TableHeader>
-                <TableBody emptyContent={
-                  <EmptyState icon={Inbox} title="暂无告警记录"
-                    hint="数据指标超过阈值时会在这里显示告警。" />
-                }>
+                <TableBody>
                   {alerts.map((a) => (
                     <TableRow key={a.id}>
                       <TableCell>
@@ -667,8 +693,8 @@ export default function XhsPostsPage() {
               </Table>
             </CardBody>
           </Card>
-        </Tab>
-      </Tabs>
+        )}
+      </>
       )}
 
       {/* Add Posts Modal —— 懒加载，仅当用户打开后才加载 chunk */}
