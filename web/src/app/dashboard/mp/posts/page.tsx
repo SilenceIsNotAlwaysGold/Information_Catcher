@@ -119,6 +119,7 @@ export default function MpPostsPage() {
   const [crossPromptId, setCrossPromptId] = useState<string>("");  // saved 模式选中的 prompt id
   const [crossPromptText, setCrossPromptText] = useState<string>("");  // custom 模式
   const [crossVariantCount, setCrossVariantCount] = useState<number>(3);
+  const [crossModelId, setCrossModelId] = useState<number | null>(null);  // P15: 选中的 AI 模型
 
   // 用户保存的 prompt 列表 —— 走 SWR 缓存
   const { prompts: savedPrompts, isLoading: promptsLoading } = usePrompts();
@@ -140,6 +141,7 @@ export default function MpPostsPage() {
 
     // 组装 body
     const body: Record<string, unknown> = { variants: crossVariantCount };
+    if (crossModelId) body.model_id = crossModelId;  // P15
     if (crossMode === "custom") {
       const txt = crossPromptText.trim();
       if (!txt) { setCrossError("请填写自定义 prompt"); return; }
@@ -600,6 +602,8 @@ export default function MpPostsPage() {
           crossLoading={crossLoading}
           crossVariants={crossVariants}
           onRun={runCrossRewrite}
+          selectedModelId={crossModelId}
+          setSelectedModelId={setCrossModelId}
         />
       )}
     </div>

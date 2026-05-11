@@ -9,6 +9,7 @@ import { Textarea } from "@nextui-org/input";
 import { Select, SelectItem } from "@nextui-org/select";
 import { Tooltip } from "@nextui-org/tooltip";
 import { Wand2, Copy } from "lucide-react";
+import { ModelSelector } from "@/components/ModelSelector";
 
 export type CrossMode = "xhs" | "douyin" | "mp" | "saved" | "custom";
 export type SavedPrompt = { id: number; name: string; content: string; is_default?: number };
@@ -30,6 +31,9 @@ export type CrossRewriteModalProps = {
   crossLoading: boolean;
   crossVariants: string[];
   onRun: () => void;
+  // P15: 可选的 AI 模型选择
+  selectedModelId?: number | null;
+  setSelectedModelId?: (id: number | null) => void;
 };
 
 export default function CrossRewriteModal({
@@ -38,6 +42,7 @@ export default function CrossRewriteModal({
   crossVariantCount, setCrossVariantCount,
   savedPrompts, promptsLoading,
   crossError, crossLoading, crossVariants, onRun,
+  selectedModelId, setSelectedModelId,
 }: CrossRewriteModalProps) {
   return (
     <Modal isOpen={isOpen} onClose={onClose} size="2xl" scrollBehavior="inside">
@@ -112,6 +117,15 @@ export default function CrossRewriteModal({
                 onValueChange={setCrossPromptText}
               />
             </div>
+          )}
+
+          {/* P15: AI 模型选择 */}
+          {setSelectedModelId && (
+            <ModelSelector
+              usage="text"
+              value={selectedModelId ?? null}
+              onChange={setSelectedModelId}
+            />
           )}
 
           {/* 变体数量 */}

@@ -321,3 +321,174 @@ async def text_remix_generate(
         "background_url": bg["image_url"],
         "text": text,
     }
+
+
+# ── 异步任务：替代同步 /generate（CF tunnel 100s 会超时；async 后任务由 worker 跑）─
+
+
+class TextSource(BaseModel):
+    src_idx: int          # 原作品图序号（仅做标签）
+    text: str             # OCR 后用户确认的文字
+
+
+class TextRemixTaskRequest(BaseModel):
+    post_url: str = ""
+    post_title: str = ""
+    platform: str = ""
+    text_sources: List[TextSource]   # ≥1
+    background_ids: List[int]         # ≥1
+    count: int = 1                    # 套数 1-30
+    size: Optional[str] = None
+    style_hint: Optional[str] = ""
+    image_model_id: Optional[int] = None
+
+    model_config = {"protected_namespaces": ()}
+
+
+@router.post("/text-remix-tasks", summary="提交文本仿写任务（异步，worker 跑）")
+async def create_text_remix_task(
+    req: TextRemixTaskRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    user_id = int(current_user["id"])
+    if not req.text_sources:
+        raise HTTPException(status_code=400, detail="text_sources 不能为空")
+    if not req.background_ids:
+        raise HTTPException(status_code=400, detail="background_ids 不能为空")
+    # 过滤空文字
+    sources_clean = [
+        {"src_idx": int(s.src_idx), "text": (s.text or "").strip()}
+        for s in req.text_sources if (s.text or "").strip()
+    ]
+    if not sources_clean:
+        raise HTTPException(status_code=400, detail="所有文字源都是空的")
+    count = max(1, min(int(req.count or 1), 30))
+
+    # 校验背景权限 + 收集元数据（让 worker 不必再查表）
+    bgs_meta = []
+    valid_ids = []
+    for bid in req.background_ids:
+        bg = await monitor_db.get_text_remix_background(int(bid), user_id)
+        if not bg:
+            continue
+        bgs_meta.append({
+            "id": bg["id"],
+            "name": bg.get("name", "") or "",
+            "image_url": bg.get("image_url", "") or "",
+        })
+        valid_ids.append(bg["id"])
+    if not valid_ids:
+        raise HTTPException(
+            status_code=404,
+            detail="选中的背景图都不存在或无权访问",
+        )
+
+    task_id = await monitor_db.add_text_remix_task(
+        user_id=user_id,
+        post_url=req.post_url or "",
+        post_title=req.post_title or "",
+        platform=req.platform or "",
+        text_sources=sources_clean,
+        background_ids=valid_ids,
+        backgrounds_meta=bgs_meta,
+        count=count,
+        size=(req.size or "").strip(),
+        style_hint=(req.style_hint or "").strip(),
+        image_model_id=req.image_model_id,
+    )
+    if not task_id:
+        raise HTTPException(status_code=500, detail="创建任务失败")
+    return {"ok": True, "task_id": task_id}
+
+
+def _enrich_task(task: dict) -> dict:
+    """把 DB row 转成前端可直接渲染的 dict（展开 JSON 字段）。"""
+    import json as _json
+    out = dict(task)
+    for k in ("text_sources_json", "background_ids_json",
+              "backgrounds_meta_json", "items_json"):
+        try:
+            out[k.replace("_json", "")] = _json.loads(out.get(k) or ("[]"))
+        except Exception:
+            out[k.replace("_json", "")] = []
+        # 保留原字段名也行，但前端用解析后的更省事
+    return out
+
+
+@router.get("/text-remix-tasks", summary="我的文本仿写任务列表")
+async def list_my_text_remix_tasks(
+    limit: int = 30,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    user_id = int(current_user["id"])
+    rows = await monitor_db.list_text_remix_tasks(user_id=user_id, limit=limit)
+    return {"tasks": [_enrich_task(r) for r in rows]}
+
+
+@router.get("/text-remix-tasks/{task_id}", summary="单个任务（带 items 进度）")
+async def get_text_remix_task_detail(
+    task_id: int,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    user_id = int(current_user["id"])
+    task = await monitor_db.get_text_remix_task(task_id)
+    if not task or task.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="任务不存在或无权访问")
+    return {"task": _enrich_task(task)}
+
+
+@router.post("/text-remix-tasks/{task_id}/cancel", summary="取消文本仿写任务")
+async def cancel_text_remix_task_ep(
+    task_id: int,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    user_id = int(current_user["id"])
+    ok = await monitor_db.cancel_text_remix_task(task_id, user_id=user_id)
+    return {"ok": ok}
+
+
+@router.delete("/text-remix-tasks/{task_id}", summary="删除任务（仅 done/error/cancelled）")
+async def delete_text_remix_task_ep(
+    task_id: int,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    user_id = int(current_user["id"])
+    task = await monitor_db.get_text_remix_task(task_id)
+    if not task or task.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="任务不存在或无权访问")
+    if task.get("status") in ("pending", "running"):
+        raise HTTPException(status_code=400, detail="任务进行中，请先取消")
+    await monitor_db.delete_text_remix_task(task_id)
+    return {"ok": True}
+
+
+@router.post("/text-remix-tasks/{task_id}/clone", summary="用相同参数重新提交")
+async def clone_text_remix_task(
+    task_id: int,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    import json as _json
+    user_id = int(current_user["id"])
+    task = await monitor_db.get_text_remix_task(task_id)
+    if not task or task.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="任务不存在或无权访问")
+    try:
+        text_sources = _json.loads(task.get("text_sources_json") or "[]")
+        bg_ids = _json.loads(task.get("background_ids_json") or "[]")
+        bgs_meta = _json.loads(task.get("backgrounds_meta_json") or "[]")
+    except Exception:
+        raise HTTPException(status_code=500, detail="原任务参数解析失败")
+    new_id = await monitor_db.add_text_remix_task(
+        user_id=user_id,
+        post_url=task.get("post_url") or "",
+        post_title=task.get("post_title") or "",
+        platform=task.get("platform") or "",
+        text_sources=text_sources,
+        background_ids=bg_ids,
+        backgrounds_meta=bgs_meta,
+        count=int(task.get("count") or 1),
+        size=task.get("size") or "",
+        style_hint=task.get("style_hint") or "",
+        image_model_id=task.get("image_model_id"),
+    )
+    return {"ok": True, "task_id": new_id}

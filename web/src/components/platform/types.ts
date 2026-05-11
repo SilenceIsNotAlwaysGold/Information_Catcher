@@ -59,11 +59,16 @@ export type CreatorRow = {
   last_post_id?: string | null;
   is_active?: number;
   // 健康度 + 未读（后端 v2）
-  last_check_status?: "ok" | "no_account" | "cookie_invalid" | "error" | "unknown" | null;
+  last_check_status?: "ok" | "no_account" | "cookie_invalid" | "no_extension" | "ext_login_required" | "error" | "unknown" | null;
   last_check_error?: string | null;
   last_post_at?: string | null;
   unread_count?: number | null;
   last_seen_at?: string | null;
+  // P9: per-creator 设置 + 卡片信息
+  push_enabled?: number | boolean | null;
+  fetch_interval_minutes?: number | null;
+  avatar_url?: string | null;
+  last_post_title?: string | null;
 };
 
 export type TrendingPost = {

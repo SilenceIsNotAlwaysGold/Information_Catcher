@@ -14,7 +14,7 @@ from . import comment_fetcher
 from . import cookie_health
 from . import platforms as platform_registry
 from . import image_upload_worker
-from . import remix_worker
+from . import remix_worker, text_remix_worker
 from . import media_archiver
 
 logger = logging.getLogger(__name__)
@@ -1283,6 +1283,11 @@ async def start_scheduler():
     scheduler.add_job(
         remix_worker.run_once, "interval", seconds=10,
         id="remix_worker", replace_existing=True, max_instances=1,
+    )
+    # 文本仿写任务 worker：同样 10s 心跳，独立运行（互不阻塞）
+    scheduler.add_job(
+        text_remix_worker.process_once, "interval", seconds=10,
+        id="text_remix_worker", replace_existing=True, max_instances=1,
     )
     # 试用期到期处理：每天 00:30 跑一次，把过期 trial 用户降级到 free
     scheduler.add_job(

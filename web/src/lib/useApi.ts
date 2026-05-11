@@ -131,3 +131,33 @@ export const useAlerts = (limit = 30, platform?: "xhs" | "douyin" | "mp") => {
 };
 export const mutateAlerts = () =>
   globalMutate((k) => Array.isArray(k) && typeof k[0] === "string" && k[0].startsWith("/api/monitor/alerts"));
+
+// ── P15: AI 模型 ──────────────────────────────────────────────
+// 用户可见模型 + 自己的偏好（用于改写 / 商品图 modal 里的「选择模型」下拉）
+export type AiModelOption = {
+  id: number;
+  model_id: string;
+  display_name: string;
+  usage_type: "text" | "image";
+  provider_name: string;
+  is_default: number;
+  extra_config: Record<string, any>;
+};
+export type AiModelsResp = {
+  models: AiModelOption[];
+  preferred_text_model_id: number | null;
+  preferred_image_model_id: number | null;
+};
+export const useAiModels = (usage: "text" | "image") => {
+  const swr = useApi<AiModelsResp>(`/api/ai/models?usage=${usage}`, { dedupingInterval: 60000 });
+  return {
+    ...swr,
+    models: swr.data?.models ?? [],
+    preferred:
+      usage === "text"
+        ? swr.data?.preferred_text_model_id ?? null
+        : swr.data?.preferred_image_model_id ?? null,
+  };
+};
+export const mutateAiModels = () =>
+  globalMutate((k) => Array.isArray(k) && typeof k[0] === "string" && k[0].startsWith("/api/ai/models"));

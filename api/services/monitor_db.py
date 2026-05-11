@@ -444,6 +444,34 @@ CREATE TABLE IF NOT EXISTS text_remix_backgrounds (
 );
 CREATE INDEX IF NOT EXISTS idx_text_remix_bg_user ON text_remix_backgrounds(user_id, created_at DESC);
 
+-- 文本仿写任务（异步）。结构对标 remix_tasks，差别：
+--   输入 = 多个文字源（text_sources_json） × 多个背景（background_ids_json） × count 套
+--   每套产出 = N源 × M背景 张图（笛卡尔积）
+--   items_json：[{set_idx, items:[{src_idx, bg_id, bg_name, image_url, error}]}, ...]
+CREATE TABLE IF NOT EXISTS text_remix_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    status TEXT DEFAULT 'pending',   -- pending/running/done/error/cancelled
+    post_url TEXT DEFAULT '',
+    post_title TEXT DEFAULT '',
+    platform TEXT DEFAULT '',
+    text_sources_json TEXT DEFAULT '[]',     -- [{src_idx, text}, ...]
+    background_ids_json TEXT DEFAULT '[]',   -- [bg_id, ...]
+    backgrounds_meta_json TEXT DEFAULT '[]', -- 冗余：[{id, name, image_url}, ...] 方便展示
+    count INTEGER DEFAULT 1,
+    done_count INTEGER DEFAULT 0,
+    items_json TEXT DEFAULT '[]',
+    error TEXT DEFAULT '',
+    size TEXT DEFAULT '',
+    style_hint TEXT DEFAULT '',
+    image_model_id INTEGER,
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_text_remix_tasks_user_time ON text_remix_tasks(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_text_remix_tasks_status ON text_remix_tasks(status);
+
 -- 每日用量计数：跨天自动清零（不存当天的零行）
 -- 每用户 + 每天一行，关键端点 record_usage 时累加
 CREATE TABLE IF NOT EXISTS daily_usage (
@@ -3134,6 +3162,171 @@ async def has_pending_remix_tasks() -> bool:
             "SELECT 1 FROM remix_tasks WHERE status='pending' LIMIT 1",
         ) as cur:
             return (await cur.fetchone()) is not None
+
+
+# ── Text Remix Tasks（异步任务，对标 remix_tasks）─────────────────────────────
+
+async def add_text_remix_task(
+    *,
+    user_id: int,
+    post_url: str = "",
+    post_title: str = "",
+    platform: str = "",
+    text_sources: list,           # [{src_idx, text}, ...]
+    background_ids: list,         # [bg_id, ...]
+    backgrounds_meta: list,       # [{id, name, image_url}, ...] 冗余
+    count: int = 1,
+    size: str = "",
+    style_hint: str = "",
+    image_model_id: Optional[int] = None,
+) -> int:
+    import json as _json
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO text_remix_tasks
+               (user_id, status, post_url, post_title, platform,
+                text_sources_json, background_ids_json, backgrounds_meta_json,
+                count, done_count, items_json, size, style_hint, image_model_id)
+               VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?, ?, ?)""",
+            (
+                user_id, post_url[:500], post_title[:300], platform[:50],
+                _json.dumps(text_sources, ensure_ascii=False),
+                _json.dumps(background_ids),
+                _json.dumps(backgrounds_meta, ensure_ascii=False),
+                int(count), size[:50], (style_hint or "")[:300],
+                image_model_id,
+            ),
+        )
+        await db.commit()
+        return cur.lastrowid or 0
+
+
+async def list_text_remix_tasks(
+    user_id: Optional[int] = None, limit: int = 30,
+) -> List[Dict]:
+    where = "WHERE user_id=?" if user_id is not None else ""
+    args = (user_id,) if user_id is not None else ()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT * FROM text_remix_tasks {where} "
+            f"ORDER BY created_at DESC LIMIT ?",
+            (*args, limit),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_text_remix_task(task_id: int) -> Optional[Dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM text_remix_tasks WHERE id=?", (task_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def get_text_remix_task_status(task_id: int) -> Optional[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT status FROM text_remix_tasks WHERE id=?", (task_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+
+async def cancel_text_remix_task(
+    task_id: int, user_id: Optional[int] = None,
+) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        if user_id is not None:
+            cur = await db.execute(
+                "UPDATE text_remix_tasks SET status='cancelled', "
+                "finished_at=datetime('now','localtime') "
+                "WHERE id=? AND user_id=? AND status IN ('pending','running')",
+                (task_id, user_id),
+            )
+        else:
+            cur = await db.execute(
+                "UPDATE text_remix_tasks SET status='cancelled', "
+                "finished_at=datetime('now','localtime') "
+                "WHERE id=? AND status IN ('pending','running')",
+                (task_id,),
+            )
+        await db.commit()
+        return (cur.rowcount or 0) > 0
+
+
+async def claim_pending_text_remix_task() -> Optional[Dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            "SELECT * FROM text_remix_tasks WHERE status='pending' "
+            "ORDER BY id ASC LIMIT 1",
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            await db.commit()
+            return None
+        await db.execute(
+            "UPDATE text_remix_tasks SET status='running', "
+            "started_at=datetime('now','localtime') WHERE id=?",
+            (row["id"],),
+        )
+        await db.commit()
+        return dict(row)
+
+
+async def update_text_remix_task_progress(
+    task_id: int, *, items_json: str, done_count: int,
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE text_remix_tasks SET items_json=?, done_count=? WHERE id=?",
+            (items_json, done_count, task_id),
+        )
+        await db.commit()
+
+
+async def finish_text_remix_task(
+    task_id: int, *, status: str = "done", error: str = "",
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE text_remix_tasks "
+            "SET status=?, error=?, finished_at=datetime('now','localtime') "
+            "WHERE id=?",
+            (status, (error or "")[:500], task_id),
+        )
+        await db.commit()
+
+
+async def delete_text_remix_task(task_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM text_remix_tasks WHERE id=?", (task_id,))
+        await db.commit()
+
+
+async def has_pending_text_remix_tasks() -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM text_remix_tasks WHERE status='pending' LIMIT 1",
+        ) as cur:
+            return (await cur.fetchone()) is not None
+
+
+async def revive_stuck_running_text_remix_tasks(stuck_minutes: int = 5) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE text_remix_tasks SET status='pending' "
+            "WHERE status='running' "
+            "  AND started_at IS NOT NULL "
+            "  AND datetime(started_at, '+' || ? || ' minutes') < datetime('now', 'localtime')",
+            (stuck_minutes,),
+        )
+        await db.commit()
+        return cur.rowcount or 0
 
 
 # ── Media Archive（爆款媒体归档）─────────────────────────────────────────────

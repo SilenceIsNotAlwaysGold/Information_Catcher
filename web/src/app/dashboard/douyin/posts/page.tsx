@@ -1,47 +1,25 @@
 "use client";
 
 import { useState } from "react";
-import { usePosts, mutatePosts, useMe, useGroups } from "@/lib/useApi";
 import dynamic from "next/dynamic";
-import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
 import { Chip } from "@nextui-org/chip";
-import { Checkbox } from "@nextui-org/checkbox";
-import {
-  Table, TableHeader, TableColumn, TableBody, TableRow, TableCell,
-} from "@nextui-org/table";
-import { useDisclosure } from "@nextui-org/modal";
 import { Tooltip } from "@nextui-org/tooltip";
-import { Plus, RefreshCw, Trash2, Download, FileText } from "lucide-react";
+import { Download } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PlatformSubNav } from "@/components/platform";
-import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
-import { MonitorPaceButton } from "@/components/MonitorPaceButton";
-import { EmptyState } from "@/components/EmptyState";
-import { TableSkeleton } from "@/components/TableSkeleton";
-import { toastOk, toastErr } from "@/lib/toast";
-import { confirmDialog } from "@/components/ConfirmDialog";
+import {
+  PlatformPostsView, type PostRow,
+} from "@/components/platform/PlatformPostsView";
+import { mutatePosts } from "@/lib/useApi";
+import { toastErr } from "@/lib/toast";
 
-// 添加视频 Modal —— 首屏不需要，懒加载
-const AddDouyinPostsModal = dynamic(() => import("./_modals/AddDouyinPostsModal"), { ssr: false });
+const AddDouyinPostsModal = dynamic(
+  () => import("./_modals/AddDouyinPostsModal"),
+  { ssr: false },
+);
 
 const API = (path: string) => `/api/monitor${path}`;
-
-type Post = {
-  note_id: string;
-  title: string;
-  note_url: string;
-  liked_count: number | null;
-  collected_count: number | null;
-  comment_count: number | null;
-  checked_at: string | null;
-  last_fetch_status?: string;
-  fail_count?: number;
-  platform: string;
-  tags?: string;
-  author?: string;
-  owner_username?: string;
-};
 
 function parseTags(s?: string): string[] {
   if (!s) return [];
@@ -53,17 +31,11 @@ export default function DouyinPostsPage() {
   const { token } = useAuth();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 
-  const { data: me } = useMe();
-  const isAdmin = me?.role === "admin";
-  const { posts: rawPosts, isLoading } = usePosts();
-  const posts = (rawPosts as Post[]).filter((p) => p.platform === "douyin");
-  const { groups } = useGroups();
+  // 添加 modal 的 state
   const [links, setLinks] = useState("");
   const [selectedGroupId, setSelectedGroupId] = useState<string>("");
   const [adding, setAdding] = useState(false);
-  const [checking, setChecking] = useState(false);
   const [results, setResults] = useState<{ link: string; ok: boolean; reason?: string }[]>([]);
-  const { isOpen, onOpen, onClose } = useDisclosure();
 
   const handleAdd = async () => {
     const items = links.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -74,8 +46,7 @@ export default function DouyinPostsPage() {
       const r = await fetch(API("/posts"), {
         method: "POST", headers,
         body: JSON.stringify({
-          links: items,
-          group_id: parseInt(selectedGroupId),
+          links: items, group_id: parseInt(selectedGroupId),
         }),
       });
       const d = await r.json();
@@ -87,236 +58,71 @@ export default function DouyinPostsPage() {
     }
   };
 
-  const handleCheck = async () => {
-    setChecking(true);
-    await fetch(API("/check"), { method: "POST", headers });
-    setTimeout(() => { mutatePosts(); setChecking(false); }, 4000);
+  // 标题下面附加：作者 + tags
+  const renderTitleExtras = (p: PostRow) => {
+    const tags = parseTags(p.tags);
+    if (!p.author && tags.length === 0) return null;
+    return (
+      <div className="flex items-center gap-1 flex-wrap">
+        {p.author && <span className="text-xs text-success">📢 {p.author}</span>}
+        {tags.slice(0, 6).map((t, i) => (
+          <Chip key={i} size="sm" variant="flat" color="primary"
+            className="h-5 text-[10px] px-1">
+            #{t}
+          </Chip>
+        ))}
+      </div>
+    );
   };
 
-  const handleDelete = async (note_id: string, owner_user_id?: number | null) => {
-    const ok = await confirmDialog({
-      title: "删除监控",
-      content: "确认删除这条监控？",
-      confirmText: "删除",
-      cancelText: "取消",
-      danger: true,
-    });
-    if (!ok) return;
-    const qs = owner_user_id ? `?owner_user_id=${owner_user_id}` : "";
-    await fetch(API(`/posts/${note_id}${qs}`), { method: "DELETE", headers });
-    await mutatePosts();
-  };
-
-  // 多选 + 批量删除
-  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
-  const postKey = (p: Post) => `${(p as any).user_id || 0}__${p.note_id}`;
-  const toggleKey = (k: string) => setSelectedKeys((prev) => {
-    const next = new Set(prev);
-    if (next.has(k)) next.delete(k); else next.add(k);
-    return next;
-  });
-  const togglePageAll = (rows: Post[]) => setSelectedKeys((prev) => {
-    const allKeys = rows.map(postKey);
-    const allOn = allKeys.length > 0 && allKeys.every((k) => prev.has(k));
-    const next = new Set(prev);
-    for (const k of allKeys) { if (allOn) next.delete(k); else next.add(k); }
-    return next;
-  });
-  const handleBatchDelete = async () => {
-    if (selectedKeys.size === 0) return;
-    const ok = await confirmDialog({
-      title: "批量删除", content: `确认删除选中的 ${selectedKeys.size} 条？`,
-      confirmText: "删除", cancelText: "取消", danger: true,
-    });
-    if (!ok) return;
-    const noteIds = Array.from(selectedKeys).map((k) => k.split("__").slice(1).join("__"));
-    await fetch(API("/posts/batch-delete"), {
-      method: "POST", headers,
-      body: JSON.stringify({ note_ids: noteIds }),
-    });
-    setSelectedKeys(new Set());
-    await mutatePosts();
-  };
-
-  const statusChip = (p: Post) => {
-    const fc = p.fail_count ?? 0;
-    if (fc >= 5) return <Chip size="sm" color="danger" variant="flat">⚠️ 已停抓</Chip>;
-    if (p.last_fetch_status === "ok") return <Chip size="sm" color="success" variant="flat">正常</Chip>;
-    if (p.last_fetch_status === "login_required")
-      return <Chip size="sm" color="warning" variant="flat">🔒 需验证</Chip>;
-    if (p.last_fetch_status === "deleted") return <Chip size="sm" color="danger" variant="flat">已删除</Chip>;
-    if (p.last_fetch_status === "error") return <Chip size="sm" color="danger" variant="flat">抓取异常</Chip>;
-    return <Chip size="sm" variant="flat">未检测</Chip>;
-  };
-
-  // 直播订阅功能已下线（2026-05-10）
+  // 行操作：下载无水印 mp4
+  const renderRowActions = (p: PostRow) => (
+    <Tooltip content="下载无水印 mp4">
+      <Button isIconOnly size="sm" variant="light"
+        onPress={async () => {
+          const r = await fetch(API(`/posts/${p.note_id}/video?clean=true`), { headers });
+          if (!r.ok) {
+            let msg = "下载失败";
+            try { const j = await r.json(); msg = j.detail || msg; } catch {}
+            toastErr(msg);
+            return;
+          }
+          const blob = await r.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `douyin_${p.note_id}.mp4`;
+          a.click();
+          URL.revokeObjectURL(url);
+        }}>
+        <Download size={15} />
+      </Button>
+    </Tooltip>
+  );
 
   return (
-    <div className="p-6 space-y-4 max-w-6xl">
+    <div className="p-6 space-y-4">
       <PlatformSubNav platform="douyin" current="posts" />
-
-      <div className="flex items-center justify-between">
-        <Chip size="sm" color="primary" variant="flat">v1 - 详情抓取</Chip>
-        <div className="flex gap-2 flex-wrap">
-          {selectedKeys.size > 0 && (
-            <Button size="sm" color="danger" variant="flat"
-              startContent={<Trash2 size={14} />}
-              onPress={handleBatchDelete}>
-              删除选中 ({selectedKeys.size})
-            </Button>
-          )}
-          <MonitorGroupsButton token={token} />
-          <MonitorPaceButton />
-          <Button size="sm" variant="flat"
-            startContent={<RefreshCw size={15} className={checking ? "animate-spin" : ""} />}
-            onPress={handleCheck} isLoading={checking}>
-            立即检测
-          </Button>
-          <Button size="sm" color="primary" startContent={<Plus size={16} />} onPress={onOpen}>
-            添加抖音视频
-          </Button>
-        </div>
-      </div>
-
-      <Card>
-        <CardHeader className="text-sm text-default-500 flex-col items-start gap-1">
-          <span>支持的链接形态：</span>
-          <ul className="text-xs space-y-0.5 ml-3">
-            <li>· 短链：<code>https://v.douyin.com/xxxxx/</code></li>
-            <li>· 长链：<code>https://www.douyin.com/video/&#123;aweme_id&#125;</code></li>
-            <li>· 移动分享：<code>https://www.iesdouyin.com/share/video/&#123;aweme_id&#125;/</code></li>
-          </ul>
-        </CardHeader>
-        <CardBody className="p-0">
-          {isLoading ? (
-            <TableSkeleton rows={5} cols={6} />
-          ) : posts.length === 0 ? (
-            <EmptyState
-              icon={FileText}
-              title="还没有添加抖音视频"
-              hint="支持 v.douyin.com 短链 / www.douyin.com/video/{id} 长链 / iesdouyin 移动分享链。"
-              action={
-                <Button color="primary" startContent={<Plus size={16} />} onPress={onOpen}>
-                  添加抖音视频
-                </Button>
-              }
-            />
-          ) : (
-          <Table aria-label="douyin-posts" removeWrapper>
-            <TableHeader>
-              <TableColumn className="w-12">
-                <Checkbox
-                  isSelected={posts.length > 0 && posts.every((p) => selectedKeys.has(postKey(p)))}
-                  isIndeterminate={
-                    posts.some((p) => selectedKeys.has(postKey(p))) &&
-                    !posts.every((p) => selectedKeys.has(postKey(p)))
-                  }
-                  onValueChange={() => togglePageAll(posts)}
-                />
-              </TableColumn>
-              <TableColumn>视频</TableColumn>
-              <TableColumn>状态</TableColumn>
-              <TableColumn>点赞</TableColumn>
-              <TableColumn>评论</TableColumn>
-              <TableColumn>分享</TableColumn>
-              <TableColumn>最后检测</TableColumn>
-              <TableColumn>操作</TableColumn>
-            </TableHeader>
-            <TableBody>
-              {posts.map((p) => (
-                <TableRow key={postKey(p)}>
-                  <TableCell>
-                    <Checkbox
-                      isSelected={selectedKeys.has(postKey(p))}
-                      onValueChange={() => toggleKey(postKey(p))}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-col gap-1">
-                      <a href={p.note_url} target="_blank" rel="noreferrer"
-                        className="text-primary text-sm truncate max-w-md hover:underline">
-                        {p.title || p.note_id}
-                      </a>
-                      <div className="flex items-center gap-1 flex-wrap">
-                        {isAdmin && p.owner_username && (
-                          <Chip size="sm" variant="flat" color="secondary">{p.owner_username}</Chip>
-                        )}
-                        {p.author && (
-                          <span className="text-xs text-success">📢 {p.author}</span>
-                        )}
-                        {parseTags(p.tags).slice(0, 6).map((t, i) => (
-                          <Chip key={i} size="sm" variant="flat" color="primary"
-                            className="h-5 text-[10px] px-1">
-                            #{t}
-                          </Chip>
-                        ))}
-                      </div>
-                      <span className="text-xs text-default-400">{p.note_id}</span>
-                    </div>
-                  </TableCell>
-                  <TableCell>{statusChip(p)}</TableCell>
-                  <TableCell>{p.liked_count ?? "—"}</TableCell>
-                  <TableCell>{p.comment_count ?? "—"}</TableCell>
-                  <TableCell>{p.collected_count ?? "—"}</TableCell>
-                  <TableCell>
-                    <span className="text-xs text-default-400">
-                      {p.checked_at ? p.checked_at.slice(0, 16) : "待检测"}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex gap-1">
-                      <Tooltip content="下载无水印 mp4">
-                        <Button isIconOnly size="sm" variant="light"
-                          onPress={async () => {
-                            const r = await fetch(API(`/posts/${p.note_id}/video?clean=true`), { headers });
-                            if (!r.ok) {
-                              let msg = "下载失败";
-                              try { const j = await r.json(); msg = j.detail || msg; } catch {}
-                              toastErr(msg);
-                              return;
-                            }
-                            const blob = await r.blob();
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement("a");
-                            a.href = url;
-                            a.download = `douyin_${p.note_id}.mp4`;
-                            a.click();
-                            URL.revokeObjectURL(url);
-                          }}>
-                          <Download size={15} />
-                        </Button>
-                      </Tooltip>
-                      <Tooltip content="删除" color="danger">
-                        <Button isIconOnly size="sm" variant="light" color="danger"
-                          onPress={() => handleDelete(p.note_id, (p as any).user_id)}>
-                          <Trash2 size={15} />
-                        </Button>
-                      </Tooltip>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-          )}
-        </CardBody>
-      </Card>
-
-      {/* Modal —— 懒加载 */}
-      {isOpen && (
-        <AddDouyinPostsModal
-          isOpen={isOpen}
-          onClose={onClose}
-          groups={groups}
-          selectedGroupId={selectedGroupId}
-          setSelectedGroupId={setSelectedGroupId}
-          links={links}
-          setLinks={setLinks}
-          results={results}
-          adding={adding}
-          onSubmit={handleAdd}
-        />
-      )}
+      <PlatformPostsView
+        platform="douyin"
+        addLabel="添加抖音视频"
+        emptyTitle="还没有添加抖音视频"
+        emptyHint="支持 v.douyin.com 短链 / www.douyin.com/video/{id} 长链 / iesdouyin 移动分享链。"
+        metricColumns={[
+          { key: "liked_count",     label: "点赞", sortKey: "liked" },
+          { key: "comment_count",   label: "评论", sortKey: "comment" },
+          { key: "collected_count", label: "分享", sortKey: "collected" },
+        ]}
+        AddModal={AddDouyinPostsModal}
+        addModalProps={{
+          selectedGroupId, setSelectedGroupId,
+          links, setLinks,
+          results, adding,
+          onSubmit: handleAdd,
+        }}
+        renderTitleExtras={renderTitleExtras}
+        renderRowActions={renderRowActions}
+      />
     </div>
   );
 }

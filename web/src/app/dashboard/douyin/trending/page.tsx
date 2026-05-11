@@ -25,6 +25,7 @@ import { TableSkeleton } from "@/components/TableSkeleton";
 import { TrendingSettingsButton } from "@/components/TrendingSettingsButton";
 import { proxyUrl } from "@/components/product-image/utils";
 import { PromptTemplatesButton } from "@/components/PromptTemplatesButton";
+import { ModelSelector } from "@/components/ModelSelector";
 import { toastOk, toastErr } from "@/lib/toast";
 
 const API = (path: string) => `/api/monitor${path}`;
@@ -73,6 +74,7 @@ export default function DouyinTrendingPage() {
   const [rewritePreview, setRewritePreview] = useState<string>("");
   const [rewriteVariants, setRewriteVariants] = useState<string[]>([]);
   const [variantsCount, setVariantsCount] = useState<number>(1);
+  const [rewriteModelId, setRewriteModelId] = useState<number | null>(null);  // P15
   const [lockingIdx, setLockingIdx] = useState<number | null>(null);
   const [fetchingContent, setFetchingContent] = useState(false);
 
@@ -255,7 +257,10 @@ export default function DouyinTrendingPage() {
         API(`/trending/posts/${active.note_id}/rewrite?variants=${variantsCount}`),
         {
           method: "POST", headers,
-          body: JSON.stringify({ prompt_id: activePromptId ? parseInt(activePromptId) : null }),
+          body: JSON.stringify({
+            prompt_id: activePromptId ? parseInt(activePromptId) : null,
+            model_id: rewriteModelId,  // P15
+          }),
         },
       );
       const d = await r.json();
@@ -840,6 +845,13 @@ export default function DouyinTrendingPage() {
                   </details>
                 ) : null;
               })()}
+              {/* P15: AI 模型选择 */}
+              <ModelSelector
+                usage="text"
+                value={rewriteModelId}
+                onChange={setRewriteModelId}
+                className="max-w-md"
+              />
               <div className="flex items-center gap-2">
                 <Button color="primary" variant="flat"
                   startContent={<Sparkles size={15} />}

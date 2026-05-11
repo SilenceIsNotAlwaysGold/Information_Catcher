@@ -51,11 +51,15 @@ export function TrendingSettingsButton({ platform = "xhs" }: Props = {}) {
   const [chatMapJson, setChatMapJson] = useState<string>("");
   const [rebuilding, setRebuilding] = useState(false);
 
+  // 按平台读写：xhs/douyin 走 platform-specific 字段；mp 走全局字段
+  const settingsQs = platform && (platform === "xhs" || platform === "douyin")
+    ? `?platform=${platform}` : "";
+
   const load = async () => {
     if (!token) return;
     setLoading(true);
     try {
-      const r = await fetch(API("/settings"), { headers });
+      const r = await fetch(API(`/settings${settingsQs}`), { headers });
       if (!r.ok) throw new Error(await r.text());
       const d = await r.json();
       setEnabled(d.trending_enabled === "1" || d.trending_enabled === true);
@@ -100,7 +104,7 @@ export function TrendingSettingsButton({ platform = "xhs" }: Props = {}) {
         trending_interval_minutes: clampInterval(trendingInterval),
         trending_push_enabled: pushEnabled,
       };
-      const r = await fetch(API("/settings"), {
+      const r = await fetch(API(`/settings${settingsQs}`), {
         method: "PUT", headers, body: JSON.stringify(payload),
       });
       if (!r.ok) {

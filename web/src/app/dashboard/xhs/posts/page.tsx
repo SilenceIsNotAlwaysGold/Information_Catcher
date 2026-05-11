@@ -82,9 +82,10 @@ export default function XhsPostsPage() {
   const { posts: rawPosts, isLoading } = usePosts();
   // 排除博主追新的帖子（有 creator_id），它们在「博主追新」板块单独展示
   const posts = (rawPosts as Post[]).filter((p) => isXhs(p) && p.creator_id == null);
-  const { alerts } = useAlerts(30);
+  // 只看小红书的告警，避免和抖音/公众号互相污染
+  const { alerts } = useAlerts(30, "xhs");
   const { accounts } = useAccounts();
-  const { groups } = useGroups();
+  const { groups } = useGroups("xhs");
   const [links, setLinks] = useState("");
   const [selectedAccount, setSelectedAccount] = useState<string>("");
   const [selectedGroupId, setSelectedGroupId] = useState<string>("");
@@ -184,7 +185,8 @@ export default function XhsPostsPage() {
       danger: true,
     });
     if (!ok) return;
-    await fetch(API("/alerts"), { method: "DELETE", headers });
+    // 只清空小红书的告警，不影响抖音/公众号
+    await fetch(API("/alerts?platform=xhs"), { method: "DELETE", headers });
     await mutateAlerts();
   };
 
@@ -419,7 +421,7 @@ export default function XhsPostsPage() {
               </Button>
             </Tooltip>
           )}
-          <MonitorGroupsButton token={token} />
+          <MonitorGroupsButton token={token} platform="xhs" />
           <MonitorPaceButton />
           <Button size="sm" color="primary" startContent={<Plus size={16} />} onPress={onOpen}>
             添加小红书帖子

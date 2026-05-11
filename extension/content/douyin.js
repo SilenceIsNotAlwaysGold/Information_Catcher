@@ -88,28 +88,46 @@ function tryClickWorksTab() {
   return false;
 }
 
+// 派发真实的 wheel 事件 —— 抖音 SPA 部分懒加载触发器只监听 wheel，
+// 不监听 scroll；programmatic scrollTo 不触发 wheel。
+function dispatchWheel(deltaY) {
+  try {
+    const opts = { deltaY, bubbles: true, cancelable: true, deltaMode: 0 };
+    document.dispatchEvent(new WheelEvent("wheel", opts));
+    window.dispatchEvent(new WheelEvent("wheel", opts));
+  } catch {}
+}
+
 function startAutoScroll(mode = "feed") {
   stopAutoScroll();
   _scrollPos = 0;
   if (mode === "creator") {
-    // 第一次先点击「作品」tab（部分博主默认在「直播」/「合集」）
-    setTimeout(() => { try { tryClickWorksTab(); } catch {} }, 300);
-    setTimeout(() => { try { tryClickWorksTab(); } catch {} }, 1500);
-    // 渐进 scroll：每 800ms 下移 700px，到底后回顶再来一遍
+    // 多次尝试点击「作品」tab（部分博主默认在「直播」/「合集」）
+    setTimeout(() => { try { tryClickWorksTab(); } catch {} }, 500);
+    setTimeout(() => { try { tryClickWorksTab(); } catch {} }, 2500);
+    setTimeout(() => { try { tryClickWorksTab(); } catch {} }, 5000);
+    // 渐进式 scroll + wheel 事件双保险
+    // 之前的 bug：刚进页面时 scrollHeight 短 → _scrollPos > max → 跳 0 → 永远停在顶上
+    let phase = 0;
     _autoScrollTimer = setInterval(() => {
       try {
         const el = document.scrollingElement || document.documentElement;
-        const max = el.scrollHeight - el.clientHeight;
-        _scrollPos += 700;
-        if (_scrollPos > max) {
-          // 到底：回顶 + 重新滚（让 IntersectionObserver 在第二次滚动时再触发一遍）
-          _scrollPos = 0;
-          el.scrollTo({ top: 0, behavior: "auto" });
-        } else {
-          el.scrollTo({ top: _scrollPos, behavior: "auto" });
+        phase++;
+        // 每 8 个 tick 做一次「滚到底 + 滚回顶」的大幅刺激
+        if (phase % 8 === 0) {
+          el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+          dispatchWheel(800);
+          setTimeout(() => {
+            try { el.scrollTo({ top: 0, behavior: "auto" }); } catch {}
+          }, 300);
+          return;
         }
+        // 常规 tick：scrollBy 600px + 派发 wheel
+        // 用 scrollBy 而非 scrollTo —— 不需要预测 scrollHeight，浏览器自动 clamp
+        el.scrollBy({ top: 600, behavior: "auto" });
+        dispatchWheel(600);
       } catch {}
-    }, 800);
+    }, 700);
     return;
   }
   // feed 模式：直接刷到底（搜索结果 / 评论列表）
@@ -117,6 +135,7 @@ function startAutoScroll(mode = "feed") {
     try {
       const el = document.scrollingElement || document.documentElement;
       el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+      dispatchWheel(800);
       if (Math.random() < 0.15) {
         setTimeout(() => el.scrollTo({ top: 0, behavior: "auto" }), 50);
       }
@@ -126,6 +145,122 @@ function startAutoScroll(mode = "feed") {
 function stopAutoScroll() {
   if (_autoScrollTimer) clearInterval(_autoScrollTimer);
   _autoScrollTimer = null;
+}
+
+// ─── DOM 兜底：直接读抖音博主主页可见信息 ───────────────────────────────
+//
+// 抖音的 aweme/post XHR 走 IntersectionObserver 懒加载，在 popup window /
+// 后台 tab 里不一定能触发。但页面 DOM 里其实已经有 SSR 渲染好的：
+//   - data-e2e="user-info-{follow,fans,like}" → 关注/粉丝/获赞 数字（含「万」单位）
+//   - tab 列表里有「作品 N」文字
+//   - 「作品」grid 里前 N 条 <a href="/video/{aweme_id}">
+// 直接抓这些就够判断是否有更新（作品数变了 / 第一条 ID 变了）。
+function readDomDouyinCreator() {
+  const out = { profile: {}, posts: [], debug: {} };
+  try {
+    // 1) 基本信息
+    const grab = (sel) => {
+      const el = document.querySelector(sel);
+      return el ? (el.textContent || "").trim() : "";
+    };
+    const followsText = grab('[data-e2e="user-info-follow"] :nth-child(2)') || grab('[data-e2e="user-info-follow"]');
+    const fansText = grab('[data-e2e="user-info-fans"] :nth-child(2)') || grab('[data-e2e="user-info-fans"]');
+    const likesText = grab('[data-e2e="user-info-like"] :nth-child(2)') || grab('[data-e2e="user-info-like"]');
+    out.profile.follows_text = followsText;
+    out.profile.fans_text = fansText;
+    out.profile.likes_text = likesText;
+    out.debug.fans_raw = fansText;
+
+    // 昵称 / 简介 — 抖音 user-detail 第一个 h1 通常是昵称
+    const nickEl = document.querySelector('[data-e2e="user-info"] h1, [data-e2e="user-detail"] h1, .user-info h1');
+    if (nickEl) out.profile.creator_name = (nickEl.textContent || "").trim().slice(0, 100);
+    if (!out.profile.creator_name) {
+      // 兜底：document.title 形如 "{昵称}的主页 - 抖音"
+      const m = (document.title || "").match(/^(.+?)的主页/);
+      if (m) out.profile.creator_name = m[1];
+    }
+    const avatarImg = document.querySelector('[data-e2e="user-info"] img, [data-e2e="user-detail"] img');
+    if (avatarImg) out.profile.avatar_url = avatarImg.getAttribute("src") || "";
+
+    const descEl = document.querySelector('[data-e2e="user-info"] p, [data-e2e="user-detail"] p');
+    if (descEl) out.profile.desc_text = (descEl.textContent || "").trim().slice(0, 300);
+
+    // 2) 作品数：从 tab 「作品 214」抠数字
+    let notesText = "";
+    const tabs = document.querySelectorAll('[data-e2e="user-tab-list"] *, [data-e2e^="user-tab"]');
+    for (const t of tabs) {
+      const tx = (t.textContent || "").trim();
+      // 期望严格匹配「作品 214」/ 「作品214」，避免误中「作品集」
+      const m = tx.match(/^作品\s*([0-9][0-9.,]*\s*[万亿wWkK]?)$/);
+      if (m) { notesText = m[1].trim(); break; }
+    }
+    if (!notesText) {
+      // 兜底：扫页面任何带「作品」的短文本
+      for (const el of document.querySelectorAll("div,span,a")) {
+        const tx = (el.textContent || "").trim();
+        if (tx.length > 30) continue;
+        const m = tx.match(/^作品\s*([0-9][0-9.,]*\s*[万亿wWkK]?)$/);
+        if (m) { notesText = m[1].trim(); break; }
+      }
+    }
+    out.profile.notes_text = notesText;
+
+    // 3) 作品列表：grid 里 <a href="/video/{id}">
+    const seen = new Set();
+    const linkSels = [
+      '[data-e2e="user-post-list"] a[href*="/video/"]',
+      '[data-e2e="scroll-list"] a[href*="/video/"]',
+      'a[href*="/video/"]',  // 兜底
+    ];
+    let links = [];
+    for (const sel of linkSels) {
+      links = document.querySelectorAll(sel);
+      if (links.length > 0) { out.debug.link_sel = sel; break; }
+    }
+    for (const a of links) {
+      const href = a.getAttribute("href") || "";
+      const m = href.match(/\/video\/([0-9]+)/);
+      if (!m) continue;
+      const aid = m[1];
+      if (seen.has(aid)) continue;
+      seen.add(aid);
+      // 寻找这个 link 内或邻近的 <img> 作为封面
+      const img = a.querySelector("img") || a.parentElement?.querySelector("img");
+      // 标题：抖音 cover img 的 alt 属性才是视频文案；
+      // a 里的 textContent / 纯 span 通常是点赞数（"1225"、"1.1万"），不能当标题
+      let title = (img?.getAttribute("alt") || "").trim();
+      // 兜底：找显式带 title/desc/text 的容器
+      if (!title) {
+        const titleEl = a.querySelector('[class*="title"]:not([class*="like"]), [class*="desc"]:not([class*="like"]), [class*="caption"]');
+        if (titleEl) {
+          const tx = (titleEl.textContent || "").trim();
+          // 确认不是纯数字（避免误中点赞数）
+          if (tx && !/^[0-9][0-9.,]*\s*[万亿wWkK]?$/.test(tx)) title = tx;
+        }
+      }
+      // 点赞数：a 内的纯数字（含「万/亿」单位）span
+      let likedText = "";
+      for (const sp of a.querySelectorAll("span, div")) {
+        const tx = (sp.textContent || "").trim();
+        if (/^[0-9][0-9.,]*\s*[万亿wWkK]?$/.test(tx) && tx.length <= 8) {
+          likedText = tx;
+          break;
+        }
+      }
+      out.posts.push({
+        post_id: aid,
+        url: `https://www.douyin.com/video/${aid}`,
+        title: title.slice(0, 200),
+        cover_url: img?.getAttribute("src") || img?.getAttribute("data-src") || "",
+        liked_count_text: likedText,
+      });
+      if (out.posts.length >= 30) break;
+    }
+    out.debug.posts_count = out.posts.length;
+  } catch (e) {
+    out.debug.error = String(e?.message || e);
+  }
+  return out;
 }
 
 async function captureFor(urlPattern, timeoutMs, minHits = 1, scrollMode = "feed") {
@@ -200,6 +335,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.action === "scroll") {
     window.scrollBy(0, msg.dy || 800);
     sendResponse({ ok: true });
+    return false;
+  }
+  if (msg.action === "read_dom_creator") {
+    sendResponse(readDomDouyinCreator());
     return false;
   }
 });

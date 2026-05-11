@@ -51,6 +51,36 @@ type ResultItem = {
   src_idx?: number;
 };
 
+// 任务详情：后端返回 _enrich_task 后的形态（JSON 字段已展开）
+type TaskCell = {
+  src_idx: number;
+  bg_id: number;
+  bg_name: string;
+  image_url: string;
+  error: string;
+};
+type TaskSet = { idx: number; items: TaskCell[] };
+type TextRemixTask = {
+  id: number;
+  user_id: number;
+  status: "pending" | "running" | "done" | "error" | "cancelled";
+  post_url: string;
+  post_title: string;
+  platform: string;
+  count: number;
+  done_count: number;
+  size: string;
+  style_hint: string;
+  error: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  text_sources: { src_idx: number; text: string }[];
+  background_ids: number[];
+  backgrounds_meta: { id: number; name: string; image_url: string }[];
+  items: TaskSet[];
+};
+
 export default function TextRemixPage() {
   const { token } = useAuth();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
@@ -71,7 +101,6 @@ export default function TextRemixPage() {
     setFetching(true);
     setPost(null);
     setExtractedText("");
-    setResults([]);
     try {
       const r = await fetch(IMAGE_API("/fetch-post-cover"), {
         method: "POST", headers,
@@ -257,14 +286,18 @@ export default function TextRemixPage() {
     );
   };
 
-  // ── 步骤 4：生成 ──────────────────────────────────────────────────────
+  // ── 步骤 4：生成（异步任务，对标 整体仿写） ─────────────────────────────
   const [count, setCount] = useState(1);
   const [styleHint, setStyleHint] = useState("");
-  const [generating, setGenerating] = useState(false);
-  const [results, setResults] = useState<ResultItem[]>([]);
+  const [submitting, setSubmitting] = useState(false);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
   const [imageModelId, setImageModelId] = useState<number | null>(null);
   const bgFileRef = useRef<HTMLInputElement | null>(null);
+  const [activeTaskId, setActiveTaskId] = useState<number | null>(null);
+  const [activeTask, setActiveTask] = useState<TextRemixTask | null>(null);
+  const [tasks, setTasks] = useState<TextRemixTask[]>([]);
+  // 同步飞书状态：taskId+setIdx → "syncing"|"done"|"error"
+  const [syncStatus, setSyncStatus] = useState<Record<string, string>>({});
 
   // ── localStorage 缓存：刷新页面后状态不丢 ─────────────────────────────
   const _firstLoad = useRef(true);
@@ -294,89 +327,188 @@ export default function TextRemixPage() {
     } catch {}
   }, [postUrl, ocrTexts, sourceImgIdxs, ocrModelId, styleHint, count, selectedBgIds, PERSIST_KEY]);
 
-  const handleGenerate = async () => {
-    // 收集有效"文字源"（必须有提取出来的非空文字）
+  // 提交异步任务：POST /text-remix-tasks → 拿 task_id → 轮询
+  const handleSubmit = async () => {
     const validSources = sourceImgIdxs.filter((idx) => (ocrTexts[idx] || "").trim());
     if (validSources.length === 0) { toastErr("没有可用的提取文字。请先 OCR 至少一张源图"); return; }
     if (selectedBgIds.length === 0) { toastErr("请至少选一张背景图"); return; }
-
-    setGenerating(true);
-    setResults([]);
-
-    // 「几套」语义（对标 整体仿写）：
-    //   每套 = 跑一遍「所有源文字 × 所有背景」的笛卡尔积，产出 N×M 张
-    //   count 套 = 同一份输入跑 count 次，得到 count×N×M 张（不同 seed 的变体）
-    type Job = { setIdx: number; srcIdx: number; bgId: number; bgName: string; text: string };
-    const jobs: Job[] = [];
-    for (let s = 1; s <= count; s++) {
-      for (const srcIdx of validSources) {
-        const text = (ocrTexts[srcIdx] || "").trim();
-        for (const bgId of selectedBgIds) {
-          const bg = backgrounds.find((b) => b.id === bgId);
-          jobs.push({ setIdx: s, srcIdx, bgId, bgName: bg?.name || `背景 ${bgId}`, text });
-        }
-      }
-    }
-
-    // 限 3 并发跑（image edits 上游限流，太多会 fail）
-    const concurrency = 3;
-    const all: ResultItem[] = [];
-    let cursor = 0;
-    const worker = async () => {
-      while (cursor < jobs.length) {
-        const i = cursor++;
-        const job = jobs[i];
-        const label = `第${job.setIdx}套·源${job.srcIdx + 1}×${job.bgName}`;
-        try {
-          // 后端单次 count=1（套数由前端循环控制；套间循环放前端，方便流式展示进度）
-          const r = await fetch(IMAGE_API("/text-remix/generate"), {
-            method: "POST", headers,
-            body: JSON.stringify({
-              background_id: job.bgId,
-              text_content: job.text,
-              count: 1,
-              style_hint: styleHint.trim(),
-              image_model_id: imageModelId,
-            }),
-          });
-          // 安全解析：返回 HTML/空文本时不能直接 .json()，否则前端只能看到
-          // "Unexpected token '<'..." 这种没用的错误
-          const ct = (r.headers.get("content-type") || "").toLowerCase();
-          const txt = await r.text();
-          let data: any = {};
-          if (ct.includes("application/json")) {
-            try { data = txt ? JSON.parse(txt) : {}; } catch { data = {}; }
-          } else if (txt.trim().startsWith("<")) {
-            data = { detail: `网关返回了 HTML 而非 JSON（HTTP ${r.status}），可能是上游超时/反代异常；首字符："${txt.slice(0, 80).replace(/\s+/g, " ")}…"` };
-          } else {
-            data = { detail: txt.slice(0, 200) || `HTTP ${r.status}` };
-          }
-          if (!r.ok) {
-            all.push({
-              image_url: "", error: data.detail || `HTTP ${r.status}`,
-              bg_name: label, set_idx: job.setIdx, src_idx: job.srcIdx,
-            });
-          } else {
-            const items: ResultItem[] = (data.results || []).map((x: any) => ({
-              ...x, bg_name: label,
-              set_idx: job.setIdx, src_idx: job.srcIdx,
-            } as any));
-            all.push(...items);
-          }
-        } catch (e: any) {
-          all.push({
-            image_url: "", error: e?.message || String(e),
-            bg_name: label, set_idx: job.setIdx, src_idx: job.srcIdx,
-          });
-        }
-        setResults([...all]);  // 流式更新
-      }
-    };
+    setSubmitting(true);
     try {
-      await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, () => worker()));
-      const ok = all.filter((x) => x.image_url).length;
-      toastOk(`生成完成：${ok}/${jobs.length} 张（${count} 套 × ${validSources.length} 源 × ${selectedBgIds.length} 背景）`);
-    } finally { setGenerating(false); }
+      const r = await fetch(IMAGE_API("/text-remix-tasks"), {
+        method: "POST", headers,
+        body: JSON.stringify({
+          post_url: post?.post_url || "",
+          post_title: post?.title || "",
+          platform: post?.platform || "",
+          text_sources: validSources.map((idx) => ({
+            src_idx: idx, text: (ocrTexts[idx] || "").trim(),
+          })),
+          background_ids: selectedBgIds,
+          count,
+          style_hint: styleHint.trim(),
+          image_model_id: imageModelId,
+        }),
+      });
+      const ct = (r.headers.get("content-type") || "").toLowerCase();
+      const txt = await r.text();
+      let data: any = {};
+      if (ct.includes("application/json")) {
+        try { data = txt ? JSON.parse(txt) : {}; } catch { data = {}; }
+      } else if (txt.trim().startsWith("<")) {
+        data = { detail: `网关返回 HTML（HTTP ${r.status}），${txt.slice(0, 60)}…` };
+      } else {
+        data = { detail: txt.slice(0, 200) || `HTTP ${r.status}` };
+      }
+      if (!r.ok || !data.task_id) {
+        toastErr(`提交失败：${data.detail || `HTTP ${r.status}`}`);
+        return;
+      }
+      const tid = data.task_id as number;
+      const totalImgs = count * validSources.length * selectedBgIds.length;
+      toastOk(`已提交任务 #${tid}（${count} 套 / ${totalImgs} 张），worker 开始处理…`);
+      setActiveTaskId(tid);
+      pollActive(tid);
+      reloadTasks();
+    } catch (e: any) {
+      toastErr(`提交异常：${e?.message || e}`);
+    } finally { setSubmitting(false); }
+  };
+
+  // 拉单条任务（进度 + 结果）
+  const pollActive = useCallback(async (tid: number) => {
+    try {
+      const r = await fetch(IMAGE_API(`/text-remix-tasks/${tid}`), { headers });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d?.task) setActiveTask(d.task as TextRemixTask);
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  // 轮询 active task：4s 一次，done/error/cancelled 自动停
+  useEffect(() => {
+    if (!activeTaskId) return;
+    pollActive(activeTaskId);
+    const id = setInterval(() => {
+      if (activeTask && ["done", "error", "cancelled"].includes(activeTask.status)) return;
+      pollActive(activeTaskId);
+    }, 4000);
+    return () => clearInterval(id);
+  }, [activeTaskId, pollActive, activeTask]);
+
+  // 历史任务列表
+  const reloadTasks = useCallback(async () => {
+    try {
+      const r = await fetch(IMAGE_API("/text-remix-tasks?limit=30"), { headers });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (Array.isArray(d?.tasks)) setTasks(d.tasks as TextRemixTask[]);
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+  useEffect(() => { reloadTasks(); }, [reloadTasks]);
+  // 有 active task 时定时刷新历史（看新一条进度）
+  useEffect(() => {
+    if (!activeTaskId) return;
+    const id = setInterval(reloadTasks, 6000);
+    return () => clearInterval(id);
+  }, [activeTaskId, reloadTasks]);
+
+  const cancelTask = async (tid: number) => {
+    if (!confirm(`确认取消任务 #${tid}？已生成的图保留，未跑的套停止。`)) return;
+    const r = await fetch(IMAGE_API(`/text-remix-tasks/${tid}/cancel`), {
+      method: "POST", headers,
+    });
+    if (r.ok) {
+      toastOk("已请求取消，worker 跑完当前套后停");
+      pollActive(tid);
+      reloadTasks();
+    } else { toastErr("取消失败"); }
+  };
+  const cloneTask = async (tid: number) => {
+    const r = await fetch(IMAGE_API(`/text-remix-tasks/${tid}/clone`), {
+      method: "POST", headers,
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && d.task_id) {
+      toastOk(`已克隆为新任务 #${d.task_id}`);
+      setActiveTaskId(d.task_id);
+      pollActive(d.task_id);
+      reloadTasks();
+    } else { toastErr(`克隆失败：${d.detail || "未知"}`); }
+  };
+  const deleteTask = async (tid: number) => {
+    if (!confirm(`确认删除任务 #${tid}？图片记录不会被删，只删任务条目。`)) return;
+    const r = await fetch(IMAGE_API(`/text-remix-tasks/${tid}`), {
+      method: "DELETE", headers,
+    });
+    if (r.ok) {
+      toastOk("已删除");
+      if (activeTaskId === tid) { setActiveTaskId(null); setActiveTask(null); }
+      reloadTasks();
+    } else {
+      const d = await r.json().catch(() => ({}));
+      toastErr(`删除失败：${d.detail || "未知"}`);
+    }
+  };
+
+  // 单套整套下载：依次触发浏览器下载（命名 text_remix_task{ID}_set{N}_img{K}.png）
+  const downloadFromUrl = async (url: string, fname: string) => {
+    try {
+      const res = await fetch(proxyUrl(url));
+      const blob = await res.blob();
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = u; a.download = fname; a.click();
+      setTimeout(() => URL.revokeObjectURL(u), 1000);
+    } catch (e: any) { toastErr(`下载失败：${e?.message || e}`); }
+  };
+  const downloadSet = async (task: TextRemixTask, setIdx: number, items: TaskCell[]) => {
+    const ok = items.filter((c) => c.image_url);
+    if (ok.length === 0) { toastErr("这套没有可下载的图片"); return; }
+    toastOk(`开始下载第 ${setIdx} 套（共 ${ok.length} 张）`);
+    for (let i = 0; i < ok.length; i++) {
+      const ext = (ok[i].image_url.split(".").pop()?.split("?")[0] || "png").slice(0, 5);
+      const fname = `text_remix_task${task.id}_set${setIdx}_img${i + 1}.${ext}`;
+      await downloadFromUrl(ok[i].image_url, fname);
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  };
+
+  // 把一套结果同步到飞书：复用 /history/sync-bitable（按 image_gen_history.id）
+  // 后端按 (batch_id, set_idx) 自动聚合一行；text-remix worker 用 batch_id=text_remix:{tid}
+  const syncSetToFeishu = async (task: TextRemixTask, setIdx: number) => {
+    const key = `${task.id}:${setIdx}`;
+    setSyncStatus((s) => ({ ...s, [key]: "syncing" }));
+    try {
+      // 找到这套对应的 image_gen_history.id 列表：拉一下用户最近的历史，匹配 batch_id+set_idx
+      const r1 = await fetch(IMAGE_API(`/history?limit=300`), { headers });
+      const h = await r1.json().catch(() => ({}));
+      const all: any[] = h?.records || h?.history || [];
+      const myIds: number[] = all
+        .filter((x) => x.batch_id === `text_remix:${task.id}` && Number(x.set_idx) === setIdx)
+        .map((x) => x.id);
+      if (myIds.length === 0) {
+        setSyncStatus((s) => ({ ...s, [key]: "error" }));
+        toastErr(`第 ${setIdx} 套没找到可同步的历史记录（图片可能还在上传中）`);
+        return;
+      }
+      const r2 = await fetch(IMAGE_API("/history/sync-bitable"), {
+        method: "POST", headers,
+        body: JSON.stringify({ record_ids: myIds }),
+      });
+      const d = await r2.json().catch(() => ({}));
+      if (!r2.ok || d?.error) {
+        setSyncStatus((s) => ({ ...s, [key]: "error" }));
+        toastErr(`同步失败：${d?.error || d?.detail || `HTTP ${r2.status}`}`);
+        return;
+      }
+      setSyncStatus((s) => ({ ...s, [key]: "done" }));
+      toastOk(`第 ${setIdx} 套已同步到飞书（${myIds.length} 张）`);
+    } catch (e: any) {
+      setSyncStatus((s) => ({ ...s, [key]: "error" }));
+      toastErr(`同步异常：${e?.message || e}`);
+    }
   };
 
   return (
@@ -706,17 +838,17 @@ export default function TextRemixPage() {
           </div>
           <Button color="secondary" size="lg" className="w-full"
             startContent={<Wand2 size={18} />}
-            isLoading={generating}
+            isLoading={submitting}
             isDisabled={
               sourceImgIdxs.filter((i) => (ocrTexts[i] || "").trim()).length === 0
-              || selectedBgIds.length === 0 || generating
+              || selectedBgIds.length === 0 || submitting
             }
-            onPress={handleGenerate}>
+            onPress={handleSubmit}>
             {(() => {
               const valid = sourceImgIdxs.filter((i) => (ocrTexts[i] || "").trim()).length;
               const perSet = valid * selectedBgIds.length;
               const total = perSet * count;
-              return generating ? "生成中…" : `生成 ${count} 套 × ${perSet} 张/套 = ${total} 张`;
+              return submitting ? "提交中…" : `提交任务：${count} 套 × ${perSet} 张/套 = ${total} 张`;
             })()}
           </Button>
           {sourceImgIdxs.filter((i) => (ocrTexts[i] || "").trim()).length === 0 && (
@@ -732,75 +864,185 @@ export default function TextRemixPage() {
         </CardBody>
       </Card>
 
-      {/* 结果 */}
-      {(results.length > 0 || generating) && (
+      {/* 活动任务（提交后展开 + 实时进度） */}
+      {activeTask && (
         <Card>
-          <CardHeader className="font-medium">生成结果</CardHeader>
-          <CardBody>
-            {generating && results.length === 0 ? (
-              <div className="flex items-center justify-center py-12">
-                <Spinner color="secondary" />
-                <span className="ml-3 text-sm text-default-500">AI 正在绘制（约 30s 一张）…</span>
+          <CardHeader>
+            <div className="flex items-center justify-between w-full gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <span className="font-medium">任务 #{activeTask.id}</span>
+                <Chip size="sm" variant="flat"
+                  color={
+                    activeTask.status === "done" ? "success" :
+                    activeTask.status === "running" ? "primary" :
+                    activeTask.status === "pending" ? "default" :
+                    activeTask.status === "cancelled" ? "warning" : "danger"
+                  }>
+                  {activeTask.status === "pending" ? "排队中" :
+                    activeTask.status === "running" ? "生成中" :
+                    activeTask.status === "done" ? "已完成" :
+                    activeTask.status === "cancelled" ? "已取消" : "失败"}
+                </Chip>
+                <span className="text-xs text-default-500">
+                  {activeTask.done_count} / {activeTask.count} 套
+                </span>
               </div>
-            ) : (
-              // 按 set_idx 分组展示（对标整体仿写的"第 N 套"展示）
-              <div className="space-y-4">
-                {(() => {
-                  const groups: Record<string, ResultItem[]> = {};
-                  for (const r of results) {
-                    const k = String(r.set_idx ?? 0);
-                    (groups[k] ||= []).push(r);
-                  }
-                  const keys = Object.keys(groups).sort((a, b) => Number(a) - Number(b));
-                  return keys.map((k) => {
-                    const list = groups[k];
-                    const ok = list.filter((r) => r.image_url).length;
-                    return (
-                      <div key={k} className="space-y-2">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium text-sm">第 {k} 套</span>
-                          <span className="text-default-400 text-xs">
-                            {ok}/{list.length} 张
-                          </span>
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-                          {list.map((r, i) => (
-                            <div key={i}
-                              className="aspect-square rounded-md overflow-hidden bg-default-100 relative group">
-                              {r.image_url ? (
-                                <>
-                                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                                  <img src={proxyUrl(r.image_url)}
-                                    className="w-full h-full object-cover cursor-pointer"
-                                    onClick={() => setPreviewSrc(r.image_url)}
-                                    alt={`结果 ${k}-${i + 1}`} />
-                                  <a href={r.image_url} download target="_blank" rel="noopener noreferrer"
-                                    className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 bg-black/60 text-white p-1.5 rounded transition">
-                                    <Download size={14} />
-                                  </a>
-                                  {r.bg_name && (
-                                    <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-[10px] px-1.5 py-0.5 truncate">
-                                      {r.bg_name}
-                                    </span>
-                                  )}
-                                </>
-                              ) : (
-                                <div className="w-full h-full flex flex-col items-center justify-center text-xs text-danger px-2 text-center gap-1">
-                                  <span>{r.error?.slice(0, 80) || "失败"}</span>
-                                  {r.bg_name && (
-                                    <span className="text-default-400 text-[10px]">{r.bg_name}</span>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  });
-                })()}
+              <div className="flex gap-1">
+                {["pending", "running"].includes(activeTask.status) && (
+                  <Button size="sm" variant="flat" color="warning"
+                    onPress={() => cancelTask(activeTask.id)}>取消</Button>
+                )}
+                {["done", "error", "cancelled"].includes(activeTask.status) && (
+                  <>
+                    <Button size="sm" variant="flat"
+                      onPress={() => cloneTask(activeTask.id)}>用相同参数重跑</Button>
+                    <Button size="sm" variant="flat" color="danger"
+                      startContent={<Trash2 size={12} />}
+                      onPress={() => deleteTask(activeTask.id)}>删除</Button>
+                  </>
+                )}
+                <Button size="sm" variant="light"
+                  onPress={() => { setActiveTaskId(null); setActiveTask(null); }}>
+                  收起
+                </Button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardBody className="space-y-4">
+            {activeTask.error && (
+              <p className="text-xs text-danger p-2 rounded bg-danger/5">
+                <AlertCircle size={12} className="inline mr-1" />{activeTask.error}
+              </p>
+            )}
+            {activeTask.items.length === 0 && (
+              <div className="flex items-center justify-center py-8 text-default-500 text-sm">
+                <Spinner size="sm" color="secondary" className="mr-2" />
+                worker 排队中（每 10 秒扫一次）…
               </div>
             )}
+            {activeTask.items.map((set) => {
+              const okCount = set.items.filter((c) => c.image_url).length;
+              const totalCount = set.items.length;
+              const syncKey = `${activeTask.id}:${set.idx}`;
+              const sync = syncStatus[syncKey] || "";
+              return (
+                <div key={set.idx} className="space-y-2 p-3 rounded-md border border-default-200">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-sm">第 {set.idx} 套</span>
+                      <span className="text-default-400 text-xs">
+                        {okCount}/{totalCount} 张
+                      </span>
+                      {okCount < totalCount && activeTask.status === "running" && (
+                        <Spinner size="sm" color="secondary" />
+                      )}
+                    </div>
+                    <div className="flex gap-1">
+                      <Button size="sm" variant="flat" isDisabled={okCount === 0}
+                        startContent={<Download size={12} />}
+                        onPress={() => downloadSet(activeTask, set.idx, set.items)}>
+                        下载本套
+                      </Button>
+                      <Button size="sm" variant="flat" color={sync === "done" ? "success" : "primary"}
+                        isLoading={sync === "syncing"}
+                        isDisabled={okCount === 0 || sync === "syncing"}
+                        onPress={() => syncSetToFeishu(activeTask, set.idx)}>
+                        {sync === "done" ? "✓ 已同步飞书" : "同步飞书"}
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                    {set.items.map((cell, ci) => (
+                      <div key={ci}
+                        className="aspect-square rounded-md overflow-hidden bg-default-100 relative group">
+                        {cell.image_url ? (
+                          <>
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={proxyUrl(cell.image_url)}
+                              alt={`set${set.idx}-${ci + 1}`}
+                              className="w-full h-full object-cover cursor-pointer"
+                              onClick={() => setPreviewSrc(cell.image_url)} />
+                            <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-[10px] px-1.5 py-0.5 truncate">
+                              源{cell.src_idx + 1}×{cell.bg_name}
+                            </span>
+                          </>
+                        ) : cell.error ? (
+                          <div className="w-full h-full flex flex-col items-center justify-center text-xs text-danger px-2 text-center gap-1">
+                            <span>{cell.error.slice(0, 80)}</span>
+                            <span className="text-default-400 text-[10px]">
+                              源{cell.src_idx + 1}×{cell.bg_name}
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="w-full h-full flex flex-col items-center justify-center text-xs text-default-400 gap-1">
+                            <Spinner size="sm" color="secondary" />
+                            <span className="text-[10px]">源{cell.src_idx + 1}×{cell.bg_name}</span>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </CardBody>
+        </Card>
+      )}
+
+      {/* 历史任务列表 */}
+      {tasks.length > 0 && (
+        <Card>
+          <CardHeader className="font-medium flex items-center justify-between w-full">
+            <span>历史任务</span>
+            <span className="text-xs text-default-400">{tasks.length} 条</span>
+          </CardHeader>
+          <CardBody className="space-y-2">
+            {tasks.filter((t) => t.id !== activeTaskId).map((t) => {
+              const total = t.count * (t.text_sources?.length || 0) * (t.background_ids?.length || 0);
+              const doneImgs = (t.items || []).reduce(
+                (acc, s) => acc + s.items.filter((c) => c.image_url).length, 0);
+              return (
+                <div key={t.id}
+                  className="flex items-center justify-between p-2 rounded-md border border-default-200 hover:bg-default-50 cursor-pointer gap-2"
+                  onClick={() => { setActiveTaskId(t.id); pollActive(t.id); }}>
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <span className="text-sm font-medium shrink-0">#{t.id}</span>
+                    <Chip size="sm" variant="flat"
+                      color={
+                        t.status === "done" ? "success" :
+                        t.status === "running" ? "primary" :
+                        t.status === "pending" ? "default" :
+                        t.status === "cancelled" ? "warning" : "danger"
+                      }>
+                      {t.status === "pending" ? "排队中" :
+                        t.status === "running" ? "生成中" :
+                        t.status === "done" ? "已完成" :
+                        t.status === "cancelled" ? "已取消" : "失败"}
+                    </Chip>
+                    <span className="text-xs text-default-500 truncate">
+                      {t.count} 套 · {doneImgs}/{total} 张 · {t.created_at?.slice(5, 16)}
+                    </span>
+                    {t.post_title && (
+                      <span className="text-xs text-default-400 truncate">
+                        · {t.post_title.slice(0, 30)}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                    {["pending", "running"].includes(t.status) && (
+                      <Button size="sm" variant="flat" color="warning"
+                        onPress={() => cancelTask(t.id)}>取消</Button>
+                    )}
+                    {["done", "error", "cancelled"].includes(t.status) && (
+                      <Button size="sm" variant="flat" color="danger" isIconOnly
+                        onPress={() => deleteTask(t.id)}>
+                        <Trash2 size={14} />
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </CardBody>
         </Card>
       )}

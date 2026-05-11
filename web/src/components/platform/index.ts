@@ -1,5 +1,6 @@
 export { PlatformSubNav } from "./PlatformSubNav";
 export { CreatorsCard } from "./CreatorsCard";
+export { default as PlatformAlertsCard } from "./PlatformAlertsCard";
 export type {
   PlatformKey, SectionKey, PostRow, CreatorRow, TrendingPost,
 } from "./types";

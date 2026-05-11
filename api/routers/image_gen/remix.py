@@ -201,9 +201,13 @@ async def create_remix_task(
     if not ref_idxs:
         ref_idxs = [0]
 
-    # 配额检查：每套图数 = len(ref_idxs)，套数 = count，总用量 = count * len(ref_idxs)
-    # 仍按"套数"扣（用户感知一致），实际生图调用次数翻倍
-    await quota_service.check_or_raise(current_user, "daily_remix_sets", delta=count)
+    # 配额按"实际生成图数"算，跟 product 模块语义一致：
+    #   总图数 = 套数(count) × 每套主体图数(len(ref_idxs))
+    # 旧版按套数扣，导致选 5 张参考图时配额低估 5 倍。
+    expected_images = count * max(1, len(ref_idxs))
+    await quota_service.check_or_raise(
+        current_user, "daily_remix_sets", delta=expected_images,
+    )
 
     # 立刻先解析一次，验证可达 + 拿参考图 URL，避免任务跑起来才发现链接挂了
     plat = detect_platform(req.post_url)

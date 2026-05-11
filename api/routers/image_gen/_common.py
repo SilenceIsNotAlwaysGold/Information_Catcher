@@ -61,7 +61,7 @@ async def call_generations(
             headers={**headers, "Content-Type": "application/json"},
         )
     except httpx.TimeoutException:
-        return None, {"error": "图像生成超时（180s），请稍后重试", "status": 504}
+        return None, {"error": "图像生成超时（10min），请稍后重试", "status": 504}
     except httpx.HTTPError as e:
         return None, {"error": f"网络错误：{e}", "status": 502}
 
@@ -109,7 +109,7 @@ async def call_edits(
             headers=headers,
         )
     except httpx.TimeoutException:
-        return None, {"error": "图像生成超时（180s），请稍后重试", "status": 504}
+        return None, {"error": "图像生成超时（10min），请稍后重试", "status": 504}
     except httpx.HTTPError as e:
         return None, {"error": f"网络错误：{e}", "status": 502}
 

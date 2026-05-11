@@ -43,6 +43,7 @@ import { confirmDialog } from "@/components/ConfirmDialog";
 import {
   useGroups, usePosts, useMe, mutatePosts,
 } from "@/lib/useApi";
+import PlatformAlertsCard from "./PlatformAlertsCard";
 
 const API = (p: string) => `/api/monitor${p}`;
 
@@ -292,6 +293,9 @@ export function PlatformPostsView({
 
   return (
     <>
+      {/* 平台专属告警卡片（仅显示该平台的告警） */}
+      <PlatformAlertsCard platform={platform} headers={headers} />
+
       {/* Header 操作行 */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <h2 className="text-lg font-semibold">监控帖子（共 {filteredPosts.length} 条）</h2>

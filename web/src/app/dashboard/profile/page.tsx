@@ -14,6 +14,7 @@ import { MonitorGroupsCard } from "@/components/MonitorGroupsCard";
 import { FeishuBindingCard } from "@/components/FeishuBindingCard";
 import { PlanUsageCard } from "@/components/PlanUsageCard";
 import { FeishuPushToggle } from "@/components/FeishuPushToggle";
+import { AiPreferencesCard } from "@/components/AiPreferencesCard";
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -461,6 +462,9 @@ export default function MonitorSettingsPage() {
           </div>
         </CardBody>
       </Card>
+
+      {/* P15: AI 模型偏好（用户级） */}
+      <AiPreferencesCard token={token} />
 
       {/* Prompt Templates */}
       <PromptTemplatesCard token={token} />

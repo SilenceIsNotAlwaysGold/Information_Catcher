@@ -247,6 +247,7 @@ async def dispatch_douyin_creator_posts(
         "posts": (result or {}).get("posts") or [],
         "profile": (result or {}).get("profile") or {},
         "raw_hits": (result or {}).get("raw_hits", 0),
+        "dom_debug": (result or {}).get("dom_debug"),
     }
 
 

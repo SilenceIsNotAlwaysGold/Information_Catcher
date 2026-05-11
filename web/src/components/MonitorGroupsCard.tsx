@@ -60,8 +60,15 @@ const EMPTY: Form = {
   alert_rules: "",
 };
 
-export function MonitorGroupsCard({ token }: { token: string | null }) {
+export function MonitorGroupsCard({
+  token,
+  platform,
+}: {
+  token: string | null;
+  platform?: "xhs" | "douyin" | "mp";
+}) {
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+  const platformQs = platform ? `?platform=${platform}` : "";
 
   const [groups, setGroups] = useState<Group[]>([]);
   const editor = useDisclosure();
@@ -76,7 +83,7 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
     setForm((f) => ({ ...f, [k]: v }));
 
   const load = async () => {
-    const r = await fetch(API("/groups"), { headers });
+    const r = await fetch(API(`/groups${platformQs}`), { headers });
     const d = await r.json();
     setGroups(d.groups ?? []);
   };
@@ -137,6 +144,7 @@ export function MonitorGroupsCard({ token }: { token: string | null }) {
         const createBody: Record<string, any> = {
           name: body.name,
           mode: createMode,
+          platform: platform || "",  // 平台专属或跨平台
         };
         if (createMode === "webhook") {
           if (!createWebhookUrl.trim()) {

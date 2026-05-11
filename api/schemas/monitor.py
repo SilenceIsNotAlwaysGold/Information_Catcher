@@ -25,6 +25,7 @@ class CreateGroupRequest(BaseModel):
     #   "none"    → 仅本地分组，不绑飞书（不推送）
     mode: str = "chat"
     feishu_webhook_url: Optional[str] = None  # mode=webhook 时必填
+    platform: Optional[str] = None  # "xhs" / "douyin" / "mp"；空 = 跨平台分组
 
 
 class UpdateGroupRequest(BaseModel):
@@ -58,6 +59,9 @@ class UpdatePromptRequest(BaseModel):
 class RewriteTrendingRequest(BaseModel):
     prompt_id: Optional[int] = None  # use saved prompt by ID (preferred)
     prompt_text: Optional[str] = None  # or supply ad-hoc prompt text
+    model_id: Optional[int] = None     # P15: ai_models.id; None=用户偏好/系统默认
+
+    model_config = {"protected_namespaces": ()}
 
 
 class RewriteCrossPlatformRequest(BaseModel):
@@ -66,6 +70,9 @@ class RewriteCrossPlatformRequest(BaseModel):
     prompt_text: Optional[str] = None
     target: Optional[str] = None  # xhs / douyin / mp，回退用
     variants: Optional[int] = 3
+    model_id: Optional[int] = None     # P15: ai_models.id; None=用户偏好/系统默认
+
+    model_config = {"protected_namespaces": ()}
 
 
 class LockVariantRequest(BaseModel):

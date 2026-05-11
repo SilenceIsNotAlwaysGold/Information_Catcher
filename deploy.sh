@@ -82,6 +82,7 @@ BACKEND_FILES=(
   api/services/cookie_health.py
   api/services/auth_service.py
   api/services/remix_worker.py
+  api/services/text_remix_worker.py
   api/services/image_upload_worker.py
   api/services/proxy_forwarder.py
   api/services/platforms/__init__.py

@@ -30,7 +30,8 @@ from ..services import monitor_fetcher as fetcher
 from ..services import scheduler as sched
 from ..services import qr_login
 from ..services import cookie_health
-from ..services import ai_rewriter
+from ..services import ai_rewriter  # noqa: F401 kept for any external imports
+from ..services import ai_client
 from ..services import feishu_bitable
 from ..services import proxy_forwarder
 from ..services import platforms as platform_registry
@@ -419,22 +420,19 @@ async def cross_platform_rewrite(
     if len(body) < 50:
         raise HTTPException(status_code=400, detail="正文太短，无需改写")
 
-    settings = await db.get_all_settings()
-    if not settings.get("ai_api_key"):
-        raise HTTPException(status_code=400, detail="平台未配置 AI Key")
-
     n = max(1, min(int(final_variants or 3), 5))
+    prompt = prompt_template.replace("{content}", body)
     try:
-        result = await ai_rewriter.rewrite_variants(
-            base_url=settings.get("ai_base_url", ""),
-            api_key=settings["ai_api_key"],
-            model=settings.get("ai_model", "gpt-4o-mini"),
-            prompt_template=prompt_template,
-            content=body,
-            n=n,
+        result = await ai_client.call_text_variants(
+            prompt, n=n,
+            model_id=getattr(req, "model_id", None),
+            user_id=int(current_user["id"]),
+            feature="cross_rewrite",
         )
         if not result:
             raise RuntimeError("所有变体失败")
+    except ai_client.AIModelNotConfigured as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI 调用失败：{e}")
 
@@ -480,18 +478,15 @@ async def summarize_post(note_id: str, current_user: dict = Depends(get_current_
     if len(body) < 50:
         raise HTTPException(status_code=400, detail="正文太短，无需摘要")
 
-    settings = await db.get_all_settings()
-    base_url = settings.get("ai_base_url", "")
-    api_key = settings.get("ai_api_key", "")
-    model = settings.get("ai_model", "gpt-4o-mini")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="平台未配置 AI Key（需要 admin 在后台设置）")
-
+    prompt = _DEFAULT_SUMMARY_PROMPT.replace("{content}", body)
     try:
-        summary = await ai_rewriter.rewrite_content(
-            base_url=base_url, api_key=api_key, model=model,
-            prompt_template=_DEFAULT_SUMMARY_PROMPT, content=body,
+        summary = await ai_client.call_text(
+            prompt,
+            user_id=int(current_user["id"]),
+            feature="summary",
         )
+    except ai_client.AIModelNotConfigured as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI 调用失败：{e}")
 
@@ -1943,27 +1938,30 @@ async def rewrite_trending_post(
             raise HTTPException(status_code=400, detail="没有任何可用 prompt，请先在「Prompt 管理」创建一个")
         prompt_template = p["content"]
 
-    settings = await db.get_all_settings()
-    ai_base_url = settings.get("ai_base_url", "")
-    ai_api_key  = settings.get("ai_api_key", "")
-    ai_model    = settings.get("ai_model", "gpt-4o-mini")
-    if not ai_api_key:
-        raise HTTPException(status_code=400, detail="未配置 AI API Key")
-
     n = max(1, min(int(variants or 1), 5))
+    prompt = prompt_template.replace("{content}", text)
     try:
         if n == 1:
-            rewritten = await ai_rewriter.rewrite_content(
-                ai_base_url, ai_api_key, ai_model, prompt_template, text
+            rewritten = await ai_client.call_text(
+                prompt,
+                model_id=getattr(req, "model_id", None),
+                user_id=int(current_user["id"]),
+                feature="trending_rewrite",
             )
             variants_list = [rewritten]
         else:
-            variants_list = await ai_rewriter.rewrite_variants(
-                ai_base_url, ai_api_key, ai_model, prompt_template, text, n=n,
+            variants_list = await ai_client.call_text_variants(
+                prompt, n=n,
+                model_id=getattr(req, "model_id", None),
+                user_id=int(current_user["id"]),
+                feature="trending_rewrite",
             )
             if not variants_list:
                 raise RuntimeError("所有变体都失败")
             rewritten = variants_list[0]
+    except ai_client.AIModelNotConfigured as e:
+        await db.update_trending_rewrite(note_id, "", "failed", user_id=scope_uid)
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         await db.update_trending_rewrite(note_id, "", "failed", user_id=scope_uid)
         raise HTTPException(status_code=500, detail=f"AI 改写失败: {e}")

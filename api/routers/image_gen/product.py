@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from ..auth import get_current_user
-from ...services import monitor_db, qiniu_uploader, local_storage, quota_service
+from ...services import monitor_db, qiniu_uploader, local_storage, quota_service, ai_client
 from ._common import (
     DEFAULT_SIZE, MAX_TOTAL,
     call_edits, call_generations, max_per_batch_for,
@@ -30,6 +30,9 @@ class GeneratePromptsRequest(BaseModel):
     platform: str = "小红书"
     extras: str = ""
     language: str = "en"  # zh | en
+    text_model_id: Optional[int] = None  # P15: 可选用户指定的文本模型
+
+    model_config = {"protected_namespaces": ()}
 
 
 class GenerateRequest(BaseModel):
@@ -39,6 +42,9 @@ class GenerateRequest(BaseModel):
     n: Optional[int] = 1
     size: Optional[str] = None
     reference_image_b64: Optional[str] = None
+    image_model_id: Optional[int] = None  # P15: 可选用户指定的图像模型
+
+    model_config = {"protected_namespaces": ()}
 
 
 @router.post("/generate-prompts", summary="AI 一键生成商品图 Prompt")
@@ -46,13 +52,6 @@ async def generate_prompts(
     req: GeneratePromptsRequest,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    ai_base_url = (await monitor_db.get_setting("ai_base_url", "")).strip()
-    ai_api_key = (await monitor_db.get_setting("ai_api_key", "")).strip()
-    ai_model = (await monitor_db.get_setting("ai_model", "gpt-4o-mini")).strip() or "gpt-4o-mini"
-
-    if not ai_base_url or not ai_api_key:
-        return {"error": "AI 服务未配置，请在「系统配置」中填写 AI Base URL 和 API Key"}
-
     scenes_str = "、".join(req.scenes) if req.scenes else "白底纯色"
     style_str = req.style or "电商简洁"
     platform_str = req.platform or "小红书"
@@ -90,50 +89,23 @@ async def generate_prompts(
         "请生成 5 条适合该商品的图像生成 prompt。"
     )
 
-    headers_ai = {
-        "Authorization": f"Bearer {ai_api_key}",
-        "Content-Type": "application/json",
-    }
-    url = f"{ai_base_url.rstrip('/')}/chat/completions"
-    payload = {
-        "model": ai_model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_msg},
-        ],
-        "temperature": 0.85,
-        "max_tokens": 1200,
-    }
-
+    # call_text 只接受一段 prompt，把 system + user 拼起来传
+    full_prompt = system_prompt + "\n\n---\n\n" + user_msg
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, json=payload, headers=headers_ai)
-            if resp.status_code >= 400:
-                try:
-                    body = resp.json()
-                    err = body.get("error") or {}
-                    detail = (err.get("message") if isinstance(err, dict) else err) or resp.text
-                except Exception:
-                    detail = resp.text or f"HTTP {resp.status_code}"
-                return {"error": f"AI 服务错误：{detail}"}
-            ct = resp.headers.get("content-type", "")
-            if "text/html" in ct or resp.text.lstrip().startswith("<!"):
-                return {"error": f"AI 服务地址配置有误，返回了 HTML 页面（URL：{url}）。"}
-            try:
-                data = resp.json()
-            except Exception:
-                return {"error": f"AI 服务返回了非 JSON 响应（状态 {resp.status_code}）：{resp.text[:200]}"}
-    except httpx.TimeoutException:
-        return {"error": "AI 服务响应超时（30s），请稍后重试"}
-    except httpx.HTTPError as e:
-        return {"error": f"网络错误：{e}"}
+        content = await ai_client.call_text(
+            full_prompt,
+            model_id=req.text_model_id,
+            user_id=int(current_user["id"]),
+            feature="product_prompts",
+            temperature=0.85,
+            max_tokens=1200,
+        )
+    except ai_client.AIModelNotConfigured as e:
+        return {"error": str(e)}
     except Exception as e:
-        logger.exception(f"[generate_prompts] unexpected: {e}")
-        return {"error": f"未知错误：{e}"}
+        logger.exception(f"[generate_prompts] {e}")
+        return {"error": f"AI 调用失败：{e}"}
 
-    content = (
-        data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-    )
     if not content:
         return {"error": "AI 未返回有效内容"}
 
@@ -157,13 +129,21 @@ async def generate_image(
     req: GenerateRequest,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    base_url = (await monitor_db.get_setting("image_api_base_url", "")).strip()
-    api_key = (await monitor_db.get_setting("image_api_key", "")).strip()
-    model = (await monitor_db.get_setting("image_api_model", "")).strip()
-    cfg_size = (await monitor_db.get_setting("image_api_size", DEFAULT_SIZE)).strip() or DEFAULT_SIZE
-
-    if not base_url or not api_key or not model:
-        return {"error": "图像 API 未配置（base_url / api_key / model 必填）", "status": 400}
+    # P15: 通过 ai_client 解析图像模型配置（多渠道 + 用户偏好）
+    try:
+        cfg = await ai_client.get_active_model_config(
+            usage_type="image",
+            user_id=int(current_user["id"]),
+            model_id=req.image_model_id,
+        )
+    except ai_client.AIModelNotConfigured as e:
+        return {"error": str(e), "status": 400}
+    base_url = cfg["base_url"]
+    api_key = cfg["api_key"]
+    model = cfg["model_id"]
+    cfg_size = (cfg.get("extra_config") or {}).get("size") or DEFAULT_SIZE
+    _model_row_id = cfg["model_row_id"]
+    _max_concurrent = int(cfg.get("max_concurrent") or 0)  # P15.8
 
     prompt = (req.prompt or "").strip()
     if not prompt:
@@ -202,20 +182,41 @@ async def generate_image(
     qiniu_ready = await qiniu_uploader.is_configured()
 
     all_images: List[dict] = []
-    timeout = httpx.Timeout(180.0, connect=30.0)
+    timeout = httpx.Timeout(600.0, connect=30.0)  # 10min 给慢上游 API 留余地
+    # 单批失败时的重试策略：最多 5 次，指数退避；认证 / 内容违规等致命错误不重试
+    _FATAL_KW = ("认证失败", "Unauthorized", "Forbidden", "invalid api key",
+                 "model not found", "policy violation", "safety system")
     async with httpx.AsyncClient(timeout=timeout) as client:
         for batch_n in batches:
-            if img_bytes is not None:
-                images, err = await call_edits(
-                    client, base_url=base_url, model=model, prompt=final_prompt,
-                    n=batch_n, size=size, img_bytes=img_bytes, headers=auth_headers,
-                )
-            else:
-                images, err = await call_generations(
-                    client, base_url=base_url, model=model, prompt=final_prompt,
-                    n=batch_n, size=size, headers=auth_headers,
-                )
-            if err:
+            images, err = None, None
+            for attempt in range(5):
+                # P15.8: 走模型级并发限制
+                async with ai_client.acquire_slot(_model_row_id, _max_concurrent):
+                    if img_bytes is not None:
+                        images, err = await call_edits(
+                            client, base_url=base_url, model=model, prompt=final_prompt,
+                            n=batch_n, size=size, img_bytes=img_bytes, headers=auth_headers,
+                        )
+                    else:
+                        images, err = await call_generations(
+                            client, base_url=base_url, model=model, prompt=final_prompt,
+                            n=batch_n, size=size, headers=auth_headers,
+                        )
+                if images:
+                    break
+                err_msg = (err or {}).get("error", "")
+                if any(kw.lower() in err_msg.lower() for kw in _FATAL_KW):
+                    logger.info(f"[image_gen] fatal error, skip retry: {err_msg[:100]}")
+                    break
+                if attempt < 4:
+                    import asyncio as _aio
+                    wait_s = min(1.5 * (2 ** attempt), 12.0)
+                    logger.info(
+                        f"[image_gen] batch attempt {attempt+1}/5 failed: "
+                        f"{err_msg[:80]} - retry in {wait_s}s"
+                    )
+                    await _aio.sleep(wait_s)
+            if err and not images:
                 if all_images:
                     return {
                         "images": all_images,
@@ -280,6 +281,15 @@ async def generate_image(
             await quota_service.record_usage(user_id, "image_gen", delta=len(all_images))
         except Exception as e:
             logger.warning(f"[image_gen] record_usage failed: {e}")
+        # P15: 写 ai_usage_logs 用于按模型/用户聚合统计
+        try:
+            await ai_client.log_usage(
+                user_id=user_id, model_row_id=_model_row_id, model_id_str=model,
+                usage_type="image", feature="product_image",
+                image_count=len(all_images),
+            )
+        except Exception as e:
+            logger.warning(f"[image_gen] ai usage log failed: {e}")
 
     return {
         "images": all_images,

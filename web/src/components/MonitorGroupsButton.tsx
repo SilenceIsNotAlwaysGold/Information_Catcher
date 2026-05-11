@@ -11,8 +11,15 @@ import {
 import { Layers } from "lucide-react";
 import { MonitorGroupsCard } from "./MonitorGroupsCard";
 
-export function MonitorGroupsButton({ token }: { token: string | null }) {
+export function MonitorGroupsButton({
+  token,
+  platform,
+}: {
+  token: string | null;
+  platform?: "xhs" | "douyin" | "mp";
+}) {
   const modal = useDisclosure();
+  const platformLabel = platform === "douyin" ? "抖音" : platform === "mp" ? "公众号" : platform === "xhs" ? "小红书" : "";
   return (
     <>
       <Button
@@ -32,10 +39,10 @@ export function MonitorGroupsButton({ token }: { token: string | null }) {
         <ModalContent>
           <ModalHeader className="flex items-center gap-2">
             <Layers size={18} />
-            监控分组（分组级 webhook + 阈值）
+            {platformLabel ? `${platformLabel} · 监控分组` : "监控分组（分组级 webhook + 阈值）"}
           </ModalHeader>
           <ModalBody className="pb-6">
-            <MonitorGroupsCard token={token} />
+            <MonitorGroupsCard token={token} platform={platform} />
           </ModalBody>
         </ModalContent>
       </Modal>
