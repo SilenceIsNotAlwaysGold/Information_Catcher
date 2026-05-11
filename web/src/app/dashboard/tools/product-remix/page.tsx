@@ -23,6 +23,67 @@ import { HistoryGrid } from "@/components/product-image/HistoryGrid";
 
 const COUNT_PRESETS = [3, 5, 10, 20, 30];
 
+// 默认 prompt 硬编码 fallback（与后端 remix_worker.REMIX_PROMPT_EN /
+// CAPTION_PROMPT_TEMPLATE 保持一致）。拉默认接口失败时也能点"填入默认"。
+const DEFAULT_IMAGE_PROMPT =
+  "Recreate the same visual style, composition, color palette and mood as the reference image. " +
+  "CRITICAL: keep ALL Chinese text in the image EXACTLY as in the reference — same content, " +
+  "same font, same size, same color, same position. Do not modify, translate, or remove any text. " +
+  "Generate a fresh variation of the rest of the image: change the background, decorative props, " +
+  "secondary colors, lighting, and ambient details so this version looks like a sibling of the reference, " +
+  "not a copy. High quality, 8k, professional product photography, sharp focus.";
+
+const DEFAULT_CAPTION_PROMPT =
+  "你是专业的小红书爆款笔记仿写者。用户给你一篇原作品的标题和正文，" +
+  "你要写一份新版本（这是 {n_total} 个版本中的第 {set_idx} 个）。\n\n" +
+  "**核心要求**：\n" +
+  "1. 保留原作品的核心卖点、商品信息、关键数字（如尺码、价格、用法）\n" +
+  "2. 标题：18 字内，换一个完全不同的钩子句（数字 / 反问 / 反差 / 提醒），不要照抄\n" +
+  "3. 正文：200-300 字，3-5 段，每段开头 emoji,关键词用 ** 加粗\n" +
+  "4. 第一人称视角，给生活场景细节（地点 / 心情 / 对比）\n" +
+  "5. 结尾给 3-5 个话题标签 #xxx#\n" +
+  "6. 多个版本之间要明显不同：换不同的切入角度、不同的故事场景、不同的情绪基调\n\n" +
+  '严格按 JSON 输出，不要任何解释：{{"title": "...", "body": "..."}}';
+
+// 内置模板（id="builtin:default"）；用户自定义模板存 localStorage
+type PromptTemplate = {
+  id: string;
+  name: string;
+  image_prompt: string;
+  caption_prompt: string;
+  builtin?: boolean;
+};
+const BUILTIN_TEMPLATES: PromptTemplate[] = [
+  {
+    id: "builtin:default",
+    name: "默认模板（小红书爆款）",
+    image_prompt: DEFAULT_IMAGE_PROMPT,
+    caption_prompt: DEFAULT_CAPTION_PROMPT,
+    builtin: true,
+  },
+  {
+    id: "builtin:minimal",
+    name: "极简留白风",
+    image_prompt:
+      DEFAULT_IMAGE_PROMPT +
+      "\n\nAesthetic preference: minimal, lots of negative space, off-white or soft pastel background, " +
+      "very few props, single soft light source.",
+    caption_prompt: DEFAULT_CAPTION_PROMPT,
+    builtin: true,
+  },
+  {
+    id: "builtin:cyberpunk",
+    name: "赛博朋克霓虹",
+    image_prompt:
+      DEFAULT_IMAGE_PROMPT +
+      "\n\nAesthetic preference: cyberpunk, neon lights (cyan/magenta/violet), rainy reflective surfaces, " +
+      "moody dark background, futuristic vibe.",
+    caption_prompt: DEFAULT_CAPTION_PROMPT,
+    builtin: true,
+  },
+];
+const TEMPLATES_LS_KEY = "remix_prompt_templates_v1";
+
 type FetchedPost = {
   images: string[];        // 展示用：data:URL（首选）或原 CDN URL（兜底）
   image_urls: string[];    // 原 CDN URL：提交任务时回传给 worker
@@ -90,21 +151,59 @@ export default function ProductRemixPage() {
   // 高级：用户自定义 prompt（留空则用默认）
   const [imagePrompt, setImagePrompt] = useState("");
   const [captionPrompt, setCaptionPrompt] = useState("");
-  const [imagePromptDefault, setImagePromptDefault] = useState("");
-  const [captionPromptDefault, setCaptionPromptDefault] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  // 模板：内置 + 用户自定义（localStorage）
+  const [userTemplates, setUserTemplates] = useState<PromptTemplate[]>([]);
+  const [selectedTplId, setSelectedTplId] = useState<string>("builtin:default");
+  const allTemplates = useMemo(
+    () => [...BUILTIN_TEMPLATES, ...userTemplates],
+    [userTemplates],
+  );
 
-  // 拉默认 prompt 一次性
+  // 初始化：localStorage 读自定义模板
   useEffect(() => {
-    fetch(IMAGE_API("/remix-default-prompts"), { headers })
-      .then((r) => r.ok ? r.json() : null)
-      .then((d) => {
-        if (d?.image_prompt) setImagePromptDefault(d.image_prompt);
-        if (d?.caption_prompt) setCaptionPromptDefault(d.caption_prompt);
-      })
-      .catch(() => {});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    try {
+      const raw = localStorage.getItem(TEMPLATES_LS_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) setUserTemplates(arr);
+      }
+    } catch {}
   }, []);
+  const persistTemplates = useCallback((arr: PromptTemplate[]) => {
+    setUserTemplates(arr);
+    try { localStorage.setItem(TEMPLATES_LS_KEY, JSON.stringify(arr)); } catch {}
+  }, []);
+
+  // 切换模板时填充两个 textarea
+  const applyTemplate = useCallback((tplId: string) => {
+    setSelectedTplId(tplId);
+    const tpl = [...BUILTIN_TEMPLATES, ...userTemplates].find((t) => t.id === tplId);
+    if (!tpl) return;
+    setImagePrompt(tpl.image_prompt);
+    setCaptionPrompt(tpl.caption_prompt);
+  }, [userTemplates]);
+
+  // 保存当前 textarea 内容为新模板（用户填名字）
+  const saveAsTemplate = useCallback(() => {
+    const name = window.prompt("命名这个模板：", "我的模板 " + (userTemplates.length + 1));
+    if (!name || !name.trim()) return;
+    const id = "user:" + Date.now();
+    const tpl: PromptTemplate = {
+      id, name: name.trim(),
+      image_prompt: imagePrompt || DEFAULT_IMAGE_PROMPT,
+      caption_prompt: captionPrompt || DEFAULT_CAPTION_PROMPT,
+    };
+    persistTemplates([...userTemplates, tpl]);
+    setSelectedTplId(id);
+    toastOk(`已保存模板「${tpl.name}」`);
+  }, [imagePrompt, captionPrompt, userTemplates, persistTemplates]);
+
+  const deleteTemplate = useCallback((id: string) => {
+    if (!id.startsWith("user:")) return;
+    persistTemplates(userTemplates.filter((t) => t.id !== id));
+    if (selectedTplId === id) setSelectedTplId("builtin:default");
+  }, [userTemplates, persistTemplates, selectedTplId]);
 
   // 切换勾选某一张图作参考；保持点击顺序作为生成顺序
   const toggleRef = (i: number) => {
@@ -549,20 +648,58 @@ export default function ProductRemixPage() {
               </button>
               {advancedOpen && (
                 <div className="space-y-3 p-3 rounded-md bg-default-50 border border-default-200">
+                  {/* 模板下拉：内置 + 用户自定义 */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-default-700">模板：</span>
+                    <select
+                      className="border border-divider rounded-md px-2 h-8 text-xs bg-background"
+                      value={selectedTplId}
+                      onChange={(e) => applyTemplate(e.target.value)}
+                    >
+                      <optgroup label="内置">
+                        {BUILTIN_TEMPLATES.map((t) => (
+                          <option key={t.id} value={t.id}>{t.name}</option>
+                        ))}
+                      </optgroup>
+                      {userTemplates.length > 0 && (
+                        <optgroup label="我的模板">
+                          {userTemplates.map((t) => (
+                            <option key={t.id} value={t.id}>{t.name}</option>
+                          ))}
+                        </optgroup>
+                      )}
+                    </select>
+                    <button
+                      type="button"
+                      className="text-xs px-2 h-8 border border-divider rounded-md hover:border-primary hover:text-primary"
+                      onClick={saveAsTemplate}
+                    >
+                      保存当前为新模板
+                    </button>
+                    {selectedTplId.startsWith("user:") && (
+                      <button
+                        type="button"
+                        className="text-xs px-2 h-8 border border-divider rounded-md hover:border-danger hover:text-danger"
+                        onClick={() => deleteTemplate(selectedTplId)}
+                      >
+                        删除当前模板
+                      </button>
+                    )}
+                  </div>
                   <div>
                     <div className="flex justify-between items-center mb-1">
                       <p className="text-xs text-default-700">图片仿写 Prompt（追加文案主题 + 风格关键词后传给图模型）</p>
                       <button
                         type="button"
                         className="text-xs text-primary hover:underline"
-                        onClick={() => setImagePrompt(imagePromptDefault)}
+                        onClick={() => setImagePrompt(DEFAULT_IMAGE_PROMPT)}
                       >
                         填入默认
                       </button>
                     </div>
                     <textarea
                       className="w-full border border-divider rounded-md p-2 text-xs font-mono bg-background min-h-[100px]"
-                      placeholder={imagePromptDefault || "留空则用默认模板"}
+                      placeholder="留空则用默认模板"
                       value={imagePrompt}
                       onChange={(e) => setImagePrompt(e.target.value)}
                     />
@@ -576,20 +713,20 @@ export default function ProductRemixPage() {
                       <button
                         type="button"
                         className="text-xs text-primary hover:underline"
-                        onClick={() => setCaptionPrompt(captionPromptDefault)}
+                        onClick={() => setCaptionPrompt(DEFAULT_CAPTION_PROMPT)}
                       >
                         填入默认
                       </button>
                     </div>
                     <textarea
                       className="w-full border border-divider rounded-md p-2 text-xs font-mono bg-background min-h-[160px]"
-                      placeholder={captionPromptDefault || "留空则用默认模板"}
+                      placeholder="留空则用默认模板"
                       value={captionPrompt}
                       onChange={(e) => setCaptionPrompt(e.target.value)}
                     />
                   </div>
                   <p className="text-[11px] text-default-400">
-                    留空 = 用默认模板；修改后会覆盖默认逻辑，请保证格式正确（特别是文案 prompt 末尾的 JSON 输出要求）。
+                    留空 = 用默认模板；修改后会覆盖默认逻辑。「保存当前为新模板」会把当前两个 textarea 内容存到浏览器本地（按用户隔离）下次使用直接切换。
                   </p>
                 </div>
               )}
