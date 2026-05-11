@@ -65,9 +65,17 @@ def init_user_db():
 
     - users 表新增字段: email, plan, trial_ends_at, role
     - 内置 admin 账号 admin/admin123 自动升级为 role='admin'
+    - 启用 SQLite WAL 模式：写不阻塞读，多 worker 并发下吞吐 5~10×
     """
     conn = _get_db_connection()
     cursor = conn.cursor()
+    # WAL + NORMAL fsync + 5s busy_timeout（持久化在 DB 文件，一次设置永久）
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+    except Exception:
+        pass
 
     # 基础表结构
     cursor.execute("""

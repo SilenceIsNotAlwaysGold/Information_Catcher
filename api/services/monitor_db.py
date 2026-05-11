@@ -1,7 +1,10 @@
+import logging
 import aiosqlite
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent.parent / "database" / "monitor.db"
 
@@ -1115,6 +1118,17 @@ async def _seed_default_prompt(db):
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
+        # WAL 模式：写不阻塞读，多进程并发性能 5-10×；synchronous=NORMAL 牺牲极端
+        # 崩溃时最近几秒数据，换 ~2× 写吞吐。这两个 PRAGMA 持久化在 DB 文件，一次设置永久生效。
+        # 注意：journal_mode=WAL 必须在没有其它连接时设；init_db 是 app 启动第一调用，安全。
+        try:
+            async with db.execute("PRAGMA journal_mode=WAL") as cur:
+                row = await cur.fetchone()
+                logger.info(f"[db] monitor.db journal_mode={row[0] if row else '?'}")
+            await db.execute("PRAGMA synchronous=NORMAL")
+            await db.execute("PRAGMA busy_timeout=5000")  # 写锁等待 5 秒（默认即时失败）
+        except Exception as e:
+            logger.warning(f"[db] WAL pragma failed: {e}")
         await db.executescript(_INIT_SQL)
         await _migrate(db)
         await _seed_default_prompt(db)

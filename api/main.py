@@ -38,6 +38,10 @@ from .services import scheduler as monitor_scheduler
 
 # 检查是否仅启动 API（不含前端）
 API_ONLY = os.environ.get("API_ONLY", "").lower() in ("1", "true", "yes")
+# 是否在本进程内跑 APScheduler 后台任务。
+# 默认 = 不跑（生产部署里 scheduler 走独立 systemd unit 跑，避免阻塞 HTTP）。
+# 开发模式跑单进程时设 PULSE_RUN_SCHEDULER=1 让单个 uvicorn 同时承担两件事。
+RUN_SCHEDULER = os.environ.get("PULSE_RUN_SCHEDULER", "").lower() in ("1", "true", "yes")
 
 
 @asynccontextmanager
@@ -46,9 +50,12 @@ async def lifespan(app: FastAPI):
     # 拉起 socks5+鉴权 代理的本地 HTTP 转发
     from .services import proxy_forwarder
     await proxy_forwarder.ensure_all_from_db()
-    await monitor_scheduler.start_scheduler()
+    if RUN_SCHEDULER:
+        # 仅当显式开关时才跑 scheduler（生产由 redbook-worker.service 独立跑）
+        await monitor_scheduler.start_scheduler()
     yield
-    monitor_scheduler.scheduler.shutdown(wait=False)
+    if RUN_SCHEDULER:
+        monitor_scheduler.scheduler.shutdown(wait=False)
     await proxy_forwarder.stop_all()
     # 关闭常驻 XHS 签名服务
     try:
