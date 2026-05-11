@@ -140,11 +140,15 @@ export default function AdminUsersPage() {
   type AiModelLite = { id: number; display_name: string; usage_type: "text" | "image"; provider_name?: string };
   const [aiModels, setAiModels] = useState<AiModelLite[]>([]);
   useEffect(() => {
+    // 后端返回 {models: [...]}，需要解包
     Promise.all([
-      fetch("/api/admin/ai/models?usage_type=text", { headers }).then((r) => r.ok ? r.json() : []),
-      fetch("/api/admin/ai/models?usage_type=image", { headers }).then((r) => r.ok ? r.json() : []),
-    ]).then(([t, i]) => setAiModels([...(Array.isArray(t) ? t : []), ...(Array.isArray(i) ? i : [])]))
-    .catch(() => {});
+      fetch("/api/admin/ai/models?usage_type=text", { headers }).then((r) => r.ok ? r.json() : { models: [] }),
+      fetch("/api/admin/ai/models?usage_type=image", { headers }).then((r) => r.ok ? r.json() : { models: [] }),
+    ]).then(([t, i]) => {
+      const tm = Array.isArray(t?.models) ? t.models : [];
+      const im = Array.isArray(i?.models) ? i.models : [];
+      setAiModels([...tm, ...im]);
+    }).catch(() => {});
   }, [headers]);
   const openEdit = (u: AdminUser) => {
     setEditing(u);
