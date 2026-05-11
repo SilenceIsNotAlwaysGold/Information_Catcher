@@ -520,7 +520,7 @@ export default function TextRemixPage() {
         </div>
         <div className="flex-1">
           <h1 className="text-2xl font-bold flex items-center gap-2">
-            文本仿写
+            文案换背景
             <Chip size="sm" variant="flat" color="secondary">MVP</Chip>
           </h1>
           <p className="text-sm text-default-500 mt-1">

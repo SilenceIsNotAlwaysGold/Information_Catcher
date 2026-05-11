@@ -468,7 +468,7 @@ export default function ProductRemixPage() {
           </h1>
           <p className="text-sm text-default-500 mt-1">
             粘贴小红书 / 抖音作品链接 → 选参考图 → AI 仿照整体风格批量出 N 套（图上文字保持不变 + 重写文案）。
-            若只想换背景保留文字，用「文本仿写」。
+            若只想换背景保留文字，用「文案换背景」。
           </p>
         </div>
         <a

@@ -264,7 +264,7 @@ export default function ProductImagePage() {
           <a href="/dashboard/tools/product-remix"
             className="text-sm text-primary hover:underline">整体仿写 →</a>
           <a href="/dashboard/tools/text-remix"
-            className="text-sm text-primary hover:underline">文本仿写 →</a>
+            className="text-sm text-primary hover:underline">文案换背景 →</a>
         </div>
       </div>
 
