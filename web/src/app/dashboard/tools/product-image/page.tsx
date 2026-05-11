@@ -20,6 +20,8 @@ import { ConfigStatusBar } from "@/components/product-image/ConfigStatusBar";
 import { ImagePreviewModal } from "@/components/product-image/ImagePreviewModal";
 import { HistoryGrid } from "@/components/product-image/HistoryGrid";
 import { ReferenceImageUploader } from "@/components/product-image/ReferenceImageUploader";
+import { ModelSelector } from "@/components/ModelSelector";
+import { useAiModels } from "@/lib/useApi";
 
 const COUNT_OPTIONS = [1, 2, 3, 4];
 
@@ -68,6 +70,9 @@ export default function ProductImagePage() {
   const [count, setCount] = useState(1);
   const [genSize, setGenSize] = useState("");
   const effectiveSize = genSize || cfg.size;
+  // P15: 用户选的 AI 模型（文本模型用于 prompt 向导，图像模型用于实际生图）
+  const [textModelId, setTextModelId] = useState<number | null>(null);
+  const [imageModelId, setImageModelId] = useState<number | null>(null);
 
   // 参考图（可选）
   const [refImageB64, setRefImageB64] = useState("");
@@ -128,6 +133,7 @@ export default function ProductImagePage() {
           platform,
           extras: extras.trim(),
           language,
+          text_model_id: textModelId,  // P15
         }),
       });
       const data = await r.json().catch(() => ({}));
@@ -162,11 +168,14 @@ export default function ProductImagePage() {
   const [items, setItems] = useState<GenItem[]>([]);
   const [genError, setGenError] = useState("");
 
-  const canGenerate = !!cfg.has_key && !!cfg.base_url && !!cfg.model && !generating;
+  // P15: 同时认老 cfg（image_api_*）和新 ai_models 表里的图像模型，任一可用即可生成
+  const { models: availableImageModels } = useAiModels("image");
+  const hasAnyImageModel = availableImageModels.length > 0 || (!!cfg.has_key && !!cfg.base_url && !!cfg.model);
+  const canGenerate = hasAnyImageModel && !generating;
 
   const handleGenerate = async () => {
     if (!prompt.trim()) { toastErr("请填写 Prompt"); return; }
-    if (!cfg.has_key) { toastErr("请先在「系统配置」页配置商品图 API Key"); return; }
+    if (!hasAnyImageModel) { toastErr("请先让管理员在「AI 模型配置」上架图像模型"); return; }
     setGenerating(true);
     setItems([]);
     setGenError("");
@@ -180,6 +189,7 @@ export default function ProductImagePage() {
           n: count,
           size: effectiveSize,
           reference_image_b64: refImageB64 || undefined,
+          image_model_id: imageModelId,  // P15
         }),
       });
       const data = await r.json().catch(() => ({}));
@@ -250,12 +260,12 @@ export default function ProductImagePage() {
             填商品信息 → AI 生成 Prompt → 选 1-4 张数量直接生图。可选上传参考图。
           </p>
         </div>
-        <a
-          href="/dashboard/tools/product-remix"
-          className="text-sm text-primary hover:underline self-center"
-        >
-          作品仿写 →
-        </a>
+        <div className="flex items-center gap-3 self-center">
+          <a href="/dashboard/tools/product-remix"
+            className="text-sm text-primary hover:underline">整体仿写 →</a>
+          <a href="/dashboard/tools/text-remix"
+            className="text-sm text-primary hover:underline">文本仿写 →</a>
+        </div>
       </div>
 
       <ConfigStatusBar
@@ -381,6 +391,14 @@ export default function ProductImagePage() {
               </p>
             </div>
 
+            {/* P15: 文本模型选择 */}
+            <ModelSelector
+              usage="text"
+              value={textModelId}
+              onChange={setTextModelId}
+              label="文本模型（用于生成 Prompt）"
+            />
+
             <Button
               color="secondary"
               size="lg"
@@ -493,6 +511,14 @@ export default function ProductImagePage() {
                 </select>
               </div>
             </div>
+
+            {/* P15: 图像模型选择 */}
+            <ModelSelector
+              usage="image"
+              value={imageModelId}
+              onChange={setImageModelId}
+              label="图像模型"
+            />
 
             <Button
               color="primary"

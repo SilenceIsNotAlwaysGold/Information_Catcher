@@ -77,9 +77,10 @@ const baseNavItems: NavItem[] = [
   { key: "import",      href: "/dashboard/import",                icon: <Upload size={20} />,    label: "数据导入", module: "common" },
 
   // 工具组（默认折叠）
-  { key: "tools-image",     href: "/dashboard/tools/product-image",   icon: <ImageIcon size={16} />, label: "商品图（自创）", module: "tools" },
-  { key: "tools-remix",     href: "/dashboard/tools/product-remix",   icon: <Wand2 size={16} />,     label: "作品仿写",       module: "tools" },
-  { key: "tools-extension", href: "/dashboard/extension",             icon: <Puzzle size={16} />,    label: "我的浏览器扩展", module: "tools" },
+  { key: "tools-image",      href: "/dashboard/tools/product-image",   icon: <ImageIcon size={16} />, label: "商品图（自创）", module: "tools" },
+  { key: "tools-remix",      href: "/dashboard/tools/product-remix",   icon: <Wand2 size={16} />,     label: "整体仿写",       module: "tools" },
+  { key: "tools-text-remix", href: "/dashboard/tools/text-remix",      icon: <Wand2 size={16} />,     label: "文本仿写",       module: "tools" },
+  { key: "tools-extension",  href: "/dashboard/extension",             icon: <Puzzle size={16} />,    label: "我的浏览器扩展", module: "tools" },
 
   { key: "settings",    href: "/dashboard/profile",               icon: <Settings size={20} />,  label: "个人设置", module: "common" },
 ];

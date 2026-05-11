@@ -463,11 +463,12 @@ export default function ProductRemixPage() {
         </div>
         <div className="flex-1">
           <h1 className="text-2xl font-bold text-foreground flex items-center gap-2">
-            作品仿写
+            整体仿写
             <Chip size="sm" variant="flat" color="secondary">Beta</Chip>
           </h1>
           <p className="text-sm text-default-500 mt-1">
-            粘贴小红书 / 抖音作品链接 → 选参考图 → AI 仿照风格批量出 N 套（图上文字保持不变 + 重写文案）。
+            粘贴小红书 / 抖音作品链接 → 选参考图 → AI 仿照整体风格批量出 N 套（图上文字保持不变 + 重写文案）。
+            若只想换背景保留文字，用「文本仿写」。
           </p>
         </div>
         <a
