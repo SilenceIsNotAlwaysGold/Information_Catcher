@@ -16,7 +16,7 @@ import { Button } from "@nextui-org/button";
 import { Input } from "@nextui-org/input";
 import { Chip } from "@nextui-org/chip";
 import { Spinner } from "@nextui-org/spinner";
-import { Wand2, Link2, Image as ImageIcon, Upload, Trash2, Check, AlertCircle, Download } from "lucide-react";
+import { Wand2, Link2, Image as ImageIcon, Upload, Trash2, Check, AlertCircle, Download, ZoomIn } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
 import { IMAGE_API, proxyUrl } from "@/components/product-image/utils";
@@ -43,7 +43,13 @@ type Background = {
   created_at: string;
 };
 
-type ResultItem = { image_url: string; error: string; bg_name?: string };
+type ResultItem = {
+  image_url: string;
+  error: string;
+  bg_name?: string;
+  set_idx?: number;
+  src_idx?: number;
+};
 
 export default function TextRemixPage() {
   const { token } = useAuth();
@@ -220,6 +226,7 @@ export default function TextRemixPage() {
   const [generating, setGenerating] = useState(false);
   const [results, setResults] = useState<ResultItem[]>([]);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
+  const bgFileRef = useRef<HTMLInputElement | null>(null);
 
   // ── localStorage 缓存：刷新页面后状态不丢 ─────────────────────────────
   const _firstLoad = useRef(true);
@@ -257,14 +264,18 @@ export default function TextRemixPage() {
     setGenerating(true);
     setResults([]);
 
-    // 拼成「源图 × 背景图」笛卡尔积任务列表
-    type Job = { srcIdx: number; bgId: number; bgName: string; text: string };
+    // 「几套」语义（对标 整体仿写）：
+    //   每套 = 跑一遍「所有源文字 × 所有背景」的笛卡尔积，产出 N×M 张
+    //   count 套 = 同一份输入跑 count 次，得到 count×N×M 张（不同 seed 的变体）
+    type Job = { setIdx: number; srcIdx: number; bgId: number; bgName: string; text: string };
     const jobs: Job[] = [];
-    for (const srcIdx of validSources) {
-      const text = (ocrTexts[srcIdx] || "").trim();
-      for (const bgId of selectedBgIds) {
-        const bg = backgrounds.find((b) => b.id === bgId);
-        jobs.push({ srcIdx, bgId, bgName: bg?.name || `背景 ${bgId}`, text });
+    for (let s = 1; s <= count; s++) {
+      for (const srcIdx of validSources) {
+        const text = (ocrTexts[srcIdx] || "").trim();
+        for (const bgId of selectedBgIds) {
+          const bg = backgrounds.find((b) => b.id === bgId);
+          jobs.push({ setIdx: s, srcIdx, bgId, bgName: bg?.name || `背景 ${bgId}`, text });
+        }
       }
     }
 
@@ -276,13 +287,15 @@ export default function TextRemixPage() {
       while (cursor < jobs.length) {
         const i = cursor++;
         const job = jobs[i];
+        const label = `第${job.setIdx}套·源${job.srcIdx + 1}×${job.bgName}`;
         try {
+          // 后端单次 count=1（套数由前端循环控制；后端不再聚合）
           const r = await fetch(IMAGE_API("/text-remix/generate"), {
             method: "POST", headers,
             body: JSON.stringify({
               background_id: job.bgId,
               text_content: job.text,
-              count,
+              count: 1,
               style_hint: styleHint.trim(),
             }),
           });
@@ -290,19 +303,19 @@ export default function TextRemixPage() {
           if (!r.ok) {
             all.push({
               image_url: "", error: data.detail || "未知",
-              bg_name: `源${job.srcIdx + 1}×${job.bgName}`,
+              bg_name: label, set_idx: job.setIdx, src_idx: job.srcIdx,
             });
           } else {
             const items: ResultItem[] = (data.results || []).map((x: any) => ({
-              ...x,
-              bg_name: `源${job.srcIdx + 1}×${job.bgName}`,
+              ...x, bg_name: label,
+              set_idx: job.setIdx, src_idx: job.srcIdx,
             } as any));
             all.push(...items);
           }
         } catch (e: any) {
           all.push({
             image_url: "", error: e?.message || String(e),
-            bg_name: `源${job.srcIdx + 1}×${job.bgName}`,
+            bg_name: label, set_idx: job.setIdx, src_idx: job.srcIdx,
           });
         }
         setResults([...all]);  // 流式更新
@@ -311,7 +324,7 @@ export default function TextRemixPage() {
     try {
       await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, () => worker()));
       const ok = all.filter((x) => x.image_url).length;
-      toastOk(`生成完成：${ok}/${jobs.length * count} 张（${validSources.length} 源 × ${selectedBgIds.length} 背景 × ${count}）`);
+      toastOk(`生成完成：${ok}/${jobs.length} 张（${count} 套 × ${validSources.length} 源 × ${selectedBgIds.length} 背景）`);
     } finally { setGenerating(false); }
   };
 
@@ -382,14 +395,15 @@ export default function TextRemixPage() {
             <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-7 gap-2">
               {post.images.map((u, i) => {
                 const on = sourceImgIdxs.includes(i);
+                const src = u.startsWith("data:") ? u : proxyUrl(u);
                 return (
-                  <button key={i} type="button"
-                    onClick={() => toggleSourceImg(i)}
-                    className={`relative aspect-square rounded-md overflow-hidden border-2 transition ${
+                  <div key={i}
+                    className={`relative aspect-square rounded-md overflow-hidden border-2 transition group cursor-pointer ${
                       on ? "border-secondary" : "border-transparent hover:border-default-300"
-                    }`}>
+                    }`}
+                    onClick={() => toggleSourceImg(i)}>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={u.startsWith("data:") ? u : proxyUrl(u)} alt={`图 ${i + 1}`}
+                    <img src={src} alt={`图 ${i + 1}`}
                       referrerPolicy="no-referrer"
                       className="w-full h-full object-cover" />
                     <span className="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1.5 rounded">
@@ -400,7 +414,14 @@ export default function TextRemixPage() {
                         <Check size={10} />
                       </span>
                     )}
-                  </button>
+                    {/* 放大查看（独立按钮，不触发勾选） */}
+                    <button type="button"
+                      onClick={(e) => { e.stopPropagation(); setPreviewSrc(u.startsWith("data:") ? u : proxyUrl(u)); }}
+                      title="查看大图"
+                      className="absolute bottom-1 right-1 bg-black/60 hover:bg-black/80 text-white p-1 rounded opacity-0 group-hover:opacity-100 transition">
+                      <ZoomIn size={12} />
+                    </button>
+                  </div>
                 );
               })}
             </div>
@@ -418,15 +439,21 @@ export default function TextRemixPage() {
                   const err = ocrErrors[idx] || "";
                   return (
                     <div key={idx} className="flex gap-2 items-start p-2 rounded-md border border-default-200 bg-content1">
-                      <div className="relative w-16 h-16 shrink-0 rounded overflow-hidden bg-default-100">
+                      <button type="button"
+                        onClick={() => setPreviewSrc(u?.startsWith("data:") ? u : proxyUrl(u || ""))}
+                        title="点击看大图，方便对照文字"
+                        className="relative w-20 h-20 shrink-0 rounded overflow-hidden bg-default-100 group">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img src={u?.startsWith("data:") ? u : proxyUrl(u || "")}
                           referrerPolicy="no-referrer" alt={`图 ${idx + 1}`}
-                          className="w-full h-full object-cover" />
+                          className="w-full h-full object-cover transition group-hover:scale-105" />
                         <span className="absolute top-0.5 left-0.5 bg-black/60 text-white text-[9px] px-1 rounded">
                           {idx + 1}
                         </span>
-                      </div>
+                        <span className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition">
+                          <ZoomIn size={16} className="text-white" />
+                        </span>
+                      </button>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center justify-between mb-1">
                           <span className="text-[11px] text-default-500">
@@ -470,26 +497,33 @@ export default function TextRemixPage() {
               <span className="font-medium">③ 选择 / 上传背景图</span>
               <Chip size="sm" variant="flat">{backgrounds.length}</Chip>
             </div>
-            <label className="cursor-pointer">
-              <input type="file" accept="image/*" className="hidden"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) handleUploadBg(f);
-                  e.target.value = "";  // 允许重复选择同一个文件
-                }} />
-              <span className="inline-flex items-center gap-1 text-sm text-primary hover:underline">
-                <Upload size={14} />上传新背景
-              </span>
-            </label>
+            {/* 显式 ref 触发 file picker：避免 label+hidden input 在某些浏览器/扩展下不响应 */}
+            <input ref={bgFileRef} type="file" accept="image/*"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handleUploadBg(f);
+                e.target.value = "";  // 允许重复选择同一个文件
+              }} />
+            <Button size="sm" variant="flat" color="primary"
+              startContent={<Upload size={14} />}
+              onPress={() => bgFileRef.current?.click()}>
+              上传新背景
+            </Button>
           </div>
         </CardHeader>
         <CardBody>
           {bgLoading ? (
             <div className="text-default-400 text-sm">加载中…</div>
           ) : backgrounds.length === 0 ? (
-            <div className="text-center py-6 text-default-400 text-sm">
-              <ImageIcon size={28} className="mx-auto mb-2 opacity-30" />
-              还没上传过背景图。点右上「上传新背景」开始。
+            <div className="text-center py-6 text-default-400 text-sm space-y-2">
+              <ImageIcon size={28} className="mx-auto opacity-30" />
+              <p>还没上传过背景图</p>
+              <Button size="sm" color="primary" variant="flat"
+                startContent={<Upload size={14} />}
+                onPress={() => bgFileRef.current?.click()}>
+                上传第一张背景图
+              </Button>
             </div>
           ) : (
             <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-7 gap-2">
@@ -534,30 +568,43 @@ export default function TextRemixPage() {
           </div>
         </CardHeader>
         <CardBody className="space-y-3">
-          <div className="flex flex-wrap items-end gap-3">
-            <div>
-              <p className="text-xs text-default-500 mb-1">数量</p>
-              <div className="flex gap-1">
-                {[1, 2, 3].map((c) => (
-                  <button key={c} type="button"
-                    onClick={() => setCount(c)}
-                    className={`px-3 py-1.5 text-xs rounded border transition ${
-                      count === c
-                        ? "border-secondary bg-secondary/10 text-secondary font-medium"
-                        : "border-divider text-default-500 hover:border-secondary/50"
-                    }`}>{c} 张</button>
-                ))}
-              </div>
+          {/* 套数（对标整体仿写）：每套 = 全部源 × 全部背景 各跑一次 */}
+          <div className="space-y-2">
+            <p className="text-sm text-default-700">
+              想要几套？（每套 = <b className="text-secondary">
+                {sourceImgIdxs.filter((i) => (ocrTexts[i] || "").trim()).length || "?"}
+              </b> 源文字 × <b className="text-secondary">
+                {selectedBgIds.length || "?"}
+              </b> 背景 = <b className="text-secondary">
+                {(sourceImgIdxs.filter((i) => (ocrTexts[i] || "").trim()).length || 0) * (selectedBgIds.length || 0)}
+              </b> 张图）
+            </p>
+            <div className="flex flex-wrap gap-2 items-center">
+              {[1, 2, 3, 5, 10].map((c) => (
+                <button key={c} type="button"
+                  onClick={() => setCount(c)}
+                  className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
+                    count === c
+                      ? "bg-secondary text-white border-secondary"
+                      : "border-divider text-default-600 hover:bg-default-100"
+                  }`}>{c} 套</button>
+              ))}
+              <Input type="number" min={1} max={30} size="sm" className="w-24"
+                value={String(count)}
+                onValueChange={(v) => {
+                  const n = parseInt(v, 10);
+                  if (!isNaN(n)) setCount(Math.max(1, Math.min(30, n)));
+                }} />
             </div>
-            <div className="flex-1 min-w-[200px]">
-              <Input size="sm" label="风格提示（可选）" labelPlacement="outside"
-                placeholder="如：小红书风 / 简约清新 / 高级感"
-                value={styleHint} onValueChange={setStyleHint} />
-            </div>
+            <p className="text-[11px] text-default-400">
+              上限 30 套。前端限 3 并发跑上游图像 API，单张约 30s。
+            </p>
           </div>
-          <p className="text-[11px] text-default-400">
-            MVP 上限 3 张同步生成；超过会比较慢，建议先 1 张试效果，再放量。
-          </p>
+          <div>
+            <Input size="sm" label="风格提示（可选）" labelPlacement="outside"
+              placeholder="如：小红书风 / 简约清新 / 高级感"
+              value={styleHint} onValueChange={setStyleHint} />
+          </div>
           <Button color="secondary" size="lg" className="w-full"
             startContent={<Wand2 size={18} />}
             isLoading={generating}
@@ -568,8 +615,9 @@ export default function TextRemixPage() {
             onPress={handleGenerate}>
             {(() => {
               const valid = sourceImgIdxs.filter((i) => (ocrTexts[i] || "").trim()).length;
-              const total = valid * selectedBgIds.length * count;
-              return generating ? "生成中…" : `生成 ${valid} 源 × ${selectedBgIds.length} 背景 × ${count} = ${total} 张`;
+              const perSet = valid * selectedBgIds.length;
+              const total = perSet * count;
+              return generating ? "生成中…" : `生成 ${count} 套 × ${perSet} 张/套 = ${total} 张`;
             })()}
           </Button>
           {sourceImgIdxs.filter((i) => (ocrTexts[i] || "").trim()).length === 0 && (
@@ -596,36 +644,62 @@ export default function TextRemixPage() {
                 <span className="ml-3 text-sm text-default-500">AI 正在绘制（约 30s 一张）…</span>
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-                {results.map((r, i) => (
-                  <div key={i}
-                    className="aspect-square rounded-md overflow-hidden bg-default-100 relative group">
-                    {r.image_url ? (
-                      <>
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={proxyUrl(r.image_url)}
-                          className="w-full h-full object-cover cursor-pointer"
-                          onClick={() => setPreviewSrc(r.image_url)} alt={`结果 ${i + 1}`} />
-                        <a href={r.image_url} download target="_blank" rel="noopener noreferrer"
-                          className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 bg-black/60 text-white p-1.5 rounded transition">
-                          <Download size={14} />
-                        </a>
-                        {r.bg_name && (
-                          <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-[10px] px-1.5 py-0.5 truncate">
-                            背景：{r.bg_name}
+              // 按 set_idx 分组展示（对标整体仿写的"第 N 套"展示）
+              <div className="space-y-4">
+                {(() => {
+                  const groups: Record<string, ResultItem[]> = {};
+                  for (const r of results) {
+                    const k = String(r.set_idx ?? 0);
+                    (groups[k] ||= []).push(r);
+                  }
+                  const keys = Object.keys(groups).sort((a, b) => Number(a) - Number(b));
+                  return keys.map((k) => {
+                    const list = groups[k];
+                    const ok = list.filter((r) => r.image_url).length;
+                    return (
+                      <div key={k} className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-sm">第 {k} 套</span>
+                          <span className="text-default-400 text-xs">
+                            {ok}/{list.length} 张
                           </span>
-                        )}
-                      </>
-                    ) : (
-                      <div className="w-full h-full flex flex-col items-center justify-center text-xs text-danger px-2 text-center gap-1">
-                        <span>{r.error?.slice(0, 80) || "失败"}</span>
-                        {r.bg_name && (
-                          <span className="text-default-400 text-[10px]">{r.bg_name}</span>
-                        )}
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                          {list.map((r, i) => (
+                            <div key={i}
+                              className="aspect-square rounded-md overflow-hidden bg-default-100 relative group">
+                              {r.image_url ? (
+                                <>
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img src={proxyUrl(r.image_url)}
+                                    className="w-full h-full object-cover cursor-pointer"
+                                    onClick={() => setPreviewSrc(r.image_url)}
+                                    alt={`结果 ${k}-${i + 1}`} />
+                                  <a href={r.image_url} download target="_blank" rel="noopener noreferrer"
+                                    className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 bg-black/60 text-white p-1.5 rounded transition">
+                                    <Download size={14} />
+                                  </a>
+                                  {r.bg_name && (
+                                    <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-[10px] px-1.5 py-0.5 truncate">
+                                      {r.bg_name}
+                                    </span>
+                                  )}
+                                </>
+                              ) : (
+                                <div className="w-full h-full flex flex-col items-center justify-center text-xs text-danger px-2 text-center gap-1">
+                                  <span>{r.error?.slice(0, 80) || "失败"}</span>
+                                  {r.bg_name && (
+                                    <span className="text-default-400 text-[10px]">{r.bg_name}</span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    )}
-                  </div>
-                ))}
+                    );
+                  });
+                })()}
               </div>
             )}
           </CardBody>

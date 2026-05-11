@@ -158,14 +158,31 @@ async def extract_text(
     except ai_client.AIModelNotConfigured as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        # Vision 模型 API 失败（如 DeepSeek 不支持视觉返回 400）→ 给清晰提示
-        msg = str(e)
-        if "400" in msg or "image" in msg.lower():
-            msg = (
-                "当前选中的模型不支持图片输入（如 DeepSeek 仅文本）。"
-                "请在「文本仿写」OCR 按钮旁切换为支持视觉的模型，如 GPT-4o / Claude 3.5 / Gemini / Qwen-VL 等。"
+        # 完整 traceback 进日志（用户看 502 时我们要能定位）
+        logger.exception(
+            "[text_remix.extract_text] OCR failed user=%s model_id=%s url=%s",
+            current_user.get("id"), req.model_id, url[:80],
+        )
+        raw = str(e) or e.__class__.__name__
+        low = raw.lower()
+        # 仅对真正"模型不支持视觉"的 4xx 给 DeepSeek 提示。
+        # 之前的 `"400" in raw or "image" in raw.lower()` 误伤过多
+        # （所有错误都包含 image 字眼），把真实错误一并附带回去
+        hint = ""
+        is_unsupported = (
+            "does not support" in low
+            or "doesn't support" in low
+            or "unsupported" in low
+            or "no image" in low
+            or "vision" in low and ("400" in raw or "not" in low)
+        )
+        if is_unsupported:
+            hint = (
+                "（疑似：当前选中的模型不支持图片输入，如 DeepSeek 仅文本。"
+                "可在「OCR 模型」下拉里切到 GPT-4o / Claude / Gemini / Qwen-VL 等视觉模型）"
             )
-        raise HTTPException(status_code=502, detail=f"OCR 失败：{msg}")
+        # 502 仅在调用上游真的失败时返回；rate-limit / 网络可以让前端重试
+        raise HTTPException(status_code=502, detail=f"OCR 失败：{raw[:400]}{hint}")
 
     return {"ok": True, "text": text}
 
