@@ -48,6 +48,8 @@ type AdminUser = {
   last_login_at: string | null;
   login_count: number;
   quota_override_json: string;
+  allowed_text_model_ids?: string;
+  allowed_image_model_ids?: string;
   created_at: string;
   usage?: UsageSummary | null;
 };
@@ -128,13 +130,36 @@ export default function AdminUsersPage() {
   // 编辑 drawer
   const editModal = useDisclosure();
   const [editing, setEditing] = useState<AdminUser | null>(null);
-  const [editForm, setEditForm] = useState<Partial<AdminUser> & { quota_override?: Record<string, number> }>({});
+  const [editForm, setEditForm] = useState<Partial<AdminUser> & {
+    quota_override?: Record<string, number>;
+    allowed_text: number[] | null;   // null = 不限制；[] = 全禁；[1,3] = 指定
+    allowed_image: number[] | null;
+  }>({});
+
+  // AI 模型列表（admin 看全部，构建白名单 chip 选择器）
+  type AiModelLite = { id: number; display_name: string; usage_type: "text" | "image"; provider_name?: string };
+  const [aiModels, setAiModels] = useState<AiModelLite[]>([]);
+  useEffect(() => {
+    Promise.all([
+      fetch("/api/admin/ai/models?usage_type=text", { headers }).then((r) => r.ok ? r.json() : []),
+      fetch("/api/admin/ai/models?usage_type=image", { headers }).then((r) => r.ok ? r.json() : []),
+    ]).then(([t, i]) => setAiModels([...(Array.isArray(t) ? t : []), ...(Array.isArray(i) ? i : [])]))
+    .catch(() => {});
+  }, [headers]);
   const openEdit = (u: AdminUser) => {
     setEditing(u);
     let override: Record<string, number> = {};
     try {
       override = u.quota_override_json ? JSON.parse(u.quota_override_json) : {};
     } catch {}
+    // 解析白名单：空字符串 = null（不限制）；'[...]' = 数组
+    const parseAllowed = (raw?: string): number[] | null => {
+      if (!raw) return null;
+      try {
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr.map((x) => Number(x)).filter((x) => !isNaN(x)) : null;
+      } catch { return null; }
+    };
     setEditForm({
       plan: u.plan,
       role: u.role,
@@ -144,6 +169,8 @@ export default function AdminUsersPage() {
       max_monitor_posts: u.max_monitor_posts,
       email: u.email || "",
       quota_override: override,
+      allowed_text: parseAllowed(u.allowed_text_model_ids),
+      allowed_image: parseAllowed(u.allowed_image_model_ids),
     });
     editModal.onOpen();
   };
@@ -157,6 +184,13 @@ export default function AdminUsersPage() {
     }
     if (editForm.quota_override !== undefined) {
       payload.quota_override = editForm.quota_override;
+    }
+    // 白名单：null 表示"不限制"，前端用 [] 不会改、要保存就传 null/[]/[1,3]
+    if (editForm.allowed_text !== undefined) {
+      payload.allowed_text_model_ids = editForm.allowed_text === null ? [] : editForm.allowed_text;
+    }
+    if (editForm.allowed_image !== undefined) {
+      payload.allowed_image_model_ids = editForm.allowed_image === null ? [] : editForm.allowed_image;
     }
     try {
       const r = await fetch(`/api/auth/admin/users/${editing.id}`, {
@@ -335,13 +369,15 @@ export default function AdminUsersPage() {
                         <div className="text-default-400">{u.login_count} 次</div>
                       </td>
                       <td className="py-2 pr-2">
-                        <div className="flex gap-1">
-                          <Button size="sm" variant="light" isIconOnly title="编辑" onPress={() => openEdit(u)}>
-                            <Edit size={14} />
+                        <div className="flex gap-1 flex-wrap">
+                          <Button size="sm" variant="flat" startContent={<Edit size={13} />}
+                            onPress={() => openEdit(u)}>
+                            编辑
                           </Button>
-                          <Button size="sm" variant="light" isIconOnly title="重置密码"
-                            color="warning" onPress={() => openReset(u)}>
-                            <Lock size={14} />
+                          <Button size="sm" variant="flat" color="warning"
+                            startContent={<Lock size={13} />}
+                            onPress={() => openReset(u)}>
+                            修改密码
                           </Button>
                           <Button size="sm" variant="light" isIconOnly title="强制下线"
                             onPress={() => handleRevokeTokens(u)}
@@ -477,6 +513,59 @@ export default function AdminUsersPage() {
                     ))}
                   </div>
                 </div>
+
+                {/* AI 模型权限白名单 */}
+                {(["text", "image"] as const).map((utype) => {
+                  const models = aiModels.filter((m) => m.usage_type === utype);
+                  const key = utype === "text" ? "allowed_text" : "allowed_image";
+                  const current = (editForm as any)[key] as number[] | null;
+                  const isUnlimited = current === null;
+                  const allowedSet = new Set(current || []);
+                  return (
+                    <div key={utype} className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-medium">
+                          {utype === "text" ? "文本模型" : "图像模型"} 白名单
+                          <span className="text-xs text-default-400 ml-2">
+                            {isUnlimited ? "未限制（可用所有上架模型）" : `已选 ${allowedSet.size} 个`}
+                          </span>
+                        </p>
+                        {!isUnlimited && (
+                          <button type="button"
+                            className="text-xs text-primary hover:underline"
+                            onClick={() => setEditForm({ ...editForm, [key]: null } as any)}>
+                            清除限制
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {models.length === 0 && (
+                          <span className="text-xs text-default-400">还没配置 {utype} 模型</span>
+                        )}
+                        {models.map((m) => {
+                          const on = allowedSet.has(m.id);
+                          return (
+                            <button key={m.id} type="button"
+                              onClick={() => {
+                                const next = new Set(current || []);
+                                if (on) next.delete(m.id); else next.add(m.id);
+                                setEditForm({ ...editForm, [key]: Array.from(next) } as any);
+                              }}
+                              className={`px-2 py-1 text-xs rounded border ${
+                                on
+                                  ? "border-primary bg-primary/10 text-primary"
+                                  : "border-divider text-default-500 hover:border-primary/50"
+                              }`}
+                              title={m.provider_name}
+                            >
+                              {on && "✓ "}{m.display_name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
               </ModalBody>
               <ModalFooter>
                 <Button variant="flat" onPress={editModal.onClose}>取消</Button>
@@ -492,7 +581,7 @@ export default function AdminUsersPage() {
         <ModalContent>
           {resetTarget && (
             <>
-              <ModalHeader>重置密码：{resetTarget.username}</ModalHeader>
+              <ModalHeader>修改密码：{resetTarget.username}</ModalHeader>
               <ModalBody className="space-y-3">
                 {resetResult ? (
                   <div className="space-y-2">

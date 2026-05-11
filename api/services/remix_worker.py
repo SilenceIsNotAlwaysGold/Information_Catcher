@@ -186,11 +186,14 @@ async def _gen_one_image(
 
     prompt 默认用通用 REMIX_PROMPT_EN；调用方可注入"文案主题"个性化 prompt。
     P15.8: 走模型级并发控制（acquire_slot）。
+    每次调用结束都写 ai_usage_logs（不论成败），供统计。
     """
+    import time as _time
     auth_headers = {"Authorization": f"Bearer {api_key}"}
 
     images = None
     last_err = ""
+    _t0 = _time.perf_counter()
     for attempt in range(2):
         async with ai_client.acquire_slot(image_model_row_id, image_max_concurrent):
             result, err = await call_edits(
@@ -202,6 +205,23 @@ async def _gen_one_image(
             break
         last_err = (err or {}).get("error", "未知错误")
         await asyncio.sleep(1.5)
+    _ms = int((_time.perf_counter() - _t0) * 1000)
+
+    # 记 ai_usage_logs（之前漏记，导致仿写图片不在统计里）
+    try:
+        await ai_client.log_usage(
+            user_id=user_id,
+            model_row_id=image_model_row_id,
+            model_id_str=model,
+            usage_type="image",
+            feature="remix",
+            image_count=1 if images else 0,
+            latency_ms=_ms,
+            status="ok" if images else "error",
+            error=last_err if not images else "",
+        )
+    except Exception as e:
+        logger.warning(f"[remix_worker] log_usage failed: {e}")
 
     if not images:
         return {"image_url": "", "image_b64": "", "error": f"图片生成失败：{last_err}"}
@@ -293,13 +313,22 @@ async def _gen_one_set(
     sem = asyncio.Lock()  # 保护 images 列表 + progress 顺序
 
     async def _one_with_progress(j: int, ref_bytes: bytes):
-        result = await _gen_one_image(
-            client, base_url=base_url, api_key=api_key, model=model,
-            size=size, ref_bytes=ref_bytes, user_id=user_id,
-            prompt=image_prompt,
-            image_model_row_id=image_model_row_id,
-            image_max_concurrent=image_max_concurrent,
-        )
+        # 异常一定要落到 images[j].error，否则 asyncio.gather(return_exceptions=True)
+        # 会静默吞掉，images[j] 留在初始空状态 → 前端显示「无图」（无 error 上下文）
+        try:
+            result = await _gen_one_image(
+                client, base_url=base_url, api_key=api_key, model=model,
+                size=size, ref_bytes=ref_bytes, user_id=user_id,
+                prompt=image_prompt,
+                image_model_row_id=image_model_row_id,
+                image_max_concurrent=image_max_concurrent,
+            )
+        except Exception as e:
+            logger.warning(f"[remix_worker] _gen_one_image set#?  ref#{j} crash: {e}")
+            result = {
+                "image_url": "", "image_b64": "",
+                "error": f"图片生成异常：{type(e).__name__}: {str(e)[:200]}",
+            }
         async with sem:
             images[j] = result
             await _emit(title, body, cerr)
@@ -403,32 +432,47 @@ async def _process_task(task: dict) -> None:
         except Exception:
             return False
 
-    items: list[dict] = []
+    # P15.8: 套间并行（用 model 的 max_concurrent semaphore 兜底限流）
+    # —— 替换老的串行 for 循环；items 用 set_idx 预分配，避免乱序
+    # 进度写库统一用一把锁保护，count + finished 计数让 done_count 单调递增
+    items_indexed: list[Optional[dict]] = [None] * count
+    progress_lock = asyncio.Lock()
+    finished = 0
+
     timeout = httpx.Timeout(180.0, connect=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for i in range(1, count + 1):
-            # 套间检查取消（套内并发到 _gen_one_set 里有更细的检查）
-            if await _is_cancelled():
-                logger.info(f"[remix_worker] task {task_id} cancelled at set {i}/{count}")
-                break
 
-            # 流式进度回调：每完成"文案/单张图"就把当前套写到 items_json
+        async def _flush_progress():
+            """把当前所有完成的套（按 idx 顺序）写一次 items_json 到 DB。"""
+            snapshot = [it for it in items_indexed if it is not None]
+            try:
+                await monitor_db.update_remix_task_progress(
+                    task_id, items_json=json.dumps(snapshot, ensure_ascii=False),
+                    done_count=finished,
+                )
+            except Exception as e:
+                logger.warning(f"[remix_worker] update progress failed: {e}")
+
+        async def _run_one_set(i: int):
+            """跑一套：caption + K 张图。完成后写 history + 推进度。"""
+            nonlocal finished
+
+            # 套开始前检查取消
+            if await _is_cancelled():
+                return
+
+            # 套内流式进度（中间态）：caption 完成或某张图完成时调一次
             async def _progress(stage: str, partial: dict):
-                snapshot = list(items)
                 clean = dict(partial)
                 if "images" in clean:
                     clean["images"] = [
                         {kk: vv for kk, vv in (sub or {}).items() if kk != "image_b64"}
                         for sub in clean["images"]
                     ]
-                snapshot.append(clean)
-                try:
-                    await monitor_db.update_remix_task_progress(
-                        task_id, items_json=json.dumps(snapshot, ensure_ascii=False),
-                        done_count=len(items),
-                    )
-                except Exception:
-                    pass
+                async with progress_lock:
+                    # 中间态：把这一套的快照放到对应 slot；done_count 不动
+                    items_indexed[i - 1] = clean
+                    await _flush_progress()
 
             try:
                 item = await _gen_one_set(
@@ -454,7 +498,7 @@ async def _process_task(task: dict) -> None:
                         "title": "", "body": "",
                         "error": f"内部异常：{e}"}
 
-            # 写历史：套号 i 下，每张成功的图占一行（in_set_idx 1..K）
+            # 写历史（image_gen_history）
             qiniu_ready = await qiniu_uploader.is_configured()
             local_ready = await local_storage.is_configured()
             upload_status = "pending" if (local_ready and qiniu_ready) else (
@@ -474,7 +518,6 @@ async def _process_task(task: dict) -> None:
                         local_url=sub.get("image_url", ""),
                         qiniu_url=sub.get("image_url", ""),
                         upload_status=upload_status,
-                        # 文案只在第一张写，避免一套同一篇文案被重复存
                         generated_title=item.get("title", "") if in_set == 1 else "",
                         generated_body=item.get("body", "") if in_set == 1 else "",
                         batch_id=f"remix:{task_id}",
@@ -485,21 +528,38 @@ async def _process_task(task: dict) -> None:
                 except Exception as e:
                     logger.warning(f"[remix_worker] write history failed: {e}")
 
-            # 进度（image_b64 不进 db；嵌套结构里也剥掉）
+            # 最终态写入 items_indexed + done_count + 1
             public_item = {k: v for k, v in item.items() if k != "image_b64"}
             if "images" in public_item:
                 public_item["images"] = [
                     {kk: vv for kk, vv in (sub or {}).items() if kk != "image_b64"}
                     for sub in public_item["images"]
                 ]
-            items.append(public_item)
-            try:
-                await monitor_db.update_remix_task_progress(
-                    task_id, items_json=json.dumps(items, ensure_ascii=False),
-                    done_count=len(items),
-                )
-            except Exception as e:
-                logger.warning(f"[remix_worker] update progress failed: {e}")
+            async with progress_lock:
+                items_indexed[i - 1] = public_item
+                finished += 1
+                await _flush_progress()
+
+        # 并发跑所有套，由 image 模型的 max_concurrent semaphore 控制实际并发
+        # 文本模型有独立 semaphore（如 admin 配置过），自动叠加
+        await asyncio.gather(
+            *(_run_one_set(i) for i in range(1, count + 1)),
+            return_exceptions=False,
+        )
+
+    # 把 items_indexed 压回 list，给后续 finish_remix_task 用
+    items: list = [it for it in items_indexed if it is not None]
+
+    # 强制最终态同步：避免 progress 回调残留写入导致 done_count 不准
+    # 用已落 slot 的数量作为 ground truth（每个完成的 set 都会 set items_indexed[i-1]）
+    try:
+        await monitor_db.update_remix_task_progress(
+            task_id,
+            items_json=json.dumps(items, ensure_ascii=False),
+            done_count=len(items),
+        )
+    except Exception as e:
+        logger.warning(f"[remix_worker] final progress sync failed: {e}")
 
     # 末尾再查一次：用户中途取消就保留 cancelled 状态，不要 done/error 覆盖
     if await _is_cancelled():

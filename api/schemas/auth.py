@@ -56,6 +56,9 @@ class AdminUpdateUserRequest(BaseModel):
     disabled_reason: Optional[str] = None
     quota_override: Optional[Dict[str, int]] = None  # 覆盖 plan 的额度，{"monitor_posts": 1000, ...}
     email: Optional[str] = None
+    # P16: AI 模型权限白名单（JSON 数组的 ai_models.id；None 不动，[] 全禁，[1,3] 只允许指定）
+    allowed_text_model_ids: Optional[list[int]] = None
+    allowed_image_model_ids: Optional[list[int]] = None
 
 
 class AdminCreateUserRequest(BaseModel):

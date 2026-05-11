@@ -359,6 +359,10 @@ async def admin_update_user(
         payload["quota_override_json"] = (
             json.dumps(quota_override, ensure_ascii=False) if quota_override else ""
         )
+    # 模型白名单：list[int] → JSON 字符串入库；None 不动；[] = 清空白名单（默认允许所有）
+    for key in ("allowed_text_model_ids", "allowed_image_model_ids"):
+        if key in payload and payload[key] is not None:
+            payload[key] = json.dumps(payload[key]) if payload[key] else ""
     if "is_active" in payload and isinstance(payload["is_active"], bool):
         payload["is_active"] = 1 if payload["is_active"] else 0
     update_user_admin(user_id, **payload)

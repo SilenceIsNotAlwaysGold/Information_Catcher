@@ -163,6 +163,14 @@ def init_user_db():
     # 个人/组织级配额覆盖（NULL 走 plan 默认；非 NULL 优先生效）
     _ensure_column(cursor, "users", "quota_override_json", "TEXT DEFAULT ''")
 
+    # P15: 用户的 AI 模型偏好 —— 用 ai_models.id（外键不强制，model 删除后会 fallback 到 default）
+    _ensure_column(cursor, "users", "preferred_text_model_id",  "INTEGER")
+    _ensure_column(cursor, "users", "preferred_image_model_id", "INTEGER")
+    # P16: 用户级模型白名单（JSON 数组的 ai_models.id；NULL/空 = 允许全部 published）
+    # 例：'[3, 7]' = 只允许 id=3 和 7 的模型；'[]' = 显式禁用所有
+    _ensure_column(cursor, "users", "allowed_text_model_ids",  "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "allowed_image_model_ids", "TEXT DEFAULT ''")
+
     # email 唯一索引（NULL 允许多个）
     cursor.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email "
@@ -403,7 +411,10 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "       COALESCE(feishu_bitable_image_table_id,'')    AS feishu_bitable_image_table_id, "
         "       COALESCE(feishu_bitable_trending_table_id,'') AS feishu_bitable_trending_table_id, "
         "       COALESCE(feishu_bound_at,'')                  AS feishu_bound_at, "
-        "       COALESCE(feishu_name,'')                      AS feishu_name "
+        "       COALESCE(feishu_name,'')                      AS feishu_name, "
+        "       preferred_text_model_id, preferred_image_model_id, "
+        "       COALESCE(allowed_text_model_ids,'')  AS allowed_text_model_ids, "
+        "       COALESCE(allowed_image_model_ids,'') AS allowed_image_model_ids "
         "FROM users WHERE id = ?",
         (user_id,)
     )
@@ -465,6 +476,12 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "feishu_bitable_trending_table_id": row["feishu_bitable_trending_table_id"] or "",
         "feishu_bound_at":                  row["feishu_bound_at"] or "",
         "feishu_name":                      row["feishu_name"] or "",
+        # P15: AI 模型偏好
+        "preferred_text_model_id":          row["preferred_text_model_id"],
+        "preferred_image_model_id":         row["preferred_image_model_id"],
+        # P16: AI 模型白名单（admin 管理）
+        "allowed_text_model_ids":           row["allowed_text_model_ids"] or "",
+        "allowed_image_model_ids":          row["allowed_image_model_ids"] or "",
     }
 
 
@@ -669,6 +686,8 @@ def list_users(*, include_deleted: bool = False) -> list:
         f"       COALESCE(disabled_reason,'') AS disabled_reason, "
         f"       last_login_at, COALESCE(login_count,0) AS login_count, "
         f"       COALESCE(quota_override_json,'') AS quota_override_json, "
+        f"       COALESCE(allowed_text_model_ids,'')  AS allowed_text_model_ids, "
+        f"       COALESCE(allowed_image_model_ids,'') AS allowed_image_model_ids, "
         f"       created_at "
         f"FROM users {where} ORDER BY id DESC"
     )
@@ -707,6 +726,7 @@ def update_user_admin(user_id: int, **fields) -> bool:
 _ADMIN_ALLOWED_FIELDS = {
     "plan", "is_active", "role", "trial_ends_at", "max_monitor_posts",
     "status", "disabled_reason", "quota_override_json", "email",
+    "allowed_text_model_ids", "allowed_image_model_ids",
 }
 
 
