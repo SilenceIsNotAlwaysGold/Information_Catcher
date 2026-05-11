@@ -9,7 +9,8 @@
  *  3. 上传/选择背景图模板（保存到云端可复用）
  *  4. 提交生成 → 同步返回 N 张结果（MVP count≤3）
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useMe } from "@/lib/useApi";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
 import { Input } from "@nextui-org/input";
@@ -42,17 +43,21 @@ type Background = {
   created_at: string;
 };
 
-type ResultItem = { image_url: string; error: string };
+type ResultItem = { image_url: string; error: string; bg_name?: string };
 
 export default function TextRemixPage() {
   const { token } = useAuth();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+  const { data: me } = useMe();
+  const uid = me?.username || me?.id || "anon";
+  const PERSIST_KEY = `pulse.text-remix.${uid}`;
 
   // ── 步骤 1：拉作品 ────────────────────────────────────────────────────
   const [postUrl, setPostUrl] = useState("");
   const [fetching, setFetching] = useState(false);
   const [post, setPost] = useState<FetchedPost | null>(null);
-  const [sourceImgIdx, setSourceImgIdx] = useState(0);
+  // 多选：用户可勾多张源图，OCR 时合并文字
+  const [sourceImgIdxs, setSourceImgIdxs] = useState<number[]>([0]);
 
   const handleFetch = async () => {
     const u = postUrl.trim();
@@ -81,7 +86,7 @@ export default function TextRemixPage() {
         post_id: data.post_id || "",
         post_url: data.post_url || u,
       });
-      setSourceImgIdx(0);
+      setSourceImgIdxs([0]);
     } catch (e: any) { toastErr(`加载失败：${e?.message || e}`); }
     finally { setFetching(false); }
   };
@@ -93,30 +98,56 @@ export default function TextRemixPage() {
   const [ocrModelId, setOcrModelId] = useState<number | null>(null);
 
   const handleExtract = async () => {
-    if (!post) return;
-    const imgUrl = post.image_urls[sourceImgIdx] || post.images[sourceImgIdx];
-    if (!imgUrl) { toastErr("请选一张源图"); return; }
+    if (!post || sourceImgIdxs.length === 0) {
+      toastErr("请至少选一张源图");
+      return;
+    }
     setOcring(true);
     try {
-      const r = await fetch(IMAGE_API("/text-remix/extract-text"), {
-        method: "POST", headers,
-        body: JSON.stringify({ image_url: imgUrl, model_id: ocrModelId }),
-      });
-      const data = await r.json();
-      if (!r.ok) {
-        toastErr(data.detail || "OCR 失败");
-        return;
+      // 多选时按顺序串行 OCR，再用分隔符拼起来；前端可编辑合并后的文字
+      const parts: string[] = [];
+      for (const idx of sourceImgIdxs) {
+        const imgUrl = post.image_urls[idx] || post.images[idx];
+        if (!imgUrl) continue;
+        const r = await fetch(IMAGE_API("/text-remix/extract-text"), {
+          method: "POST", headers,
+          body: JSON.stringify({ image_url: imgUrl, model_id: ocrModelId }),
+        });
+        const data = await r.json();
+        if (!r.ok) {
+          toastErr(`第 ${idx + 1} 张 OCR 失败：${data.detail || "未知错误"}`);
+          continue;
+        }
+        const txt = (data.text || "").trim();
+        if (txt) {
+          parts.push(
+            sourceImgIdxs.length > 1 ? `--- 第 ${idx + 1} 张 ---\n${txt}` : txt
+          );
+        }
       }
-      setExtractedText((data.text || "").trim());
-      toastOk("文字提取完成，请确认后再生成");
+      const merged = parts.join("\n\n");
+      setExtractedText(merged);
+      toastOk(`已合并 ${parts.length} 张文字，请确认后再生成`);
     } catch (e: any) { toastErr(`OCR 失败：${e?.message || e}`); }
     finally { setOcring(false); }
+  };
+
+  const toggleSourceImg = (i: number) => {
+    setSourceImgIdxs((prev) => {
+      const has = prev.includes(i);
+      if (has) {
+        const next = prev.filter((x) => x !== i);
+        return next.length ? next : [i];  // 至少留 1 张
+      }
+      return [...prev, i].sort((a, b) => a - b);
+    });
   };
 
   // ── 步骤 3：背景图管理 ────────────────────────────────────────────────
   const [backgrounds, setBackgrounds] = useState<Background[]>([]);
   const [bgLoading, setBgLoading] = useState(false);
-  const [selectedBgId, setSelectedBgId] = useState<number | null>(null);
+  // 多选背景图：每张都按 count 数量生成
+  const [selectedBgIds, setSelectedBgIds] = useState<number[]>([]);
 
   const loadBackgrounds = useCallback(async () => {
     setBgLoading(true);
@@ -147,7 +178,7 @@ export default function TextRemixPage() {
       const data = await r.json();
       if (!r.ok) { toastErr(data.detail || "上传失败"); return; }
       toastOk(`背景图已上传：${name}`);
-      setSelectedBgId(data.id);
+      setSelectedBgIds((prev) => [...prev, data.id]);
       await loadBackgrounds();
     } catch (e: any) { toastErr(`上传失败：${e?.message || e}`); }
   };
@@ -158,9 +189,15 @@ export default function TextRemixPage() {
       method: "DELETE", headers,
     });
     if (r.ok) {
-      if (selectedBgId === id) setSelectedBgId(null);
+      setSelectedBgIds((prev) => prev.filter((x) => x !== id));
       await loadBackgrounds();
     }
+  };
+
+  const toggleBg = (id: number) => {
+    setSelectedBgIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
   };
 
   // ── 步骤 4：生成 ──────────────────────────────────────────────────────
@@ -170,29 +207,66 @@ export default function TextRemixPage() {
   const [results, setResults] = useState<ResultItem[]>([]);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
 
+  // ── localStorage 缓存：刷新页面后状态不丢 ─────────────────────────────
+  const _firstLoad = useRef(true);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(PERSIST_KEY);
+      if (!raw) return;
+      const d = JSON.parse(raw);
+      if (d.postUrl) setPostUrl(d.postUrl);
+      if (d.extractedText) setExtractedText(d.extractedText);
+      if (typeof d.ocrModelId === "number") setOcrModelId(d.ocrModelId);
+      if (typeof d.styleHint === "string") setStyleHint(d.styleHint);
+      if (typeof d.count === "number") setCount(d.count);
+      if (Array.isArray(d.selectedBgIds)) setSelectedBgIds(d.selectedBgIds);
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [PERSIST_KEY]);
+  useEffect(() => {
+    if (_firstLoad.current) { _firstLoad.current = false; return; }
+    try {
+      localStorage.setItem(PERSIST_KEY, JSON.stringify({
+        postUrl, extractedText, ocrModelId, styleHint, count, selectedBgIds,
+      }));
+    } catch {}
+  }, [postUrl, extractedText, ocrModelId, styleHint, count, selectedBgIds, PERSIST_KEY]);
+
   const handleGenerate = async () => {
     if (!extractedText.trim()) { toastErr("请先提取并确认文字"); return; }
-    if (!selectedBgId) { toastErr("请选择或上传一张背景图"); return; }
+    if (selectedBgIds.length === 0) { toastErr("请至少选一张背景图"); return; }
     setGenerating(true);
     setResults([]);
     try {
-      const r = await fetch(IMAGE_API("/text-remix/generate"), {
-        method: "POST", headers,
-        body: JSON.stringify({
-          background_id: selectedBgId,
-          text_content: extractedText,
-          count,
-          style_hint: styleHint.trim(),
-        }),
-      });
-      const data = await r.json();
-      if (!r.ok) {
-        toastErr(data.detail || "生成失败");
-        return;
+      // 多张背景图按顺序生成；每张背景图各调一次后端，count 张/张背景
+      const all: ResultItem[] = [];
+      for (const bgId of selectedBgIds) {
+        const bg = backgrounds.find((b) => b.id === bgId);
+        const r = await fetch(IMAGE_API("/text-remix/generate"), {
+          method: "POST", headers,
+          body: JSON.stringify({
+            background_id: bgId,
+            text_content: extractedText,
+            count,
+            style_hint: styleHint.trim(),
+          }),
+        });
+        const data = await r.json();
+        if (!r.ok) {
+          toastErr(`背景「${bg?.name || bgId}」生成失败：${data.detail || "未知"}`);
+          continue;
+        }
+        // 给每条结果带上 bg 名字，方便区分
+        const items: ResultItem[] = (data.results || []).map((x: any) => ({
+          ...x,
+          bg_name: bg?.name || `背景 ${bgId}`,
+        } as any));
+        all.push(...items);
+        setResults([...all]);  // 流式更新
       }
-      setResults(data.results || []);
-      const ok = (data.results || []).filter((x: ResultItem) => x.image_url).length;
-      toastOk(`生成完成：${ok}/${count} 张成功`);
+      const ok = all.filter((x) => x.image_url).length;
+      const total = selectedBgIds.length * count;
+      toastOk(`生成完成：${ok}/${total} 张成功（${selectedBgIds.length} 个背景 × ${count}）`);
     } catch (e: any) { toastErr(`生成失败：${e?.message || e}`); }
     finally { setGenerating(false); }
   };
@@ -262,26 +336,29 @@ export default function TextRemixPage() {
           </CardHeader>
           <CardBody className="space-y-3">
             <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-7 gap-2">
-              {post.images.map((u, i) => (
-                <button key={i} type="button"
-                  onClick={() => setSourceImgIdx(i)}
-                  className={`relative aspect-square rounded-md overflow-hidden border-2 transition ${
-                    i === sourceImgIdx ? "border-secondary" : "border-transparent hover:border-default-300"
-                  }`}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={u.startsWith("data:") ? u : proxyUrl(u)} alt={`图 ${i + 1}`}
-                    referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover" />
-                  <span className="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1.5 rounded">
-                    {i + 1}
-                  </span>
-                  {i === sourceImgIdx && (
-                    <span className="absolute top-1 right-1 bg-secondary text-white text-[10px] px-1.5 rounded flex items-center gap-0.5">
-                      <Check size={10} />选中
+              {post.images.map((u, i) => {
+                const on = sourceImgIdxs.includes(i);
+                return (
+                  <button key={i} type="button"
+                    onClick={() => toggleSourceImg(i)}
+                    className={`relative aspect-square rounded-md overflow-hidden border-2 transition ${
+                      on ? "border-secondary" : "border-transparent hover:border-default-300"
+                    }`}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={u.startsWith("data:") ? u : proxyUrl(u)} alt={`图 ${i + 1}`}
+                      referrerPolicy="no-referrer"
+                      className="w-full h-full object-cover" />
+                    <span className="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1.5 rounded">
+                      {i + 1}
                     </span>
-                  )}
-                </button>
-              ))}
+                    {on && (
+                      <span className="absolute top-1 right-1 bg-secondary text-white text-[10px] px-1.5 rounded flex items-center gap-0.5">
+                        <Check size={10} />
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
 
             {/* OCR 结果：可编辑 */}
@@ -335,21 +412,23 @@ export default function TextRemixPage() {
             </div>
           ) : (
             <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-7 gap-2">
-              {backgrounds.map((bg) => (
+              {backgrounds.map((bg) => {
+                const on = selectedBgIds.includes(bg.id);
+                return (
                 <div key={bg.id}
                   className={`relative aspect-square rounded-md overflow-hidden border-2 transition cursor-pointer group ${
-                    selectedBgId === bg.id ? "border-secondary" : "border-transparent hover:border-default-300"
+                    on ? "border-secondary" : "border-transparent hover:border-default-300"
                   }`}
-                  onClick={() => setSelectedBgId(bg.id)}>
+                  onClick={() => toggleBg(bg.id)}>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={proxyUrl(bg.image_url)} alt={bg.name}
                     className="w-full h-full object-cover" />
                   <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-[10px] px-1 py-0.5 truncate">
                     {bg.name}
                   </span>
-                  {selectedBgId === bg.id && (
+                  {on && (
                     <span className="absolute top-1 right-1 bg-secondary text-white text-[10px] px-1.5 rounded flex items-center gap-0.5">
-                      <Check size={10} />选中
+                      <Check size={10} />
                     </span>
                   )}
                   <button type="button"
@@ -358,7 +437,8 @@ export default function TextRemixPage() {
                     <Trash2 size={10} />
                   </button>
                 </div>
-              ))}
+              );
+              })}
             </div>
           )}
         </CardBody>
@@ -400,18 +480,20 @@ export default function TextRemixPage() {
           <Button color="secondary" size="lg" className="w-full"
             startContent={<Wand2 size={18} />}
             isLoading={generating}
-            isDisabled={!extractedText.trim() || !selectedBgId || generating}
+            isDisabled={!extractedText.trim() || selectedBgIds.length === 0 || generating}
             onPress={handleGenerate}>
-            {generating ? "生成中…" : `生成 ${count} 张`}
+            {generating
+              ? "生成中…"
+              : `生成 ${selectedBgIds.length || 0} 个背景 × ${count} = ${(selectedBgIds.length || 0) * count} 张`}
           </Button>
           {!extractedText.trim() && (
             <p className="text-xs text-warning-600 flex items-center gap-1">
               <AlertCircle size={12} />请先在上方提取并确认文字
             </p>
           )}
-          {extractedText.trim() && !selectedBgId && (
+          {extractedText.trim() && selectedBgIds.length === 0 && (
             <p className="text-xs text-warning-600 flex items-center gap-1">
-              <AlertCircle size={12} />请选择一张背景图
+              <AlertCircle size={12} />请至少选一张背景图（可多选）
             </p>
           )}
         </CardBody>
@@ -442,10 +524,18 @@ export default function TextRemixPage() {
                           className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 bg-black/60 text-white p-1.5 rounded transition">
                           <Download size={14} />
                         </a>
+                        {r.bg_name && (
+                          <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-[10px] px-1.5 py-0.5 truncate">
+                            背景：{r.bg_name}
+                          </span>
+                        )}
                       </>
                     ) : (
-                      <div className="w-full h-full flex items-center justify-center text-xs text-danger px-2 text-center">
-                        {r.error?.slice(0, 80) || "失败"}
+                      <div className="w-full h-full flex flex-col items-center justify-center text-xs text-danger px-2 text-center gap-1">
+                        <span>{r.error?.slice(0, 80) || "失败"}</span>
+                        {r.bg_name && (
+                          <span className="text-default-400 text-[10px]">{r.bg_name}</span>
+                        )}
                       </div>
                     )}
                   </div>
