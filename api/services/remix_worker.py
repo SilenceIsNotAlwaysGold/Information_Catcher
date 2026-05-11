@@ -44,9 +44,25 @@ REMIX_PROMPT_EN = (
     "not a copy. High quality, 8k, professional product photography, sharp focus."
 )
 
+# 文案改写 system prompt 模板。{n_total} {set_idx} 是占位符，渲染时替换。
+# 前端"高级选项"展示这份默认让用户编辑；空时 worker 用默认。
+CAPTION_PROMPT_TEMPLATE = (
+    "你是专业的小红书爆款笔记仿写者。用户给你一篇原作品的标题和正文，"
+    "你要写一份新版本（这是 {n_total} 个版本中的第 {set_idx} 个）。\n\n"
+    "**核心要求**：\n"
+    "1. 保留原作品的核心卖点、商品信息、关键数字（如尺码、价格、用法）\n"
+    "2. 标题：18 字内，换一个完全不同的钩子句（数字 / 反问 / 反差 / 提醒），不要照抄\n"
+    "3. 正文：200-300 字，3-5 段，每段开头 emoji，关键词用 ** 加粗\n"
+    "4. 第一人称视角，给生活场景细节（地点 / 心情 / 对比）\n"
+    "5. 结尾给 3-5 个话题标签 #xxx#\n"
+    "6. 多个版本之间要明显不同：换不同的切入角度、不同的故事场景、不同的情绪基调\n\n"
+    '严格按 JSON 输出，不要任何解释：{{"title": "...", "body": "..."}}'
+)
+
 
 def _prompt_with_caption(
     caption_title: str, caption_body: str, style_keywords: str = "",
+    base_prompt: str = "",
 ) -> str:
     """把当前套的"变种文案主题" + 用户自定义风格关键词 注入图片 prompt。
 
@@ -56,7 +72,7 @@ def _prompt_with_caption(
     优先级最高，附加到 prompt 末尾。
     """
     theme = (caption_title or caption_body or "").strip()
-    parts = [REMIX_PROMPT_EN]
+    parts = [(base_prompt or REMIX_PROMPT_EN).strip()]
     if theme:
         theme = theme[:200].replace("\n", " ").strip()
         parts.append(
@@ -116,6 +132,7 @@ async def _download_ref_image(url: str) -> Optional[bytes]:
 
 async def _generate_caption(
     *, post_title: str, post_desc: str, set_idx: int, n_total: int,
+    prompt_template: str = "",
 ) -> tuple[str, str, str]:
     """让 AI 基于原文案改写一份新版本（标题 + 正文）。返回 (title, body, error)。"""
     ai_base_url = (await monitor_db.get_setting("ai_base_url", "")).strip()
@@ -124,18 +141,13 @@ async def _generate_caption(
     if not ai_base_url or not ai_api_key:
         return "", "", "AI 未配置"
 
-    system_prompt = (
-        "你是专业的小红书爆款笔记仿写者。用户给你一篇原作品的标题和正文，"
-        f"你要写一份新版本（这是 {n_total} 个版本中的第 {set_idx} 个）。\n\n"
-        "**核心要求**：\n"
-        "1. 保留原作品的核心卖点、商品信息、关键数字（如尺码、价格、用法）\n"
-        "2. 标题：18 字内，换一个完全不同的钩子句（数字 / 反问 / 反差 / 提醒），不要照抄\n"
-        "3. 正文：200-300 字，3-5 段，每段开头 emoji，关键词用 ** 加粗\n"
-        "4. 第一人称视角，给生活场景细节（地点 / 心情 / 对比）\n"
-        "5. 结尾给 3-5 个话题标签 #xxx#\n"
-        "6. 多个版本之间要明显不同：换不同的切入角度、不同的故事场景、不同的情绪基调\n\n"
-        '严格按 JSON 输出，不要任何解释：{"title": "...", "body": "..."}'
-    )
+    # 用用户传入的模板（若有）或默认模板；占位符 {n_total} {set_idx} 渲染时替换
+    tpl = (prompt_template or "").strip() or CAPTION_PROMPT_TEMPLATE
+    try:
+        system_prompt = tpl.format(n_total=n_total, set_idx=set_idx)
+    except (KeyError, IndexError, ValueError):
+        # 用户传了不规范模板（少了占位符或多余 {}），退回默认
+        system_prompt = CAPTION_PROMPT_TEMPLATE.format(n_total=n_total, set_idx=set_idx)
     user_msg = (
         f"原标题：{post_title}\n\n"
         f"原正文：{post_desc[:600]}\n\n"
@@ -226,6 +238,8 @@ async def _gen_one_set(
     size: str, refs_bytes: list, set_idx: int, total: int,
     post_title: str, post_desc: str, user_id: Optional[int] = None,
     style_keywords: str = "",
+    image_prompt_override: str = "",
+    caption_prompt_template: str = "",
     progress_cb=None,
     cancel_check=None,
 ) -> dict:
@@ -261,11 +275,15 @@ async def _gen_one_set(
     title, body, cerr = await _generate_caption(
         post_title=post_title, post_desc=post_desc,
         set_idx=set_idx, n_total=total,
+        prompt_template=caption_prompt_template,
     )
     await _emit(title, body, cerr)
 
     # ── 第 2 步：派生 prompt ─────────────────────────────────────────────
-    image_prompt = _prompt_with_caption(title, body, style_keywords=style_keywords)
+    image_prompt = _prompt_with_caption(
+        title, body, style_keywords=style_keywords,
+        base_prompt=image_prompt_override,
+    )
 
     # ── 第 3 步：套内 K 张并发 ───────────────────────────────────────────
     if cancel_check and await cancel_check():
@@ -359,6 +377,8 @@ async def _process_task(task: dict) -> None:
     refs_bytes = [b for (_, b) in refs_bytes_with_idx]
 
     style_keywords = (task.get("style_keywords") or "").strip()
+    image_prompt_override = (task.get("image_prompt") or "").strip()
+    caption_prompt_template = (task.get("caption_prompt") or "").strip()
 
     async def _is_cancelled() -> bool:
         try:
@@ -403,6 +423,8 @@ async def _process_task(task: dict) -> None:
                     post_desc=task.get("post_desc") or "",
                     user_id=user_id,
                     style_keywords=style_keywords,
+                    image_prompt_override=image_prompt_override,
+                    caption_prompt_template=caption_prompt_template,
                     progress_cb=_progress,
                     cancel_check=_is_cancelled,
                 )

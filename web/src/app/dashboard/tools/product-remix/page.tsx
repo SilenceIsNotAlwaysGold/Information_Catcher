@@ -87,6 +87,24 @@ export default function ProductRemixPage() {
   // ── 步骤 2：提交参数 ────────────────────────────────────────────────────
   const [count, setCount] = useState(5);
   const [styleKeywords, setStyleKeywords] = useState("");
+  // 高级：用户自定义 prompt（留空则用默认）
+  const [imagePrompt, setImagePrompt] = useState("");
+  const [captionPrompt, setCaptionPrompt] = useState("");
+  const [imagePromptDefault, setImagePromptDefault] = useState("");
+  const [captionPromptDefault, setCaptionPromptDefault] = useState("");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  // 拉默认 prompt 一次性
+  useEffect(() => {
+    fetch(IMAGE_API("/remix-default-prompts"), { headers })
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => {
+        if (d?.image_prompt) setImagePromptDefault(d.image_prompt);
+        if (d?.caption_prompt) setCaptionPromptDefault(d.caption_prompt);
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 切换勾选某一张图作参考；保持点击顺序作为生成顺序
   const toggleRef = (i: number) => {
@@ -181,6 +199,8 @@ export default function ProductRemixPage() {
           ref_image_idx: refIdxs[0] ?? 0,
           count,
           style_keywords: styleKeywords.trim(),
+          image_prompt: imagePrompt.trim(),
+          caption_prompt: captionPrompt.trim(),
         }),
       });
       const data = await r.json().catch(() => ({}));
@@ -512,6 +532,67 @@ export default function ProductRemixPage() {
                   </button>
                 ))}
               </div>
+            </div>
+
+            {/* 高级：自定义 prompt（图片 + 文案） */}
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setAdvancedOpen((v) => !v)}
+                className="text-sm text-default-600 hover:text-default-900 flex items-center gap-1"
+              >
+                <span>{advancedOpen ? "▾" : "▸"}</span>
+                高级：自定义 Prompt
+                {!advancedOpen && (imagePrompt || captionPrompt) && (
+                  <span className="text-xs text-secondary ml-2">（已修改）</span>
+                )}
+              </button>
+              {advancedOpen && (
+                <div className="space-y-3 p-3 rounded-md bg-default-50 border border-default-200">
+                  <div>
+                    <div className="flex justify-between items-center mb-1">
+                      <p className="text-xs text-default-700">图片仿写 Prompt（追加文案主题 + 风格关键词后传给图模型）</p>
+                      <button
+                        type="button"
+                        className="text-xs text-primary hover:underline"
+                        onClick={() => setImagePrompt(imagePromptDefault)}
+                      >
+                        填入默认
+                      </button>
+                    </div>
+                    <textarea
+                      className="w-full border border-divider rounded-md p-2 text-xs font-mono bg-background min-h-[100px]"
+                      placeholder={imagePromptDefault || "留空则用默认模板"}
+                      value={imagePrompt}
+                      onChange={(e) => setImagePrompt(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <div className="flex justify-between items-center mb-1">
+                      <p className="text-xs text-default-700">
+                        文案改写 System Prompt
+                        <span className="text-default-400 ml-1">（占位符 <code className="text-rose-500">{`{n_total}`}</code> / <code className="text-rose-500">{`{set_idx}`}</code> 会被替换）</span>
+                      </p>
+                      <button
+                        type="button"
+                        className="text-xs text-primary hover:underline"
+                        onClick={() => setCaptionPrompt(captionPromptDefault)}
+                      >
+                        填入默认
+                      </button>
+                    </div>
+                    <textarea
+                      className="w-full border border-divider rounded-md p-2 text-xs font-mono bg-background min-h-[160px]"
+                      placeholder={captionPromptDefault || "留空则用默认模板"}
+                      value={captionPrompt}
+                      onChange={(e) => setCaptionPrompt(e.target.value)}
+                    />
+                  </div>
+                  <p className="text-[11px] text-default-400">
+                    留空 = 用默认模板；修改后会覆盖默认逻辑，请保证格式正确（特别是文案 prompt 末尾的 JSON 输出要求）。
+                  </p>
+                </div>
+              )}
             </div>
 
             <Button

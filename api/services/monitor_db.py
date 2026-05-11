@@ -715,6 +715,8 @@ async def _migrate(db):
     await _ensure_column(db, "remix_tasks", "ref_image_urls", "TEXT DEFAULT ''")
     # 用户自定义风格关键词（追加在 image edits prompt 末尾），如"日系简约"
     await _ensure_column(db, "remix_tasks", "style_keywords", "TEXT DEFAULT ''")
+    await _ensure_column(db, "remix_tasks", "image_prompt", "TEXT DEFAULT ''")
+    await _ensure_column(db, "remix_tasks", "caption_prompt", "TEXT DEFAULT ''")
     # 博主追新健康度 + 未读：让列表能区分"挂了 / 卡 cookie / 有新内容"
     await _ensure_column(db, "monitor_creators", "last_check_status", "TEXT DEFAULT 'unknown'")
     await _ensure_column(db, "monitor_creators", "last_check_error",  "TEXT DEFAULT ''")
@@ -2776,6 +2778,8 @@ async def create_remix_task(
     ref_image_idxs: Optional[List[int]] = None,
     count: int = 1, size: str = "",
     style_keywords: str = "",
+    image_prompt: str = "",
+    caption_prompt: str = "",
 ) -> int:
     """创建 remix 任务。
 
@@ -2792,12 +2796,14 @@ async def create_remix_task(
                (user_id, status, post_url, post_title, post_desc, platform,
                 ref_image_url, ref_image_idx,
                 ref_image_urls, ref_image_idxs,
-                count, done_count, items_json, size, style_keywords)
-               VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?, ?)""",
+                count, done_count, items_json, size, style_keywords,
+                image_prompt, caption_prompt)
+               VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?, ?, ?, ?)""",
             (user_id, post_url, post_title, post_desc, platform,
              ref_image_url, ref_image_idx,
              urls_json, idxs_json,
-             count, size, (style_keywords or "")[:200]),
+             count, size, (style_keywords or "")[:200],
+             (image_prompt or "")[:4000], (caption_prompt or "")[:4000]),
         )
         await db.commit()
         return cur.lastrowid or 0

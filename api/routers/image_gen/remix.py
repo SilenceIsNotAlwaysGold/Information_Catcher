@@ -39,6 +39,9 @@ class CreateRemixTaskRequest(BaseModel):
     size: Optional[str] = None   # 留空用配置默认
     # 用户自定义风格关键词，附加到 image edits prompt 末尾（"日系简约"等）
     style_keywords: Optional[str] = ""
+    # 高级：用户自定义 prompt（留空走默认模板）
+    image_prompt: Optional[str] = ""     # 图片生成 prompt 模板（替代 REMIX_PROMPT_EN）
+    caption_prompt: Optional[str] = ""   # 文案改写 system_prompt（替代 _generate_caption 默认）
 
 
 async def _fetch_image_dataurl(url: str, platform: str) -> str:
@@ -80,6 +83,21 @@ async def _fetch_image_dataurl(url: str, platform: str) -> str:
     except Exception as e:
         logger.warning(f"[remix/fetch-cover] download failed {url[:80]}: {e}")
         return ""
+
+
+@router.get("/remix-default-prompts", summary="获取仿写默认 prompt 模板（图片 + 文案）")
+async def remix_default_prompts(
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """前端"高级选项"展示+编辑默认 prompt 模板。
+    用户留空时 worker 用这套默认；填了就用用户的覆盖。
+    caption_prompt 里 {n_total} 和 {set_idx} 是占位符，worker 渲染时替换。
+    """
+    from ..services.remix_worker import REMIX_PROMPT_EN, CAPTION_PROMPT_TEMPLATE
+    return {
+        "image_prompt": REMIX_PROMPT_EN,
+        "caption_prompt": CAPTION_PROMPT_TEMPLATE,
+    }
 
 
 @router.post("/fetch-post-cover", summary="拉取作品所有图 + 文案（仿写第一步）")
@@ -236,6 +254,8 @@ async def create_remix_task(
         count=count,
         size=(req.size or "").strip(),
         style_keywords=(req.style_keywords or "").strip(),
+        image_prompt=(req.image_prompt or "").strip(),
+        caption_prompt=(req.caption_prompt or "").strip(),
     )
 
     try:
