@@ -327,9 +327,30 @@ async def call_vision_ocr(
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-            text_out = (data["choices"][0]["message"]["content"] or "").strip()
+                # 不让 raise_for_status 吞掉 body；优先看 status + 看 body 给细节
+                body_text = resp.text or ""
+                if resp.status_code >= 400:
+                    # 模型 API 报错：把 status + 前 300 字 body 透出来，方便定位
+                    raise RuntimeError(
+                        f"模型 API HTTP {resp.status_code}: {body_text[:300]}"
+                    )
+                if not body_text.strip():
+                    raise RuntimeError(
+                        f"模型 API 返回空响应（HTTP {resp.status_code}）。"
+                        "可能模型不支持视觉或被网关截断。"
+                    )
+                try:
+                    data = resp.json()
+                except Exception:
+                    raise RuntimeError(
+                        f"模型 API 返回非 JSON：{body_text[:300]}"
+                    )
+            choices = data.get("choices") or []
+            if not choices or not isinstance(choices, list):
+                raise RuntimeError(
+                    f"模型未返回 choices。原始响应：{str(data)[:300]}"
+                )
+            text_out = (choices[0].get("message", {}).get("content") or "").strip()
             usage = data.get("usage") or {}
             await _log_usage(
                 user_id=user_id, model=model, feature=feature,
