@@ -181,109 +181,123 @@ async def _process_task(task: dict) -> None:
         except Exception:
             return False
 
-    # items_indexed[set_idx-1]: {idx, items:[{src_idx, bg_id, bg_name, image_url, error}]}
-    items_indexed: list[Optional[dict]] = [None] * count
+    # 跨套全 fire：把所有 (set_idx × src × bg) cells 拍成一个大池子，
+    # 由 image 模型的 max_concurrent semaphore 控制实际并发（用户设 20 就跑 20）。
+    # 之前按套同步阻塞，每套小（如 1-2 张）时白白浪费并发额度。
+    sets_cells: list[list[dict]] = []   # sets_cells[set_idx-1] = list of cells
+    for _ in range(count):
+        cells: list[dict] = []
+        for src in text_sources:
+            src_idx = int(src.get("src_idx", 0))
+            text = (src.get("text") or "").strip()
+            if not text:
+                continue
+            for bg_id in bg_ids:
+                if int(bg_id) not in bg_bytes_map:
+                    continue
+                meta = bgs_meta_map.get(int(bg_id)) or {}
+                cells.append({
+                    "src_idx": src_idx,
+                    "bg_id": int(bg_id),
+                    "bg_name": meta.get("name", f"背景{bg_id}"),
+                    "text": text,
+                    "image_url": "",
+                    "error": "",
+                })
+        sets_cells.append(cells)
+
+    if not any(sets_cells):
+        await monitor_db.finish_text_remix_task(
+            task_id, status="error", error="没有可生成的格子（文字或背景全部无效）")
+        return
+
+    # items_indexed[set_idx-1]: {idx, items:[cells]} — 初始全部占位
+    items_indexed: list[Optional[dict]] = [
+        {"idx": i + 1, "items": [dict(c) for c in sets_cells[i]]}
+        for i in range(count)
+    ]
     progress_lock = asyncio.Lock()
-    finished_sets = 0
+
+    def _count_finished_sets() -> int:
+        n = 0
+        for s in items_indexed:
+            if not s:
+                continue
+            if all((c.get("image_url") or c.get("error")) for c in s["items"]):
+                n += 1
+        return n
 
     async def _flush():
-        snapshot = [it for it in items_indexed if it is not None]
         try:
             await monitor_db.update_text_remix_task_progress(
-                task_id, items_json=json.dumps(snapshot, ensure_ascii=False),
-                done_count=finished_sets,
+                task_id, items_json=json.dumps(items_indexed, ensure_ascii=False),
+                done_count=_count_finished_sets(),
             )
         except Exception as e:
             logger.warning(f"[text_remix_worker] flush failed: {e}")
 
+    # 立刻写一次：让前端看到全部套的占位（不再"只能看到第 1 套"）
+    await _flush()
+
     timeout = httpx.Timeout(600.0, connect=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for set_idx in range(1, count + 1):
-            if await _is_cancelled():
-                break
 
-            # 套内并发：所有 (src × bg) 组合一起跑，受 image 模型 max_concurrent 兜底
-            cells: list[dict] = []
-            for src in text_sources:
-                src_idx = int(src.get("src_idx", 0))
-                text = (src.get("text") or "").strip()
-                if not text:
-                    continue
-                for bg_id in bg_ids:
-                    if int(bg_id) not in bg_bytes_map:
-                        continue
-                    meta = bgs_meta_map.get(int(bg_id)) or {}
-                    cells.append({
-                        "src_idx": src_idx,
-                        "bg_id": int(bg_id),
-                        "bg_name": meta.get("name", f"背景{bg_id}"),
-                        "text": text,
-                        "image_url": "",
-                        "error": "",
-                    })
-            # 初始化当前套的占位（让前端立刻看到"生成中"）
+        async def _one_cell(set_idx: int, ci: int, cell: dict):
+            # 任务取消：直接跳过（不算 error，前端会看到"未生成"占位）
+            if await _is_cancelled():
+                return
+            prompt = _build_prompt(cell["text"], style_hint)
+            bg_bytes = bg_bytes_map[cell["bg_id"]]
+            try:
+                result = await _gen_one_cell(
+                    client, base_url=base_url, api_key=api_key, model=model,
+                    size=size, bg_bytes=bg_bytes, prompt=prompt,
+                    image_model_row_id=img_row_id,
+                    image_max_concurrent=img_max_concurrent,
+                    user_id=user_id,
+                )
+            except Exception as e:
+                logger.exception(
+                    f"[text_remix_worker] task {task_id} set {set_idx} cell {ci} crash")
+                result = {"image_url": "", "b64": "",
+                          "error": f"内部异常：{type(e).__name__}: {str(e)[:200]}"}
+
+            cell["image_url"] = result.get("image_url", "")
+            cell["error"] = result.get("error", "")
             async with progress_lock:
                 items_indexed[set_idx - 1] = {
                     "idx": set_idx,
-                    "items": [dict(c, image_url="", error="") for c in cells],
+                    "items": [dict(c) for c in sets_cells[set_idx - 1]],
                 }
                 await _flush()
 
-            sem = asyncio.Lock()
-
-            async def _one_cell(ci: int, cell: dict):
-                prompt = _build_prompt(cell["text"], style_hint)
-                bg_bytes = bg_bytes_map[cell["bg_id"]]
+            # 写历史（image_gen_history）：飞书同步 + 全局历史用
+            if cell["image_url"]:
                 try:
-                    result = await _gen_one_cell(
-                        client, base_url=base_url, api_key=api_key, model=model,
-                        size=size, bg_bytes=bg_bytes, prompt=prompt,
-                        image_model_row_id=img_row_id,
-                        image_max_concurrent=img_max_concurrent,
+                    await monitor_db.add_image_history(
                         user_id=user_id,
+                        prompt=prompt[:500], size=size, model=model,
+                        set_idx=set_idx, in_set_idx=ci + 1,
+                        local_url=cell["image_url"],
+                        qiniu_url=cell["image_url"],
+                        upload_status="uploaded",
+                        generated_title=cell["text"][:120],
+                        generated_body="",
+                        batch_id=f"text_remix:{task_id}",
+                        source_post_url=task.get("post_url") or "",
+                        source_post_title=task.get("post_title") or "",
+                        used_reference=True,
                     )
                 except Exception as e:
-                    logger.exception(
-                        f"[text_remix_worker] task {task_id} set {set_idx} cell {ci} crash")
-                    result = {"image_url": "", "b64": "",
-                              "error": f"内部异常：{type(e).__name__}: {str(e)[:200]}"}
-                async with sem:
-                    cells[ci]["image_url"] = result.get("image_url", "")
-                    cells[ci]["error"] = result.get("error", "")
-                    async with progress_lock:
-                        items_indexed[set_idx - 1] = {
-                            "idx": set_idx,
-                            "items": [dict(c) for c in cells],
-                        }
-                        await _flush()
-                    # 写历史（image_gen_history）：飞书同步 / 全局历史用
-                    if cells[ci]["image_url"]:
-                        try:
-                            await monitor_db.add_image_history(
-                                user_id=user_id,
-                                prompt=prompt[:500], size=size, model=model,
-                                set_idx=set_idx, in_set_idx=ci + 1,
-                                local_url=cells[ci]["image_url"],
-                                qiniu_url=cells[ci]["image_url"],
-                                upload_status="uploaded",
-                                generated_title=cell["text"][:120],
-                                generated_body="",
-                                batch_id=f"text_remix:{task_id}",
-                                source_post_url=task.get("post_url") or "",
-                                source_post_title=task.get("post_title") or "",
-                                used_reference=True,
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                f"[text_remix_worker] write history failed: {e}")
+                    logger.warning(
+                        f"[text_remix_worker] write history failed: {e}")
 
-            # 跑当前套
-            await asyncio.gather(
-                *(_one_cell(i, c) for i, c in enumerate(cells)),
-                return_exceptions=False,
-            )
-            finished_sets += 1
-            await _flush()
+        # 一次 fire 全部 cells（跨套），由 acquire_slot semaphore 兜底限流
+        all_jobs = []
+        for si, cells in enumerate(sets_cells):
+            for ci, c in enumerate(cells):
+                all_jobs.append(_one_cell(si + 1, ci, c))
+        await asyncio.gather(*all_jobs, return_exceptions=False)
 
     # 终态：done 或 cancelled
     final_status = "cancelled" if await _is_cancelled() else "done"
