@@ -283,6 +283,23 @@ export function HistoryGrid({ isAdmin, onPreview }: Props) {
                         {g.all_synced && (
                           <Chip size="sm" color="success" variant="flat">已同步</Chip>
                         )}
+                        {/* 实际使用的模型（取本组第一张图的 model 字段） */}
+                        {(() => {
+                          const m = (g.items[0]?.model || "").trim();
+                          if (!m) return null;
+                          return (
+                            <Chip size="sm" variant="flat" className="font-mono"
+                              title={`生成时使用的模型：${m}`}>
+                              {m}
+                            </Chip>
+                          );
+                        })()}
+                        {/* 尺寸 */}
+                        {g.items[0]?.size && (
+                          <Chip size="sm" variant="flat" className="font-mono text-default-500">
+                            {g.items[0].size}
+                          </Chip>
+                        )}
                         <span className="text-xs text-default-400">{g.created_at}</span>
                       </div>
                       {g.body && (
