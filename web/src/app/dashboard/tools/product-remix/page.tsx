@@ -11,7 +11,7 @@ import { Chip } from "@nextui-org/chip";
 import {
   Wand2, AlertCircle, Link2, Check, Download, Copy, RefreshCcw, Trash2,
 } from "lucide-react";
-import { useMe } from "@/lib/useApi";
+import { useMe, useAiModels } from "@/lib/useApi";
 import { toastOk, toastErr } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
 
@@ -284,9 +284,13 @@ export default function ProductRemixPage() {
   const [activeTaskId, setActiveTaskId] = useState<number | null>(null);
   const [activeTask, setActiveTask] = useState<RemixTask | null>(null);
 
+  // P15: 兼容老 cfg + 新 ai_models
+  const { models: availableImageModels } = useAiModels("image");
+  const hasAnyImageModel = availableImageModels.length > 0 || !!cfg.has_key;
+
   const handleSubmit = async () => {
     if (!post) { toastErr("请先加载作品"); return; }
-    if (!cfg.has_key) { toastErr("请先在「系统配置」配置图像 API"); return; }
+    if (!hasAnyImageModel) { toastErr("请先让管理员在「AI 模型配置」上架图像模型"); return; }
     setSubmitting(true);
     try {
       const r = await fetch(IMAGE_API("/remix-tasks"), {
@@ -739,7 +743,7 @@ export default function ProductRemixPage() {
               startContent={<Wand2 size={18} />}
               onPress={handleSubmit}
               isLoading={submitting}
-              isDisabled={!cfg.has_key || submitting || !!activeTaskId}
+              isDisabled={!hasAnyImageModel || submitting || !!activeTaskId}
             >
               {activeTaskId
                 ? "已有任务进行中，请先关闭"
@@ -907,17 +911,38 @@ export default function ProductRemixPage() {
                               {si + 1}
                             </span>
                           </div>
-                        ) : (
+                        ) : sub.error ? (
+                          // 真实失败：worker 上报了错误信息
                           <div key={si} className="aspect-square rounded-md bg-default-100 flex items-center justify-center">
                             <span className="text-[10px] text-danger text-center px-1">
-                              {sub.error?.slice(0, 30) || "失败"}
+                              {sub.error.slice(0, 30)}
                             </span>
+                          </div>
+                        ) : activeTask?.status === "pending" || activeTask?.status === "running" ? (
+                          // 任务还在跑 → 这张图只是没生成到 → 显示生成中（带 spinner）
+                          <div key={si} className="aspect-square rounded-md bg-default-100 flex flex-col items-center justify-center gap-1">
+                            <Spinner size="sm" color="secondary" />
+                            <span className="text-[10px] text-default-400">生成中…</span>
+                          </div>
+                        ) : (
+                          // 任务结束但这张没生成 + 也无 error → 兜底"无图"
+                          <div key={si} className="aspect-square rounded-md bg-default-100 flex items-center justify-center">
+                            <span className="text-[10px] text-default-400">无图</span>
                           </div>
                         ))}
                       </div>
                     ) : (
-                      <div className="aspect-square rounded-md bg-default-100 flex items-center justify-center">
-                        <span className="text-xs text-default-400">{it.error || "等待中"}</span>
+                      <div className="aspect-square rounded-md bg-default-100 flex flex-col items-center justify-center gap-1">
+                        {it.error ? (
+                          <span className="text-xs text-danger px-2 text-center">{it.error.slice(0, 60)}</span>
+                        ) : activeTask?.status === "pending" || activeTask?.status === "running" ? (
+                          <>
+                            <Spinner size="sm" color="secondary" />
+                            <span className="text-xs text-default-400">生成中…</span>
+                          </>
+                        ) : (
+                          <span className="text-xs text-default-400">未开始</span>
+                        )}
                       </div>
                     )}
                     {it.title && (
