@@ -214,7 +214,7 @@ async def text_remix_generate(
 
     # 图配额：text-remix 每次生 count 张图（每张 1 次 image edits 调用）
     await quota_service.check_or_raise(
-        current_user, "daily_image_gen", delta=count,
+        current_user, "total_image_gen", delta=count,
     )
 
     bg = await monitor_db.get_text_remix_background(req.background_id, user_id)
@@ -400,7 +400,7 @@ async def create_text_remix_task(
     # 图配额：worker 会跑 count × len(sources_clean) × len(valid_ids) 张图
     expected_images = count * len(sources_clean) * len(valid_ids)
     await quota_service.check_or_raise(
-        current_user, "daily_image_gen", delta=expected_images,
+        current_user, "total_image_gen", delta=expected_images,
     )
 
     task_id = await monitor_db.add_text_remix_task(
@@ -515,7 +515,7 @@ async def clone_text_remix_task(
     expected_images = count * len(text_sources) * len(bg_ids)
     if expected_images > 0:
         await quota_service.check_or_raise(
-            current_user, "daily_image_gen", delta=expected_images,
+            current_user, "total_image_gen", delta=expected_images,
         )
 
     new_id = await monitor_db.add_text_remix_task(

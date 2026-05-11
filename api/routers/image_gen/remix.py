@@ -207,7 +207,7 @@ async def create_remix_task(
     expected_images = count * max(1, len(ref_idxs))
     expected_texts  = count
     await quota_service.check_or_raise(
-        current_user, "daily_image_gen", delta=expected_images,
+        current_user, "total_image_gen", delta=expected_images,
     )
     await quota_service.check_or_raise(
         current_user, "daily_text_gen", delta=expected_texts,
@@ -358,7 +358,7 @@ async def clone_remix_task(
     expected_images = count * max(1, len(ref_idxs))
     expected_texts  = count
     await quota_service.check_or_raise(
-        current_user, "daily_image_gen", delta=expected_images,
+        current_user, "total_image_gen", delta=expected_images,
     )
     await quota_service.check_or_raise(
         current_user, "daily_text_gen", delta=expected_texts,

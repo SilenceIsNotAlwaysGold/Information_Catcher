@@ -94,12 +94,33 @@ async def get_daily_usage(user_id: int) -> Dict[str, int]:
             }
 
 
+async def get_total_image_used(user_id: int) -> int:
+    """图配额改成"账户总累计"：SUM(daily_usage.image_gen_count)。
+
+    DB 不动，每天一行，单用户一年才 365 行 SUM 起来微秒级。
+    比起加 users.total_image_gen_count 列做一致性维护，这种实现更稳。
+    """
+    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+        async with db.execute(
+            "SELECT COALESCE(SUM(image_gen_count), 0) "
+            "  FROM daily_usage WHERE user_id=?",
+            (user_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0] or 0) if row else 0
+
+
 async def get_usage_summary(user: Dict[str, Any]) -> Dict[str, Any]:
-    """用户 profile 页 + admin 用户列表显示。返回 used / quota 对照。"""
+    """用户 profile 页 + admin 用户列表显示。返回 used / quota 对照。
+
+    图配额：累计（账户总历史），不重置。
+    文配额：每日 0 点重置。
+    """
     user_id = user["id"]
     monitor_posts = await count_monitor_posts(user_id)
     accounts = await count_accounts(user_id)
     daily = await get_daily_usage(user_id)
+    total_image = await get_total_image_used(user_id)
     return {
         "plan": user.get("plan") or "free",
         "monitor_posts": {
@@ -110,15 +131,21 @@ async def get_usage_summary(user: Dict[str, Any]) -> Dict[str, Any]:
             "used": accounts,
             "quota": _user_quota(user, "accounts"),
         },
-        "daily_image_gen": {
-            "used": daily["image_gen"],
-            "quota": _user_quota(user, "daily_image_gen"),
+        # 图配额：账户累计
+        "total_image_gen": {
+            "used": total_image,
+            "quota": _user_quota(user, "total_image_gen"),
         },
+        # 文配额：每日重置
         "daily_text_gen": {
             "used": daily["text_gen"],
             "quota": _user_quota(user, "daily_text_gen"),
         },
-        # deprecated（保留兼容老前端），值已不再变化
+        # deprecated（保留兼容老前端，旧 PlanUsageCard 还在读这两个 key）
+        "daily_image_gen": {
+            "used": daily["image_gen"],
+            "quota": _user_quota(user, "daily_image_gen"),
+        },
         "daily_remix_sets": {
             "used": daily["remix_sets"],
             "quota": _user_quota(user, "daily_remix_sets"),
@@ -141,14 +168,17 @@ async def check_or_raise(user: Dict[str, Any], key: str, *, delta: int = 1) -> N
         used = await count_monitor_posts(user_id)
     elif key == "accounts":
         used = await count_accounts(user_id)
+    elif key == "total_image_gen":
+        # 图配额：账户累计（账户存活期内总和）
+        used = await get_total_image_used(user_id)
     elif key == "daily_image_gen":
-        daily = await get_daily_usage(user_id)
-        used = daily["image_gen"]
+        # deprecated：旧端点仍可能传这个 key，兼容回退到 total
+        used = await get_total_image_used(user_id)
     elif key == "daily_text_gen":
         daily = await get_daily_usage(user_id)
         used = daily["text_gen"]
     elif key == "daily_remix_sets":
-        # deprecated：不再做检查（仿写图配额已合并到 daily_image_gen）
+        # deprecated：仿写图配额已并入 total_image_gen
         return
     else:
         return
@@ -176,8 +206,9 @@ async def check_or_raise(user: Dict[str, Any], key: str, *, delta: int = 1) -> N
 def _human(key: str) -> str:
     return {
         "monitor_posts": "监控帖子",
-        "accounts": "账号池",
-        "daily_image_gen": "今日 AI 生图",
+        "accounts": "已绑平台账号",
+        "total_image_gen": "AI 累计生图",
+        "daily_image_gen": "AI 累计生图",  # 老 key 别名（语义已改为累计）
         "daily_text_gen":  "今日 AI 写文",
         "daily_remix_sets": "今日仿写（已废弃）",
     }.get(key, key)

@@ -21,9 +21,10 @@ type UsageSummary = {
   plan: string;
   monitor_posts: Usage;
   accounts: Usage;
-  daily_image_gen: Usage;
-  daily_text_gen: Usage;
-  daily_remix_sets?: Usage;  // deprecated
+  total_image_gen: Usage;     // 账户累计生图（不重置）
+  daily_text_gen: Usage;      // 每日写文（0 点重置）
+  daily_image_gen?: Usage;    // deprecated 别名
+  daily_remix_sets?: Usage;   // deprecated
 };
 
 const PLAN_LABEL: Record<string, string> = {
@@ -36,23 +37,27 @@ const PLAN_COLOR: Record<string, "warning" | "default" | "primary" | "secondary"
   team: "secondary", enterprise: "success",
 };
 
-// 图 / 文 配额分轨：所有使用模型的板块都按这两个 key 累计
-//   - daily_image_gen：商品图自创 + 作品仿写换图 + 文字仿写印字 → 任何生图调用
-//   - daily_text_gen：作品仿写文案 → 任何 AI 文本生成
-type ItemKey = keyof Omit<UsageSummary, "plan" | "daily_remix_sets">;
+// 配额体系：
+//   - 图：账户**累计**额度（用完为止，不重置）→ total_image_gen
+//   - 文：每日重置                              → daily_text_gen
+type ItemKey = keyof Omit<UsageSummary, "plan" | "daily_image_gen" | "daily_remix_sets">;
 type ItemDef = { key: ItemKey; label: string; suffix: string; hint?: string };
-// 分两组：上方"账号资源"长期累计；下方"AI 用量"日清零
+
+// 账号资源：长期累计（监控帖子、已绑账号）
 const ACCOUNT_ITEMS: ItemDef[] = [
   { key: "monitor_posts", label: "监控帖子", suffix: "帖",
     hint: "已加入监控的小红书 / 抖音 / 公众号 帖子总数" },
   { key: "accounts",      label: "已绑平台账号", suffix: "个",
     hint: "绑到 Pulse 的小红书 / 抖音 / 公众号 cookie 账号数。爬虫用这些账号拿真实数据" },
 ];
-const AI_ITEMS: ItemDef[] = [
-  { key: "daily_image_gen", label: "今日生图", suffix: "张",
-    hint: "商品图 / 作品仿写 / 文字仿写 三个工具产生的图片合计" },
+// AI 用量：图按账户累计；文按每日重置
+const AI_IMAGE: ItemDef[] = [
+  { key: "total_image_gen", label: "累计生图", suffix: "张",
+    hint: "商品图 / 作品仿写 / 文字仿写 三个工具产生的图片合计。账户累计、不重置，用完为止" },
+];
+const AI_TEXT: ItemDef[] = [
   { key: "daily_text_gen",  label: "今日写文", suffix: "篇",
-    hint: "作品仿写每套 1 篇文案；其他 AI 写文场景未来也并入这里" },
+    hint: "作品仿写每套 1 篇文案；其他 AI 写文场景未来也并入这里。每日 0 点重置" },
 ];
 
 export function PlanUsageCard() {
@@ -211,15 +216,33 @@ export function PlanUsageCard() {
             {ACCOUNT_ITEMS.map((it) => renderUsageRow(it, usage[it.key]))}
           </div>
 
-          {/* AI 用量（每日 0 点重置） */}
+          {/* AI 用量：图配额账户累计 + 文配额每日重置 */}
           <div className="space-y-3 border-t border-divider pt-3">
-            <div className="flex items-center justify-between">
-              <p className="text-xs uppercase tracking-wider text-secondary font-semibold">
-                AI 用量
-              </p>
-              <span className="text-[10px] text-default-400">每日 0 点重置</span>
-            </div>
-            {AI_ITEMS.map((it) => renderUsageRow(it, usage[it.key]))}
+            <p className="text-xs uppercase tracking-wider text-secondary font-semibold">
+              AI 用量
+            </p>
+            {AI_IMAGE.map((it) => {
+              const u = usage[it.key];
+              return (
+                <div key={it.key}>
+                  {renderUsageRow(it, u)}
+                  <p className="text-[10px] text-default-400 mt-0.5 pl-0.5">
+                    账户累计配额，用完联系管理员加额度（不每日重置）
+                  </p>
+                </div>
+              );
+            })}
+            {AI_TEXT.map((it) => {
+              const u = usage[it.key];
+              return (
+                <div key={it.key}>
+                  {renderUsageRow(it, u)}
+                  <p className="text-[10px] text-default-400 mt-0.5 pl-0.5">
+                    每日 0 点重置
+                  </p>
+                </div>
+              );
+            })}
           </div>
 
           {plan === "trial" && (

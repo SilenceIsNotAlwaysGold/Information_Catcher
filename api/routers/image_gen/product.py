@@ -155,7 +155,7 @@ async def generate_image(
     n = max(1, min(int(req.n or 1), MAX_TOTAL))
 
     # 配额检查：今日商品图生成数（admin 不限）
-    await quota_service.check_or_raise(current_user, "daily_image_gen", delta=n)
+    await quota_service.check_or_raise(current_user, "total_image_gen", delta=n)
 
     size = (req.size or "").strip() or cfg_size
     auth_headers = {"Authorization": f"Bearer {api_key}"}
