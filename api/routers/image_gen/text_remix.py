@@ -98,6 +98,9 @@ async def delete_background(
 
 class ExtractTextRequest(BaseModel):
     image_url: str  # 作品原图的 URL（CDN），后端会代下
+    model_id: Optional[int] = None  # 可选指定 ai_models.id；None 走用户默认
+
+    model_config = {"protected_namespaces": ()}
 
 
 async def _fetch_image_as_dataurl(url: str) -> str:
@@ -149,12 +152,20 @@ async def extract_text(
         text = await ai_client.call_vision_ocr(
             image_data_url=data_url,
             user_id=int(current_user["id"]),
+            model_id=req.model_id,
             feature="text_remix_ocr",
         )
     except ai_client.AIModelNotConfigured as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"OCR 失败：{e}")
+        # Vision 模型 API 失败（如 DeepSeek 不支持视觉返回 400）→ 给清晰提示
+        msg = str(e)
+        if "400" in msg or "image" in msg.lower():
+            msg = (
+                "当前选中的模型不支持图片输入（如 DeepSeek 仅文本）。"
+                "请在「文本仿写」OCR 按钮旁切换为支持视觉的模型，如 GPT-4o / Claude 3.5 / Gemini / Qwen-VL 等。"
+            )
+        raise HTTPException(status_code=502, detail=f"OCR 失败：{msg}")
 
     return {"ok": True, "text": text}
 

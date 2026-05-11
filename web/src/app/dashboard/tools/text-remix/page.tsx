@@ -20,6 +20,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
 import { IMAGE_API, proxyUrl } from "@/components/product-image/utils";
 import { ImagePreviewModal } from "@/components/product-image/ImagePreviewModal";
+import { ModelSelector } from "@/components/ModelSelector";
 
 type FetchedPost = {
   images: string[];
@@ -88,6 +89,8 @@ export default function TextRemixPage() {
   // ── 步骤 2：OCR ───────────────────────────────────────────────────────
   const [ocring, setOcring] = useState(false);
   const [extractedText, setExtractedText] = useState("");
+  // 用户可选哪个模型做 OCR（必须支持视觉，如 gpt-4o / claude / gemini / qwen-vl）
+  const [ocrModelId, setOcrModelId] = useState<number | null>(null);
 
   const handleExtract = async () => {
     if (!post) return;
@@ -97,7 +100,7 @@ export default function TextRemixPage() {
     try {
       const r = await fetch(IMAGE_API("/text-remix/extract-text"), {
         method: "POST", headers,
-        body: JSON.stringify({ image_url: imgUrl }),
+        body: JSON.stringify({ image_url: imgUrl, model_id: ocrModelId }),
       });
       const data = await r.json();
       if (!r.ok) {
@@ -235,17 +238,26 @@ export default function TextRemixPage() {
       {post && (
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between w-full">
+            <div className="flex items-center justify-between w-full gap-3 flex-wrap">
               <div className="flex items-center gap-2">
                 <ImageIcon size={16} />
                 <span className="font-medium">② 选源图，提取文字</span>
                 <Chip size="sm" variant="flat">{post.images.length} 张</Chip>
               </div>
-              <Button color="secondary" size="sm" isLoading={ocring}
-                onPress={handleExtract}
-                isDisabled={!post.images.length}>
-                提取文字（OCR）
-              </Button>
+              <div className="flex items-end gap-2">
+                <ModelSelector
+                  usage="text"
+                  value={ocrModelId}
+                  onChange={setOcrModelId}
+                  label="OCR 模型（需支持视觉）"
+                  className="min-w-[200px]"
+                />
+                <Button color="secondary" size="sm" isLoading={ocring}
+                  onPress={handleExtract}
+                  isDisabled={!post.images.length}>
+                  提取文字（OCR）
+                </Button>
+              </div>
             </div>
           </CardHeader>
           <CardBody className="space-y-3">

@@ -61,6 +61,12 @@ BACKEND_FILES=(
   api/routers/image_gen/product.py
   api/routers/image_gen/text_remix.py
   api/routers/image_gen/_common.py
+  api/services/ai_client.py
+  api/services/audit_service.py
+  api/services/extension_dispatcher.py
+  api/services/quota_service.py
+  api/services/plans.py
+  api/services/invite_service.py
   api/schemas/monitor.py
   api/services/scheduler.py
   api/services/monitor_db.py

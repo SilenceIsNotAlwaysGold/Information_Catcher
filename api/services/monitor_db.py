@@ -787,6 +787,9 @@ async def _migrate(db):
     await _ensure_column(db, "remix_tasks", "image_model_id", "INTEGER")
     # P15.8: 每个模型独立的并发上限（0 = 不限）
     await _ensure_column(db, "ai_models", "max_concurrent", "INTEGER DEFAULT 0")
+    # 是否支持视觉输入（OCR / 图像理解）。DeepSeek 等纯文本模型应为 0；
+    # gpt-4o / claude-3.5-sonnet / gemini-1.5+ / qwen-vl 等为 1
+    await _ensure_column(db, "ai_models", "supports_vision", "INTEGER DEFAULT 0")
     # 博主追新健康度 + 未读：让列表能区分"挂了 / 卡 cookie / 有新内容"
     await _ensure_column(db, "monitor_creators", "last_check_status", "TEXT DEFAULT 'unknown'")
     await _ensure_column(db, "monitor_creators", "last_check_error",  "TEXT DEFAULT ''")
