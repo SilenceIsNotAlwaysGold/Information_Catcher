@@ -104,8 +104,10 @@ export default function TextRemixPage() {
     }
     setOcring(true);
     try {
-      // 多选时按顺序串行 OCR，再用分隔符拼起来；前端可编辑合并后的文字
+      // 多选时按顺序串行 OCR；任一张失败就停（避免重复抛同样的错误，且后续大概率也同样错）
       const parts: string[] = [];
+      let failedAt = -1;
+      let failMsg = "";
       for (const idx of sourceImgIdxs) {
         const imgUrl = post.image_urls[idx] || post.images[idx];
         if (!imgUrl) continue;
@@ -115,8 +117,9 @@ export default function TextRemixPage() {
         });
         const data = await r.json();
         if (!r.ok) {
-          toastErr(`第 ${idx + 1} 张 OCR 失败：${data.detail || "未知错误"}`);
-          continue;
+          failedAt = idx;
+          failMsg = data.detail || "未知错误";
+          break;
         }
         const txt = (data.text || "").trim();
         if (txt) {
@@ -126,8 +129,12 @@ export default function TextRemixPage() {
         }
       }
       const merged = parts.join("\n\n");
-      setExtractedText(merged);
-      toastOk(`已合并 ${parts.length} 张文字，请确认后再生成`);
+      if (merged) setExtractedText(merged);
+      if (failedAt >= 0) {
+        toastErr(`第 ${failedAt + 1} 张 OCR 失败：${failMsg.slice(0, 200)}`);
+      } else {
+        toastOk(`已合并 ${parts.length} 张文字，请确认后再生成`);
+      }
     } catch (e: any) { toastErr(`OCR 失败：${e?.message || e}`); }
     finally { setOcring(false); }
   };

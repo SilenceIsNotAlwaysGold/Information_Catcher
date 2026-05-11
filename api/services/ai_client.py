@@ -327,10 +327,25 @@ async def call_vision_ocr(
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, json=payload, headers=headers)
-                # 不让 raise_for_status 吞掉 body；优先看 status + 看 body 给细节
                 body_text = resp.text or ""
+                ct = (resp.headers.get("content-type") or "").lower()
+
+                # HTML 响应：base_url 几乎肯定配错（指向了前端 SPA / 反代未覆盖
+                # /chat/completions），给最明确的提示让 admin 自查
+                looks_like_html = (
+                    "<!doctype html" in body_text[:200].lower()
+                    or "<html" in body_text[:200].lower()
+                    or "text/html" in ct
+                )
+                if looks_like_html:
+                    raise RuntimeError(
+                        f"模型 API 返回的是 HTML 而不是 JSON —— "
+                        f"几乎可以确定 base_url 配错了。"
+                        f"实际请求 URL：{url} ；"
+                        f"请去 admin → AI 配置 检查模型「{model.display_name}」"
+                        f"所属 provider 的 base_url（应是 https://xxx/v1 这种）。"
+                    )
                 if resp.status_code >= 400:
-                    # 模型 API 报错：把 status + 前 300 字 body 透出来，方便定位
                     raise RuntimeError(
                         f"模型 API HTTP {resp.status_code}: {body_text[:300]}"
                     )
