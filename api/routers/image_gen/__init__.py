@@ -21,7 +21,7 @@ from fastapi.responses import Response
 from ..auth import get_current_user
 from ...services import monitor_db, image_upload_worker, storage
 from ._common import DEFAULT_SIZE, SaveImageConfigRequest, SyncImageBitableRequest
-from . import product, remix
+from . import product, remix, text_remix
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ router = APIRouter(prefix="/monitor/image", tags=["ImageGen"])
 # 子模块端点挂上来
 router.include_router(product.router)
 router.include_router(remix.router)
+router.include_router(text_remix.router)
 
 
 # ── 公共端点 ────────────────────────────────────────────────────────────────
@@ -144,11 +145,10 @@ async def list_history(
     limit: int = 100, offset: int = 0,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
+    # 「我的历史」始终按当前用户隔离，admin 也只看自己的
     user_id = current_user.get("id") if current_user else None
-    role = (current_user or {}).get("role") or "user"
-    scope_uid = None if role == "admin" else user_id
     rows = await monitor_db.list_image_history(
-        user_id=scope_uid,
+        user_id=user_id,
         limit=max(1, min(limit, 500)),
         offset=max(0, offset),
     )

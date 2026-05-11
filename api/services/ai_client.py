@@ -279,6 +279,79 @@ async def call_text(
     return await _do()
 
 
+async def call_vision_ocr(
+    *,
+    image_data_url: str,
+    user_id: Optional[int] = None,
+    model_id: Optional[int] = None,
+    feature: str = "ocr",
+    timeout: float = 60.0,
+    prompt: str = (
+        "你是 OCR 助手。请把图片里所有可见的中文/英文/数字文字按视觉阅读顺序"
+        "原样提取出来（保留换行 / 段落结构）。只输出文字本身，不要加引号、"
+        "解释、Markdown 标记。"
+    ),
+) -> str:
+    """用文本模型的 vision 能力对图片做 OCR，返回提取出的纯文本。
+
+    image_data_url：data:image/...;base64,... 或公开可访问的 https URL。
+    """
+    model = await _resolve_model(
+        usage_type="text", model_row_id=model_id, user_id=user_id,
+    )
+    # OpenAI 兼容的多模态格式：messages[0].content = [{type:"text"},{type:"image_url"}]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        }
+    ]
+    payload = {
+        "model": model.model_id,
+        "messages": messages,
+        "max_tokens": 1500,
+        "temperature": 0.2,
+    }
+    url = f"{model.base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {model.api_key}",
+        "Content-Type": "application/json",
+    }
+    sem = _get_semaphore(model.model_row_id, model.max_concurrent)
+
+    async def _do() -> str:
+        t0 = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+            text_out = (data["choices"][0]["message"]["content"] or "").strip()
+            usage = data.get("usage") or {}
+            await _log_usage(
+                user_id=user_id, model=model, feature=feature,
+                input_tokens=int(usage.get("prompt_tokens") or 0),
+                output_tokens=int(usage.get("completion_tokens") or 0),
+                latency_ms=int((time.perf_counter() - t0) * 1000),
+            )
+            return text_out
+        except Exception as e:
+            await _log_usage(
+                user_id=user_id, model=model, feature=feature,
+                latency_ms=int((time.perf_counter() - t0) * 1000),
+                status="error", error=str(e),
+            )
+            raise
+
+    if sem is not None:
+        async with sem:
+            return await _do()
+    return await _do()
+
+
 async def call_text_variants(
     prompt: str,
     *,

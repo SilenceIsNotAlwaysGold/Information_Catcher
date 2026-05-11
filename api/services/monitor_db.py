@@ -432,6 +432,18 @@ CREATE TABLE IF NOT EXISTS remix_tasks (
 CREATE INDEX IF NOT EXISTS idx_remix_tasks_user_time ON remix_tasks(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_remix_tasks_status ON remix_tasks(status);
 
+-- 文本仿写：用户上传的背景图模板，下次可复用
+CREATE TABLE IF NOT EXISTS text_remix_backgrounds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT DEFAULT '',
+    image_url TEXT NOT NULL,
+    width INTEGER DEFAULT 0,
+    height INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_text_remix_bg_user ON text_remix_backgrounds(user_id, created_at DESC);
+
 -- 每日用量计数：跨天自动清零（不存当天的零行）
 -- 每用户 + 每天一行，关键端点 record_usage 时累加
 CREATE TABLE IF NOT EXISTS daily_usage (
@@ -2929,6 +2941,55 @@ async def create_remix_task(
         )
         await db.commit()
         return cur.lastrowid or 0
+
+
+# ── Text Remix Backgrounds ──────────────────────────────────────────────────
+
+async def add_text_remix_background(
+    *, user_id: int, name: str, image_url: str,
+    width: int = 0, height: int = 0,
+) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO text_remix_backgrounds "
+            "(user_id, name, image_url, width, height) VALUES (?,?,?,?,?)",
+            (user_id, (name or "")[:100], image_url, int(width), int(height)),
+        )
+        await db.commit()
+        return cur.lastrowid or 0
+
+
+async def list_text_remix_backgrounds(user_id: int, limit: int = 100) -> List[Dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, name, image_url, width, height, created_at "
+            "FROM text_remix_backgrounds WHERE user_id=? "
+            "ORDER BY id DESC LIMIT ?",
+            (user_id, int(limit)),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def delete_text_remix_background(bg_id: int, user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM text_remix_backgrounds WHERE id=? AND user_id=?",
+            (int(bg_id), int(user_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_text_remix_background(bg_id: int, user_id: int) -> Optional[Dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM text_remix_backgrounds WHERE id=? AND user_id=?",
+            (int(bg_id), int(user_id)),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
 
 async def cancel_remix_task(task_id: int, user_id: Optional[int] = None) -> bool:
