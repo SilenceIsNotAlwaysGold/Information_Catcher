@@ -216,8 +216,26 @@ def dump_data(conn: sqlite3.Connection, tables: List[str]) -> Tuple[str, dict]:
         if not rows:
             out_lines.append(f"-- {tbl}: (空)")
             continue
-        cols = rows[0].keys()
+        cols = list(rows[0].keys())
         out_lines.append(f"-- {tbl}: {len(rows)} 行")
+        # ON CONFLICT 策略：
+        # - id 列（绝大部分表）：dump 的数据来自 sqlite 当前状态，跟之前 init_db seed
+        #   出来的占位行可能冲突。用 DO UPDATE 把所有列都用 sqlite 值覆盖，确保数据真完整。
+        # - 复合主键表（如 monitor_settings 的 key/value、daily_usage 等）：同上策略。
+        # 注意排除 id 列本身避免 "cannot update column id" 在某些 PK 设置下的问题。
+        update_cols = [c for c in cols if c != "id"]
+        if update_cols:
+            on_conflict = " ON CONFLICT DO NOTHING"  # 默认 fallback
+            # 我们不知道每表确切的 conflict key，但 PG 接受 "ON CONFLICT DO UPDATE" 配合
+            # 显式 conflict 列名。为通用稳健，针对 monitor_settings 用 (key)，
+            # 其他表回退到 DO NOTHING（这些表的 id 由序列管理，dump 出的 id 跟空
+            # PG 不会冲突）。
+            if tbl == "monitor_settings":
+                set_clause = ", ".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
+                on_conflict = f" ON CONFLICT (key) DO UPDATE SET {set_clause}"
+        else:
+            on_conflict = " ON CONFLICT DO NOTHING"
+
         BATCH = 200
         for i in range(0, len(rows), BATCH):
             chunk = rows[i:i + BATCH]
@@ -227,7 +245,7 @@ def dump_data(conn: sqlite3.Connection, tables: List[str]) -> Tuple[str, dict]:
             out_lines.append(
                 f"INSERT INTO {tbl} ({', '.join(cols)}) VALUES\n"
                 + ",\n".join(values)
-                + "\nON CONFLICT DO NOTHING;"
+                + on_conflict + ";"
             )
         out_lines.append("")
     out_lines.append("SET session_replication_role = origin;")
