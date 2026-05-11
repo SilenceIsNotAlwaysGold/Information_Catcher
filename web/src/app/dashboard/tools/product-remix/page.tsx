@@ -16,7 +16,7 @@ import { toastOk, toastErr } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { ModelSelector } from "@/components/ModelSelector";
 
-import { IMAGE_API, proxyUrl } from "@/components/product-image/utils";
+import { IMAGE_API, proxyUrl, SIZE_OPTIONS } from "@/components/product-image/utils";
 import { useImageConfig } from "@/components/product-image/useImageConfig";
 import { ConfigStatusBar } from "@/components/product-image/ConfigStatusBar";
 import { ImagePreviewModal } from "@/components/product-image/ImagePreviewModal";
@@ -148,6 +148,7 @@ export default function ProductRemixPage() {
 
   // ── 步骤 2：提交参数 ────────────────────────────────────────────────────
   const [count, setCount] = useState(5);
+  const [genSize, setGenSize] = useState("");  // 空 = 用模型默认尺寸
   const [styleKeywords, setStyleKeywords] = useState("");
   // 统一风格：开启时多套图共享同一份 prompt 基调（不注入每套文案主题）
   const [unifiedStyle, setUnifiedStyle] = useState(true);
@@ -307,6 +308,7 @@ export default function ProductRemixPage() {
           ref_image_idxs: refIdxs,
           ref_image_idx: refIdxs[0] ?? 0,
           count,
+          size: genSize || undefined,  // 空 = 后端用模型默认
           style_keywords: styleKeywords.trim(),
           unified_style: unifiedStyle,
           image_prompt: imagePrompt.trim(),
@@ -406,18 +408,33 @@ export default function ProductRemixPage() {
 
   // 预览
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
-  const downloadFromUrl = async (url: string) => {
+  const downloadFromUrl = async (url: string, customName?: string) => {
     try {
       const res = await fetch(proxyUrl(url));
       const blob = await res.blob();
       const u = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = u;
-      const fname = url.split("/").pop()?.split("?")[0] || `image-${Date.now()}.png`;
+      const fname = customName || url.split("/").pop()?.split("?")[0] || `image-${Date.now()}.png`;
       a.download = fname;
       a.click();
       setTimeout(() => URL.revokeObjectURL(u), 1000);
     } catch (e: any) { toastErr(`下载失败：${e?.message || e}`); }
+  };
+
+  // 整套打包下载：依次触发浏览器下载每张图（命名 set{N}_img{K}.png）
+  // 不打 zip 是因为前端 zip 库 ~300KB，依次下载更轻量；浏览器会自动 stack
+  const downloadSet = async (setIdx: number, imgs: { image_url: string }[]) => {
+    const ok = imgs.filter((s) => s.image_url);
+    if (ok.length === 0) { toastErr("这套没有可下载的图片"); return; }
+    toastOk(`开始下载第 ${setIdx} 套（共 ${ok.length} 张）`);
+    for (let i = 0; i < ok.length; i++) {
+      const ext = (ok[i].image_url.split(".").pop()?.split("?")[0] || "png").slice(0, 5);
+      const fname = `remix_set${setIdx}_img${i + 1}.${ext}`;
+      await downloadFromUrl(ok[i].image_url, fname);
+      // 间隔 300ms 避免浏览器把多个 download 合并成一个
+      await new Promise((r) => setTimeout(r, 300));
+    }
   };
 
   const copyText = async (text: string) => {
@@ -617,21 +634,54 @@ export default function ProductRemixPage() {
               </p>
             </div>
 
-            {/* 统一风格开关 */}
-            <div className="flex items-start gap-2 py-1">
-              <input
-                id="unified-style"
-                type="checkbox"
-                className="mt-1 accent-secondary"
-                checked={unifiedStyle}
-                onChange={(e) => setUnifiedStyle(e.target.checked)}
-              />
-              <label htmlFor="unified-style" className="text-sm text-default-700 cursor-pointer select-none">
-                统一风格
-                <span className="text-xs text-default-400 ml-2">
-                  多套图共用同一基调（不再按每套文案主题改背景）；文案仍每套不同
-                </span>
-              </label>
+            {/* 风格模式：所有套之间 */}
+            <div className="space-y-2">
+              <p className="text-sm text-default-700">风格模式（控制套与套之间）</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <label
+                  className={`border rounded-md p-3 cursor-pointer transition ${
+                    unifiedStyle
+                      ? "border-secondary bg-secondary/10"
+                      : "border-divider hover:border-secondary/50"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="style-mode"
+                    className="mr-2 accent-secondary"
+                    checked={unifiedStyle}
+                    onChange={() => setUnifiedStyle(true)}
+                  />
+                  <span className="text-sm font-medium">统一风格</span>
+                  <p className="text-[11px] text-default-500 mt-1 ml-5">
+                    所有套图视觉一致——同款背景、同光影、同构图，看起来像同一次拍摄的多张片。<br />
+                    适合批量出货图 / 同款多版本 SKU；文案仍每套不同。
+                  </p>
+                </label>
+                <label
+                  className={`border rounded-md p-3 cursor-pointer transition ${
+                    !unifiedStyle
+                      ? "border-secondary bg-secondary/10"
+                      : "border-divider hover:border-secondary/50"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="style-mode"
+                    className="mr-2 accent-secondary"
+                    checked={!unifiedStyle}
+                    onChange={() => setUnifiedStyle(false)}
+                  />
+                  <span className="text-sm font-medium">差异化风格</span>
+                  <p className="text-[11px] text-default-500 mt-1 ml-5">
+                    每套图按对应文案主题换背景、光影、配色，多套之间视觉差异大。<br />
+                    适合 A/B 测试不同视觉方向 / 同商品做多种风格 SKU。
+                  </p>
+                </label>
+              </div>
+              <p className="text-[10px] text-default-400 italic">
+                注：同一套内多张图（每张对应一张参考图）始终保持自己参考图的风格；该选项控制的是"多套之间"是否要一致。
+              </p>
             </div>
 
             {/* 风格关键词（可选） */}
@@ -778,6 +828,23 @@ export default function ProductRemixPage() {
               />
             </div>
 
+            {/* 图片尺寸 */}
+            <div>
+              <p className="text-xs text-default-500 mb-1">
+                图片尺寸 <span className="text-default-400">（留空 = 模型默认）</span>
+              </p>
+              <select
+                className="border border-divider rounded-md px-2 h-9 text-sm bg-background w-full"
+                value={genSize}
+                onChange={(e) => setGenSize(e.target.value)}
+              >
+                <option value="">使用模型默认尺寸</option>
+                {SIZE_OPTIONS.map((s) => (
+                  <option key={s.key} value={s.key}>{s.label}</option>
+                ))}
+              </select>
+            </div>
+
             <Button
               color="secondary"
               size="lg"
@@ -886,7 +953,7 @@ export default function ProductRemixPage() {
                   {activeTask.status === "done" ? "全部完成"
                   : activeTask.status === "error" ? "任务失败"
                   : activeTask.status === "cancelled" ? "已取消"
-                  : "生成中…"}
+                  : "加载中…"}
                 </span>
                 <span>{pct}%</span>
               </div>
@@ -925,12 +992,23 @@ export default function ProductRemixPage() {
                       <span className="text-sm font-medium">
                         第 {it.idx} 套 <span className="text-default-400 text-xs">· {okImgs.length}/{subImages.length} 张</span>
                       </span>
-                      {it.error && okImgs.length === 0 && (
-                        <Chip size="sm" color="danger" variant="flat">失败</Chip>
-                      )}
-                      {it.error && okImgs.length > 0 && (
-                        <Chip size="sm" color="warning" variant="flat">部分失败</Chip>
-                      )}
+                      <div className="flex items-center gap-2">
+                        {it.error && okImgs.length === 0 && (
+                          <Chip size="sm" color="danger" variant="flat">失败</Chip>
+                        )}
+                        {it.error && okImgs.length > 0 && (
+                          <Chip size="sm" color="warning" variant="flat">部分失败</Chip>
+                        )}
+                        {okImgs.length > 0 && (
+                          <Button
+                            size="sm" variant="flat" color="primary"
+                            startContent={<Download size={13} />}
+                            onPress={() => downloadSet(it.idx, subImages)}
+                          >
+                            下载本套 ({okImgs.length})
+                          </Button>
+                        )}
+                      </div>
                     </div>
                     {subImages.length > 0 ? (
                       <div className={`grid gap-2 ${
@@ -964,7 +1042,7 @@ export default function ProductRemixPage() {
                           // 任务还在跑 → 这张图只是没生成到 → 显示生成中（带 spinner）
                           <div key={si} className="aspect-square rounded-md bg-default-100 flex flex-col items-center justify-center gap-1">
                             <Spinner size="sm" color="secondary" />
-                            <span className="text-[10px] text-default-400">生成中…</span>
+                            <span className="text-[10px] text-default-400">加载中…</span>
                           </div>
                         ) : (
                           // 任务结束但这张没生成 + 也无 error → 兜底"无图"
@@ -980,7 +1058,7 @@ export default function ProductRemixPage() {
                         ) : activeTask?.status === "pending" || activeTask?.status === "running" ? (
                           <>
                             <Spinner size="sm" color="secondary" />
-                            <span className="text-xs text-default-400">生成中…</span>
+                            <span className="text-xs text-default-400">加载中…</span>
                           </>
                         ) : (
                           <span className="text-xs text-default-400">未开始</span>
@@ -1041,7 +1119,7 @@ export default function ProductRemixPage() {
           </CardHeader>
           <CardBody>
             <div className="space-y-2">
-              {tasks.map((t) => (
+              {tasks.filter((t) => t.id !== activeTaskId).map((t) => (
                 <div
                   key={t.id}
                   className="flex items-center gap-3 border border-divider rounded-lg p-3 hover:bg-default-50 transition-colors"

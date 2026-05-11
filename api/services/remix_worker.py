@@ -45,6 +45,21 @@ REMIX_PROMPT_EN = (
     "not a copy. High quality, 8k, professional product photography, sharp focus."
 )
 
+# 「统一风格」专用 base prompt —— 强制视觉一致（不再鼓励"换背景换光影"那种差异化）
+# unified_style=True 且用户没自定义 image_prompt 时启用。
+UNIFIED_REMIX_PROMPT_EN = (
+    "Recreate this image keeping the EXACT SAME visual style, composition, color palette, "
+    "lighting setup, background layout and overall mood as the reference. "
+    "CRITICAL: keep ALL Chinese text EXACTLY as in the reference — same content, font, size, "
+    "color, and position. Do not modify, translate, or remove any text. "
+    "DO NOT change the background style, do NOT swap decorative elements, do NOT shift the light "
+    "direction or color temperature. Only allow MINOR natural regeneration variations (subtle "
+    "shadow / highlight micro-variation, slightly different prop placement). "
+    "The output should look like an alternate take of the EXACT SAME photoshoot, "
+    "NOT a redesigned or restyled variant. "
+    "Consistent aesthetic across all variants. 8k professional product photography, sharp focus."
+)
+
 # 文案改写 system prompt 模板。{n_total} {set_idx} 是占位符，渲染时替换。
 # 前端"高级选项"展示这份默认让用户编辑；空时 worker 用默认。
 CAPTION_PROMPT_TEMPLATE = (
@@ -68,10 +83,22 @@ def _prompt_with_caption(
 ) -> str:
     """把当前套的"变种文案主题" + 用户自定义风格关键词 注入图片 prompt。
 
-    unified_style=True 时：不注入每套文案主题，多套图风格统一（由 base_prompt
-    和 style_keywords 决定基调）。文案仍按 _generate_caption 每套不同。
+    unified_style=True 时：
+      - 不注入每套文案主题（不让 caption 改 prompt）
+      - 如果用户没自定义 base_prompt，用 UNIFIED_REMIX_PROMPT_EN（强制视觉一致，
+        不再含"change background / props / lighting"那种鼓励差异化的指令）
+      → 多套图视觉一致；文案仍按 _generate_caption 每套不同。
+
+    unified_style=False（默认）保留原行为：每套注入文案主题 + 用 REMIX_PROMPT_EN
+    （鼓励视觉差异化，更适合"做多个风格 SKU"场景）。
     """
-    parts = [(base_prompt or REMIX_PROMPT_EN).strip()]
+    if base_prompt:
+        actual_base = base_prompt
+    elif unified_style:
+        actual_base = UNIFIED_REMIX_PROMPT_EN
+    else:
+        actual_base = REMIX_PROMPT_EN
+    parts = [actual_base.strip()]
     theme = "" if unified_style else (caption_title or caption_body or "").strip()
     if theme:
         theme = theme[:200].replace("\n", " ").strip()
@@ -194,7 +221,12 @@ async def _gen_one_image(
     images = None
     last_err = ""
     _t0 = _time.perf_counter()
-    for attempt in range(2):
+    # 重试策略：最多 5 次，指数退避（1.5s → 3s → 6s → 12s）。
+    # 透明错误（如认证错误 / 模型不存在 / 内容违规）立即停止，避免无用重试。
+    _FATAL_KEYWORDS = ("认证失败", "Unauthorized", "Forbidden", "invalid api key",
+                       "model not found", "policy violation", "safety system")
+    MAX_ATTEMPTS = 5
+    for attempt in range(MAX_ATTEMPTS):
         async with ai_client.acquire_slot(image_model_row_id, image_max_concurrent):
             result, err = await call_edits(
                 client, base_url=base_url, model=model, prompt=prompt,
@@ -204,7 +236,17 @@ async def _gen_one_image(
             images = result
             break
         last_err = (err or {}).get("error", "未知错误")
-        await asyncio.sleep(1.5)
+        # 致命错误直接 break，不浪费重试
+        if any(kw.lower() in last_err.lower() for kw in _FATAL_KEYWORDS):
+            logger.info(f"[remix_worker] fatal error, skip retry: {last_err[:100]}")
+            break
+        if attempt < MAX_ATTEMPTS - 1:
+            wait_s = min(1.5 * (2 ** attempt), 12.0)
+            logger.info(
+                f"[remix_worker] gen image attempt {attempt+1}/{MAX_ATTEMPTS} failed: "
+                f"{last_err[:80]} - retry in {wait_s}s"
+            )
+            await asyncio.sleep(wait_s)
     _ms = int((_time.perf_counter() - _t0) * 1000)
 
     # 记 ai_usage_logs（之前漏记，导致仿写图片不在统计里）
@@ -439,7 +481,7 @@ async def _process_task(task: dict) -> None:
     progress_lock = asyncio.Lock()
     finished = 0
 
-    timeout = httpx.Timeout(180.0, connect=30.0)
+    timeout = httpx.Timeout(600.0, connect=30.0)  # 10min 给慢上游 API 留余地
     async with httpx.AsyncClient(timeout=timeout) as client:
 
         async def _flush_progress():
