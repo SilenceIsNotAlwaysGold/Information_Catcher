@@ -39,11 +39,18 @@ const PLAN_COLOR: Record<string, "warning" | "default" | "primary" | "secondary"
 // 图 / 文 配额分轨：所有使用模型的板块都按这两个 key 累计
 //   - daily_image_gen：商品图自创 + 作品仿写换图 + 文字仿写印字 → 任何生图调用
 //   - daily_text_gen：作品仿写文案 → 任何 AI 文本生成
-const ITEMS: { key: keyof Omit<UsageSummary, "plan" | "daily_remix_sets">; label: string; suffix: string }[] = [
-  { key: "monitor_posts",    label: "监控帖子",  suffix: "帖" },
-  { key: "accounts",         label: "账号池",    suffix: "个" },
-  { key: "daily_image_gen",  label: "今日生图",  suffix: "张" },
-  { key: "daily_text_gen",   label: "今日写文",  suffix: "篇" },
+type ItemKey = keyof Omit<UsageSummary, "plan" | "daily_remix_sets">;
+type ItemDef = { key: ItemKey; label: string; suffix: string; hint?: string };
+// 分两组：上方"账号资源"长期累计；下方"AI 用量"日清零
+const ACCOUNT_ITEMS: ItemDef[] = [
+  { key: "monitor_posts", label: "监控帖子", suffix: "帖" },
+  { key: "accounts",      label: "账号池",   suffix: "个" },
+];
+const AI_ITEMS: ItemDef[] = [
+  { key: "daily_image_gen", label: "今日生图", suffix: "张",
+    hint: "商品图 / 作品仿写 / 文字仿写 三个工具产生的图片合计" },
+  { key: "daily_text_gen",  label: "今日写文", suffix: "篇",
+    hint: "作品仿写每套 1 篇文案；其他 AI 写文场景未来也并入这里" },
 ];
 
 export function PlanUsageCard() {
@@ -125,6 +132,49 @@ export function PlanUsageCard() {
     return "primary";
   };
 
+  // 单行 usage 渲染（账号资源 + AI 用量两组共用）
+  const renderUsageRow = (it: ItemDef, u: Usage) => {
+    const unlimited = u.quota < 0;
+    const pct = usagePct(u);
+    const color = usageColor(pct, unlimited);
+    return (
+      <div key={it.key}>
+        <div className="flex items-center justify-between text-sm mb-1">
+          <span className="text-default-700 flex items-center gap-1.5">
+            {it.label}
+            {it.hint && (
+              <span title={it.hint} className="text-default-400 cursor-help text-xs">
+                ⓘ
+              </span>
+            )}
+          </span>
+          <span className="text-default-500 tabular-nums">
+            {unlimited
+              ? `${u.used} / ∞`
+              : `${u.used} / ${u.quota} ${it.suffix}`}
+          </span>
+        </div>
+        <div className="w-full h-1.5 bg-default-200 rounded-full overflow-hidden">
+          <div
+            className={`h-full transition-all duration-300 ${
+              color === "danger" ? "bg-danger" :
+              color === "warning" ? "bg-warning" :
+              color === "success" ? "bg-success" :
+              "bg-primary"
+            }`}
+            style={{ width: unlimited ? "100%" : `${pct}%` }}
+          />
+        </div>
+        {!unlimited && pct >= 80 && (
+          <p className="text-xs text-warning-600 mt-1 flex items-center gap-1">
+            <AlertCircle size={12} />
+            用量已达 {pct}%，接近配额上限
+          </p>
+        )}
+      </div>
+    );
+  };
+
   return (
     <>
       <Card>
@@ -150,42 +200,26 @@ export function PlanUsageCard() {
             修改密码
           </Button>
         </CardHeader>
-        <CardBody className="space-y-3">
-          {ITEMS.map((it) => {
-            const u = usage[it.key];
-            const unlimited = u.quota < 0;
-            const pct = usagePct(u);
-            return (
-              <div key={it.key}>
-                <div className="flex items-center justify-between text-sm mb-1">
-                  <span className="text-default-700">{it.label}</span>
-                  <span className="text-default-500">
-                    {unlimited
-                      ? `${u.used} / ∞`
-                      : `${u.used} / ${u.quota} ${it.suffix}`}
-                  </span>
-                </div>
-                {/* 原生进度条：避免 @nextui-org/progress 子包 tree-shaking 问题 */}
-                <div className="w-full h-1.5 bg-default-200 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full transition-all duration-300 ${
-                      usageColor(pct, unlimited) === "danger" ? "bg-danger" :
-                      usageColor(pct, unlimited) === "warning" ? "bg-warning" :
-                      usageColor(pct, unlimited) === "success" ? "bg-success" :
-                      "bg-primary"
-                    }`}
-                    style={{ width: unlimited ? "100%" : `${pct}%` }}
-                  />
-                </div>
-                {!unlimited && pct >= 80 && (
-                  <p className="text-xs text-warning-600 mt-1 flex items-center gap-1">
-                    <AlertCircle size={12} />
-                    用量已达 {pct}%，接近配额上限
-                  </p>
-                )}
-              </div>
-            );
-          })}
+        <CardBody className="space-y-4">
+          {/* 账号资源（长期累计） */}
+          <div className="space-y-3">
+            <p className="text-xs uppercase tracking-wider text-default-400 font-semibold">
+              账号资源
+            </p>
+            {ACCOUNT_ITEMS.map((it) => renderUsageRow(it, usage[it.key]))}
+          </div>
+
+          {/* AI 用量（每日 0 点重置） */}
+          <div className="space-y-3 border-t border-divider pt-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs uppercase tracking-wider text-secondary font-semibold">
+                AI 用量
+              </p>
+              <span className="text-[10px] text-default-400">每日 0 点重置</span>
+            </div>
+            {AI_ITEMS.map((it) => renderUsageRow(it, usage[it.key]))}
+          </div>
+
           {plan === "trial" && (
             <div className="flex items-start gap-2 text-xs bg-warning/10 rounded-md p-2 mt-2">
               <AlertCircle size={13} className="mt-0.5 shrink-0 text-warning-600" />

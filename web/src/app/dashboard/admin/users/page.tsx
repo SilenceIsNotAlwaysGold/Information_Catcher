@@ -494,18 +494,24 @@ export default function AdminUsersPage() {
                   description="例：2026-12-31T23:59:59" />
 
                 <div className="space-y-2">
-                  <p className="text-sm font-medium">配额覆盖（留空走套餐默认；填了优先生效）</p>
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium">配额覆盖</p>
+                    <p className="text-xs text-default-400">
+                      留空 = 走套餐默认；-1 = 无限制；其它正整数 = 强制覆盖
+                    </p>
+                  </div>
                   <div className="grid grid-cols-2 gap-3">
                     {[
-                      ["monitor_posts", "监控帖子"],
-                      ["accounts", "账号池"],
-                      ["daily_image_gen", "每日生图"],
-                      ["daily_remix_sets", "每日仿写套数"],
-                    ].map(([k, label]) => (
+                      ["monitor_posts",   "监控帖子",   "帖"],
+                      ["accounts",        "账号池",     "个"],
+                      ["daily_image_gen", "每日生图",   "张"],
+                      ["daily_text_gen",  "每日写文",   "篇"],
+                    ].map(([k, label, suffix]) => (
                       <Input key={k}
                         label={label}
                         type="number"
-                        placeholder="-1=无限制；空=用套餐默认"
+                        placeholder="留空 / -1 / 数字"
+                        endContent={<span className="text-default-400 text-xs">{suffix}</span>}
                         value={String(editForm.quota_override?.[k] ?? "")}
                         onValueChange={(v) => {
                           const next = { ...(editForm.quota_override || {}) };
@@ -516,6 +522,13 @@ export default function AdminUsersPage() {
                       />
                     ))}
                   </div>
+                  {Object.keys(editForm.quota_override || {}).length > 0 && (
+                    <button type="button"
+                      className="text-xs text-danger hover:underline"
+                      onClick={() => setEditForm({ ...editForm, quota_override: {} })}>
+                      清空所有覆盖（恢复套餐默认）
+                    </button>
+                  )}
                 </div>
 
                 {/* AI 模型权限白名单 */}
