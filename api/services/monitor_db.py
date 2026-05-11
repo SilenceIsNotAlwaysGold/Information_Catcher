@@ -605,7 +605,12 @@ async def _ensure_fts_index(db):
 
     用 external content 模式（content='monitor_posts'），列名必须都存在于主表。
     所以仅索引 title + summary（已有的列）。
+
+    PG 模式跳过：FTS5 是 sqlite 专属语法，PG 等价是 tsvector/GIN，需要独立实现；
+    且当前无业务代码查询 monitor_posts_fts，建了也是 dead code。
     """
+    if _db.is_pg():
+        return
     # 检查现有 FTS 表 schema 是否最新（早期 body 列 / unicode61 tokenizer）
     try:
         cur = await db.execute("SELECT sql FROM sqlite_master WHERE name='monitor_posts_fts'")

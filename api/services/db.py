@@ -34,6 +34,11 @@ def _driver() -> str:
     return "pg" if v == "pg" else "sqlite"
 
 
+def is_pg() -> bool:
+    """对外暴露当前驱动判断，业务代码可用来跳过 sqlite 专属逻辑（FTS 等）。"""
+    return _driver() == "pg"
+
+
 # ── PG 连接池（懒加载，全进程共享）─────────────────────────────────────────
 
 _pg_pool: Any = None  # asyncpg.Pool
@@ -101,6 +106,12 @@ _PRAGMA_TABLE_INFO = re.compile(r"PRAGMA\s+table_info\(\s*([a-zA-Z_][a-zA-Z0-9_]
 # sqlite_master：sqlite 内置系统表，PG 没有。所有查询替换为空集，让 schema 探测类
 # 迁移函数自动 short-circuit（这些迁移在 PG 部署上本来就不需要——_INIT_SQL 已建新结构）
 _SQLITE_MASTER = re.compile(r"\bFROM\s+sqlite_master\b", re.IGNORECASE)
+# DROP TRIGGER IF EXISTS xxx（无 ON 子句）：sqlite 合法、PG 缺 `ON table` 报语法错。
+# 这类残留清理逻辑在 PG 部署上无意义（PG 模式根本不建这些 trigger），直接 no-op。
+_DROP_TRIGGER_NO_ON = re.compile(
+    r"DROP\s+TRIGGER\s+IF\s+EXISTS\s+[a-zA-Z_][a-zA-Z0-9_]*\s*(?!ON\b)",
+    re.IGNORECASE,
+)
 
 
 def _translate_sql_for_pg(sql: str) -> str:
@@ -119,6 +130,8 @@ def _translate_sql_for_pg(sql: str) -> str:
     s = _PRAGMA_NOOP.sub("SELECT 1", s)
     # sqlite_master：PG 没有该系统表，让查询返回空集
     s = _SQLITE_MASTER.sub("FROM (SELECT NULL::TEXT AS sql, NULL::TEXT AS name, NULL::TEXT AS type WHERE FALSE) _empty", s)
+    # DROP TRIGGER IF EXISTS xxx（无 ON 子句）：PG 模式 no-op
+    s = _DROP_TRIGGER_NO_ON.sub("SELECT 1 ", s)
     # PRAGMA table_info(t) → 等价 PG 查询，列顺序与 sqlite 一致：(cid,name,type,notnull,dflt_value,pk)
     m = _PRAGMA_TABLE_INFO.search(s)
     if m:
