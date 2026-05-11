@@ -466,6 +466,16 @@ async def _process_task(task: dict) -> None:
     image_prompt_override = (task.get("image_prompt") or "").strip()
     caption_prompt_template = (task.get("caption_prompt") or "").strip()
     unified_style = bool(task.get("unified_style"))
+    # 每套独立关键词：JSON 数组；缺失 / 空 → fallback 全局 style_keywords
+    per_set_keywords: list[str] = []
+    raw_psk = (task.get("per_set_keywords_json") or "").strip()
+    if raw_psk:
+        try:
+            arr = json.loads(raw_psk)
+            if isinstance(arr, list):
+                per_set_keywords = [str(x or "") for x in arr]
+        except Exception:
+            per_set_keywords = []
 
     async def _is_cancelled() -> bool:
         try:
@@ -516,6 +526,12 @@ async def _process_task(task: dict) -> None:
                     items_indexed[i - 1] = clean
                     await _flush_progress()
 
+            # 第 i 套（i 从 1 开始）的关键词：优先 per_set_keywords[i-1]，空则 fallback 全局
+            sk_for_set = style_keywords
+            if i - 1 < len(per_set_keywords):
+                psk = (per_set_keywords[i - 1] or "").strip()
+                if psk:
+                    sk_for_set = psk
             try:
                 item = await _gen_one_set(
                     client, base_url=base_url, api_key=api_key, model=model,
@@ -524,7 +540,7 @@ async def _process_task(task: dict) -> None:
                     post_title=task.get("post_title") or "",
                     post_desc=task.get("post_desc") or "",
                     user_id=user_id,
-                    style_keywords=style_keywords,
+                    style_keywords=sk_for_set,
                     image_prompt_override=image_prompt_override,
                     caption_prompt_template=caption_prompt_template,
                     unified_style=unified_style,

@@ -496,7 +496,7 @@ CREATE TABLE IF NOT EXISTS ai_models (
     extra_config TEXT DEFAULT '{}',     -- JSON：图像模型的 size / 其他扩展参数
     sort_order INTEGER DEFAULT 0,
     note TEXT DEFAULT '',
-    max_concurrent INTEGER DEFAULT 0,   -- P15.8: 该模型同时进行中的请求上限（0 = 不限）
+    max_concurrent INTEGER DEFAULT 2,   -- P15.8: 该模型同时进行中的请求上限（0 = 不限；默认 2 = 保守起步，admin 可调）
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_ai_models_usage ON ai_models(usage_type, published);
@@ -768,6 +768,8 @@ async def _migrate(db):
     await _ensure_column(db, "remix_tasks", "caption_prompt", "TEXT DEFAULT ''")
     # 统一风格：开启后多套图共享同一份 image prompt（不注入每套差异化文案主题）
     await _ensure_column(db, "remix_tasks", "unified_style", "INTEGER DEFAULT 0")
+    # 每套独立关键词：JSON 字符串数组，长度 ≤ count；空字符串走 style_keywords 兜底
+    await _ensure_column(db, "remix_tasks", "per_set_keywords_json", "TEXT DEFAULT ''")
     # P15.7: 仿写任务可选指定 AI 模型（NULL = 用用户偏好 / 系统默认）
     await _ensure_column(db, "remix_tasks", "text_model_id",  "INTEGER")
     await _ensure_column(db, "remix_tasks", "image_model_id", "INTEGER")
@@ -2889,6 +2891,7 @@ async def create_remix_task(
     image_prompt: str = "",
     caption_prompt: str = "",
     unified_style: bool = False,
+    per_set_keywords: Optional[List[str]] = None,
     text_model_id: Optional[int] = None,
     image_model_id: Optional[int] = None,
 ) -> int:
@@ -2903,6 +2906,7 @@ async def create_remix_task(
     import json as _json
     idxs_json = _json.dumps(ref_image_idxs) if ref_image_idxs else ""
     urls_json = _json.dumps(ref_image_urls or []) if ref_image_urls else ""
+    per_set_json = _json.dumps(per_set_keywords, ensure_ascii=False) if per_set_keywords else ""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO remix_tasks
@@ -2911,14 +2915,16 @@ async def create_remix_task(
                 ref_image_urls, ref_image_idxs,
                 count, done_count, items_json, size, style_keywords,
                 image_prompt, caption_prompt, unified_style,
+                per_set_keywords_json,
                 text_model_id, image_model_id)
-               VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?, ?, ?, ?, ?, ?, ?, ?)""",
             (user_id, post_url, post_title, post_desc, platform,
              ref_image_url, ref_image_idx,
              urls_json, idxs_json,
              count, size, (style_keywords or "")[:200],
              (image_prompt or "")[:4000], (caption_prompt or "")[:4000],
              1 if unified_style else 0,
+             per_set_json[:4000],
              text_model_id, image_model_id),
         )
         await db.commit()

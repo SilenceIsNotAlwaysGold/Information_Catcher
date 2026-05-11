@@ -152,6 +152,16 @@ export default function ProductRemixPage() {
   const [styleKeywords, setStyleKeywords] = useState("");
   // 统一风格：开启时多套图共享同一份 prompt 基调（不注入每套文案主题）
   const [unifiedStyle, setUnifiedStyle] = useState(true);
+  // 每套独立关键词：开启时按 count 渲染 N 个 input；第 i 套用对应行的值（空走全局）
+  const [perSetMode, setPerSetMode] = useState(false);
+  const [perSetKeywords, setPerSetKeywords] = useState<string[]>([]);
+  useEffect(() => {
+    setPerSetKeywords((prev) => {
+      const next = prev.slice(0, count);
+      while (next.length < count) next.push("");
+      return next;
+    });
+  }, [count]);
   // 高级：用户自定义 prompt（留空则用默认）
   const [imagePrompt, setImagePrompt] = useState("");
   const [captionPrompt, setCaptionPrompt] = useState("");
@@ -311,6 +321,7 @@ export default function ProductRemixPage() {
           size: genSize || undefined,  // 空 = 后端用模型默认
           style_keywords: styleKeywords.trim(),
           unified_style: unifiedStyle,
+          per_set_keywords: perSetMode ? perSetKeywords.map((s) => (s || "").trim()) : null,
           image_prompt: imagePrompt.trim(),
           caption_prompt: captionPrompt.trim(),
           text_model_id: taskTextModelId,
@@ -686,31 +697,85 @@ export default function ProductRemixPage() {
 
             {/* 风格关键词（可选） */}
             <div className="space-y-2">
-              <p className="text-sm text-default-700">
-                风格关键词（可选）<span className="text-xs text-default-400 ml-2">追加在 image prompt 末尾，影响每套图风格</span>
-              </p>
-              <Input
-                placeholder="如：日系简约 / 莫兰迪色调 / 赛博朋克霓虹 / 极简白底"
-                value={styleKeywords}
-                onValueChange={setStyleKeywords}
-                size="sm"
-                description="留空则只走默认 prompt + 文案主题"
-              />
-              <div className="flex flex-wrap gap-1.5">
-                {[
-                  "日系简约", "莫兰迪色调", "极简白底", "复古胶片",
-                  "ins 风", "高端质感", "暖色调暖光", "赛博朋克霓虹",
-                ].map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    onClick={() => setStyleKeywords(preset)}
-                    className="px-2 py-0.5 text-xs rounded border border-divider text-default-500 hover:bg-secondary/10 hover:border-secondary hover:text-secondary"
-                  >
-                    {preset}
-                  </button>
-                ))}
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-default-700">
+                  风格关键词（可选）
+                  <span className="text-xs text-default-400 ml-2">
+                    {perSetMode ? "下方按套填写" : "对所有套生效"}
+                  </span>
+                </p>
+                <label className="text-xs text-default-600 cursor-pointer flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    className="accent-secondary"
+                    checked={perSetMode}
+                    onChange={(e) => setPerSetMode(e.target.checked)}
+                  />
+                  每套独立关键词
+                </label>
               </div>
+
+              {!perSetMode ? (
+                <>
+                  <Input
+                    placeholder="如：日系简约 / 莫兰迪色调 / 赛博朋克霓虹 / 极简白底"
+                    value={styleKeywords}
+                    onValueChange={setStyleKeywords}
+                    size="sm"
+                    description="留空则只走默认 prompt + 文案主题"
+                  />
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      "日系简约", "莫兰迪色调", "极简白底", "复古胶片",
+                      "ins 风", "高端质感", "暖色调暖光", "赛博朋克霓虹",
+                    ].map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setStyleKeywords(preset)}
+                        className="px-2 py-0.5 text-xs rounded border border-divider text-default-500 hover:bg-secondary/10 hover:border-secondary hover:text-secondary"
+                      >
+                        {preset}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-xs text-default-400">
+                    第 i 套用对应行的关键词；留空走全局关键词；
+                    点右侧 preset chip 快速填入。
+                  </p>
+                  {perSetKeywords.map((v, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <span className="text-xs text-default-500 w-12 shrink-0">第 {i + 1} 套</span>
+                      <input
+                        type="text"
+                        className="flex-1 border border-divider rounded-md px-2 h-8 text-sm bg-background"
+                        placeholder={`如：日系简约（留空 → 用全局关键词）`}
+                        value={v}
+                        onChange={(e) => {
+                          const next = [...perSetKeywords];
+                          next[i] = e.target.value;
+                          setPerSetKeywords(next);
+                        }}
+                      />
+                      <div className="flex gap-1">
+                        {["日系简约", "莫兰迪", "胶片", "ins 风"].map((p) => (
+                          <button key={p} type="button"
+                            onClick={() => {
+                              const next = [...perSetKeywords];
+                              next[i] = p;
+                              setPerSetKeywords(next);
+                            }}
+                            className="text-[10px] px-1.5 py-0.5 rounded border border-divider text-default-400 hover:text-secondary hover:border-secondary"
+                          >{p}</button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* 高级：自定义 prompt（图片 + 文案） */}

@@ -44,6 +44,9 @@ class CreateRemixTaskRequest(BaseModel):
     caption_prompt: Optional[str] = ""   # 文案改写 system_prompt（替代 _generate_caption 默认）
     # 统一风格：开启时多套图共享同一份 image prompt（不注入每套差异化的文案主题）
     unified_style: Optional[bool] = False
+    # 每套独立关键词：长度 ≤ count；空字符串走 style_keywords 兜底
+    # 例 count=5 + ["日系","赛博朋克","","莫兰迪","胶片"]，第 3 套用全局 style_keywords
+    per_set_keywords: Optional[List[str]] = None
     # P15.7: 可选指定 AI 模型 row id（null = 用用户偏好 / 系统默认）
     text_model_id: Optional[int] = None
     image_model_id: Optional[int] = None
@@ -253,6 +256,7 @@ async def create_remix_task(
         image_prompt=(req.image_prompt or "").strip(),
         caption_prompt=(req.caption_prompt or "").strip(),
         unified_style=bool(req.unified_style),
+        per_set_keywords=req.per_set_keywords or None,
         text_model_id=req.text_model_id,
         image_model_id=req.image_model_id,
     )
