@@ -1310,13 +1310,56 @@ async def start_scheduler():
 
 
 def reschedule(interval_minutes: int, report_time: str):
-    """check_interval_minutes 改了之后所有 interval 任务都跟着调。"""
+    """check_interval_minutes 改了之后所有 interval 任务都跟着调。
+
+    跨进程兼容：scheduler 拆出到独立 worker 进程后，API 进程的 scheduler
+    没有这些 job——直接调 reschedule_job 会抛 JobLookupError。这里：
+      1) 本进程有 job 就直接改（worker 进程）
+      2) 本进程没 job 就发 Redis pub/sub 通知 worker 进程立即 reload
+    """
+    from apscheduler.jobstores.base import JobLookupError
     hour, minute = _parse_time(report_time)
-    scheduler.reschedule_job("monitor_posts", trigger="interval", minutes=interval_minutes)
-    scheduler.reschedule_job("trending_monitor", trigger="interval", minutes=interval_minutes)
+
+    did_local_reschedule = False
+    for job_id in ("monitor_posts", "trending_monitor", "own_comments_check"):
+        try:
+            scheduler.reschedule_job(job_id, trigger="interval", minutes=interval_minutes)
+            did_local_reschedule = True
+        except JobLookupError:
+            pass
+        except Exception as e:
+            logger.warning(f"[scheduler.reschedule] job={job_id} failed: {e}")
     try:
-        scheduler.reschedule_job("own_comments_check", trigger="interval", minutes=interval_minutes)
-    except Exception:
+        scheduler.reschedule_job(
+            "daily_report",
+            trigger=CronTrigger(hour=hour, minute=minute, timezone="Asia/Shanghai"),
+        )
+        did_local_reschedule = True
+    except JobLookupError:
         pass
-    scheduler.reschedule_job("daily_report",
-                             trigger=CronTrigger(hour=hour, minute=minute, timezone="Asia/Shanghai"))
+    except Exception as e:
+        logger.warning(f"[scheduler.reschedule] daily_report failed: {e}")
+
+    # 本进程无 job 说明在 API 进程：通过 Redis 通知 worker 进程立即 reload
+    if not did_local_reschedule:
+        try:
+            import json as _json
+            import os as _os
+            import redis as _redis
+            r = _redis.Redis.from_url(
+                _os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0"),
+                socket_timeout=2,
+            )
+            r.publish("pulse:scheduler:reload", _json.dumps({
+                "interval_minutes": interval_minutes,
+                "report_time": report_time,
+            }))
+            logger.info(
+                f"[scheduler.reschedule] notified worker via Redis "
+                f"(interval={interval_minutes}m, report={report_time})"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[scheduler.reschedule] redis notify failed: {e}. "
+                f"配置已落库，worker 下次重启自然生效。"
+            )

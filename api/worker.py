@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import signal
 import sys
 
@@ -26,6 +28,45 @@ logging.basicConfig(
 )
 
 
+async def _reload_listener(monitor_scheduler) -> None:
+    """订阅 pulse:scheduler:reload 频道，收到 API 进程发来的通知后立即 reschedule。"""
+    try:
+        import redis.asyncio as aioredis
+    except Exception as e:
+        logger.warning(f"[worker] redis.asyncio 不可用，跳过 reload 监听: {e}")
+        return
+    url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
+    r = aioredis.from_url(url, socket_timeout=5)
+    pubsub = r.pubsub()
+    try:
+        await pubsub.subscribe("pulse:scheduler:reload")
+        logger.info(f"[worker] subscribed pulse:scheduler:reload @ {url}")
+        async for msg in pubsub.listen():
+            if msg.get("type") != "message":
+                continue
+            try:
+                data = json.loads(msg["data"])
+                interval = int(data["interval_minutes"])
+                report_time = str(data.get("report_time", "09:00"))
+                monitor_scheduler.reschedule(interval, report_time)
+                logger.info(f"[worker] reload applied: interval={interval}m report={report_time}")
+            except Exception as e:
+                logger.warning(f"[worker] reload handler failed: {e}")
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.warning(f"[worker] redis listener exited: {e}")
+    finally:
+        try:
+            await pubsub.aclose()
+        except Exception:
+            pass
+        try:
+            await r.aclose()
+        except Exception:
+            pass
+
+
 async def amain() -> None:
     from .services import monitor_db, proxy_forwarder
     from .services import scheduler as monitor_scheduler
@@ -35,6 +76,9 @@ async def amain() -> None:
     await proxy_forwarder.ensure_all_from_db()
     await monitor_scheduler.start_scheduler()
     logger.info("[worker] scheduler started; idle-looping (SIGTERM to stop)")
+
+    # Redis 通知监听：API 进程改了 settings.check_interval_minutes 后立即 reload
+    listener = asyncio.create_task(_reload_listener(monitor_scheduler))
 
     # 阻塞等信号
     stop = asyncio.Event()
@@ -48,6 +92,7 @@ async def amain() -> None:
 
     await stop.wait()
     logger.info("[worker] shutdown signal received")
+    listener.cancel()
 
     monitor_scheduler.scheduler.shutdown(wait=False)
     await proxy_forwarder.stop_all()
