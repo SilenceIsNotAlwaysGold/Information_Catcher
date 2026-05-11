@@ -645,9 +645,9 @@ export default function ProductRemixPage() {
                 {count} 套总计 ~{Math.ceil(count * 30 / 60)} 分钟。
                 {" "}
                 <span className="text-secondary font-medium">
-                  本次共扣 {count * refIdxs.length} 张图配额
+                  本次扣 {count * refIdxs.length} 张图配额 + {count} 篇文配额
                 </span>
-                （= {count} 套 × {refIdxs.length} 张/套）。
+                （图 = {count} 套 × {refIdxs.length} 张/套；文 = {count} 套 × 1 篇/套）。
               </p>
             </div>
 

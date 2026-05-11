@@ -22,7 +22,8 @@ type UsageSummary = {
   monitor_posts: Usage;
   accounts: Usage;
   daily_image_gen: Usage;
-  daily_remix_sets: Usage;
+  daily_text_gen: Usage;
+  daily_remix_sets?: Usage;  // deprecated
 };
 
 const PLAN_LABEL: Record<string, string> = {
@@ -35,11 +36,14 @@ const PLAN_COLOR: Record<string, "warning" | "default" | "primary" | "secondary"
   team: "secondary", enterprise: "success",
 };
 
-const ITEMS: { key: keyof Omit<UsageSummary, "plan">; label: string; suffix: string }[] = [
-  { key: "monitor_posts", label: "监控帖子", suffix: "帖" },
-  { key: "accounts", label: "账号池", suffix: "个" },
-  { key: "daily_image_gen", label: "今日商品图", suffix: "张" },
-  { key: "daily_remix_sets", label: "今日仿写图数", suffix: "张" },
+// 图 / 文 配额分轨：所有使用模型的板块都按这两个 key 累计
+//   - daily_image_gen：商品图自创 + 作品仿写换图 + 文字仿写印字 → 任何生图调用
+//   - daily_text_gen：作品仿写文案 → 任何 AI 文本生成
+const ITEMS: { key: keyof Omit<UsageSummary, "plan" | "daily_remix_sets">; label: string; suffix: string }[] = [
+  { key: "monitor_posts",    label: "监控帖子",  suffix: "帖" },
+  { key: "accounts",         label: "账号池",    suffix: "个" },
+  { key: "daily_image_gen",  label: "今日生图",  suffix: "张" },
+  { key: "daily_text_gen",   label: "今日写文",  suffix: "篇" },
 ];
 
 export function PlanUsageCard() {

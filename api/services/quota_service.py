@@ -70,18 +70,28 @@ async def count_accounts(user_id: int) -> int:
 
 
 async def get_daily_usage(user_id: int) -> Dict[str, int]:
-    """返回 {image_gen: N, remix_sets: N}（今日累计）。"""
+    """返回 {image_gen, text_gen, remix_sets}（今日累计）。
+
+    remix_sets 是历史列名（deprecated），现在所有图都走 image_gen，
+    所有文案都走 text_gen。
+    """
     today = _today()
     async with aiosqlite.connect(monitor_db.DB_PATH) as db:
         async with db.execute(
-            "SELECT image_gen_count, remix_sets_count FROM daily_usage "
-            "WHERE user_id=? AND date=?",
+            "SELECT image_gen_count, "
+            "       COALESCE(text_gen_count, 0), "
+            "       remix_sets_count "
+            "  FROM daily_usage WHERE user_id=? AND date=?",
             (user_id, today),
         ) as cur:
             row = await cur.fetchone()
             if not row:
-                return {"image_gen": 0, "remix_sets": 0}
-            return {"image_gen": int(row[0] or 0), "remix_sets": int(row[1] or 0)}
+                return {"image_gen": 0, "text_gen": 0, "remix_sets": 0}
+            return {
+                "image_gen":  int(row[0] or 0),
+                "text_gen":   int(row[1] or 0),
+                "remix_sets": int(row[2] or 0),
+            }
 
 
 async def get_usage_summary(user: Dict[str, Any]) -> Dict[str, Any]:
@@ -104,6 +114,11 @@ async def get_usage_summary(user: Dict[str, Any]) -> Dict[str, Any]:
             "used": daily["image_gen"],
             "quota": _user_quota(user, "daily_image_gen"),
         },
+        "daily_text_gen": {
+            "used": daily["text_gen"],
+            "quota": _user_quota(user, "daily_text_gen"),
+        },
+        # deprecated（保留兼容老前端），值已不再变化
         "daily_remix_sets": {
             "used": daily["remix_sets"],
             "quota": _user_quota(user, "daily_remix_sets"),
@@ -126,9 +141,15 @@ async def check_or_raise(user: Dict[str, Any], key: str, *, delta: int = 1) -> N
         used = await count_monitor_posts(user_id)
     elif key == "accounts":
         used = await count_accounts(user_id)
-    elif key in ("daily_image_gen", "daily_remix_sets"):
+    elif key == "daily_image_gen":
         daily = await get_daily_usage(user_id)
-        used = daily["image_gen"] if key == "daily_image_gen" else daily["remix_sets"]
+        used = daily["image_gen"]
+    elif key == "daily_text_gen":
+        daily = await get_daily_usage(user_id)
+        used = daily["text_gen"]
+    elif key == "daily_remix_sets":
+        # deprecated：不再做检查（仿写图配额已合并到 daily_image_gen）
+        return
     else:
         return
 
@@ -156,23 +177,35 @@ def _human(key: str) -> str:
     return {
         "monitor_posts": "监控帖子",
         "accounts": "账号池",
-        "daily_image_gen": "今日商品图生成",
-        # 旧名 remix_sets 沿用（DB 列名也是 remix_sets_count），但实际语义
-        # 已从"套数"改为"实际生成图数"（套 × 每套主体图数）
-        "daily_remix_sets": "今日仿写图数",
+        "daily_image_gen": "今日 AI 生图",
+        "daily_text_gen":  "今日 AI 写文",
+        "daily_remix_sets": "今日仿写（已废弃）",
     }.get(key, key)
 
 
-# ── 用量计数（image_gen / remix_sets）────────────────────────────────────────
+# ── 用量计数（image_gen / text_gen）─────────────────────────────────────────
+
+_USAGE_KEY_TO_COL = {
+    "image_gen":  "image_gen_count",
+    "text_gen":   "text_gen_count",
+    "remix_sets": "remix_sets_count",  # deprecated：不再写入
+}
+
 
 async def record_usage(user_id: Optional[int], key: str, delta: int = 1) -> None:
-    """累加当日用量。`key` 为 'image_gen' 或 'remix_sets'。"""
+    """累加当日用量。key 取值：image_gen | text_gen。
+
+    旧代码可能仍传 remix_sets，本函数会静默忽略（避免重复计数）。
+    """
     if not user_id:
         return
-    if key not in ("image_gen", "remix_sets"):
+    if key == "remix_sets":
+        # deprecated：仿写图数已并入 image_gen，旧调用不再写库
+        return
+    col = _USAGE_KEY_TO_COL.get(key)
+    if not col:
         return
     today = _today()
-    col = "image_gen_count" if key == "image_gen" else "remix_sets_count"
     async with aiosqlite.connect(monitor_db.DB_PATH) as db:
         await db.execute(
             f"INSERT INTO daily_usage (user_id, date, {col}) VALUES (?, ?, ?) "

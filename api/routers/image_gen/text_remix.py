@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from ..auth import get_current_user
-from ...services import ai_client, local_storage, monitor_db, qiniu_uploader
+from ...services import ai_client, local_storage, monitor_db, qiniu_uploader, quota_service
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +212,11 @@ async def text_remix_generate(
         raise HTTPException(status_code=400, detail="text_content 必填")
     count = max(1, min(int(req.count or 1), 3))   # MVP 同步上限 3
 
+    # 图配额：text-remix 每次生 count 张图（每张 1 次 image edits 调用）
+    await quota_service.check_or_raise(
+        current_user, "daily_image_gen", delta=count,
+    )
+
     bg = await monitor_db.get_text_remix_background(req.background_id, user_id)
     if not bg:
         raise HTTPException(status_code=404, detail="背景图不存在或无权访问")
@@ -314,12 +319,21 @@ async def text_remix_generate(
                 pass
             results.append({"image_url": image_url, "error": ""})
 
+    # 按实际生成成功的张数扣配额（失败的不扣，对用户更友好）
+    success_count = sum(1 for r in results if r.get("image_url"))
+    if success_count > 0:
+        try:
+            await quota_service.record_usage(user_id, "image_gen", delta=success_count)
+        except Exception as e:
+            logger.warning(f"[text_remix] record_usage failed: {e}")
+
     return {
         "ok": True,
         "results": results,
         "background_id": bg["id"],
         "background_url": bg["image_url"],
         "text": text,
+        "total_images": success_count,
     }
 
 
@@ -383,6 +397,12 @@ async def create_text_remix_task(
             detail="选中的背景图都不存在或无权访问",
         )
 
+    # 图配额：worker 会跑 count × len(sources_clean) × len(valid_ids) 张图
+    expected_images = count * len(sources_clean) * len(valid_ids)
+    await quota_service.check_or_raise(
+        current_user, "daily_image_gen", delta=expected_images,
+    )
+
     task_id = await monitor_db.add_text_remix_task(
         user_id=user_id,
         post_url=req.post_url or "",
@@ -398,7 +418,18 @@ async def create_text_remix_task(
     )
     if not task_id:
         raise HTTPException(status_code=500, detail="创建任务失败")
-    return {"ok": True, "task_id": task_id}
+
+    # 提交时按"预期总图数"预扣（worker 跑失败的部分多扣的可以后续补偿）
+    try:
+        await quota_service.record_usage(user_id, "image_gen", delta=expected_images)
+    except Exception as e:
+        logger.warning(f"[text_remix] record_usage failed: {e}")
+
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "total_images": expected_images,
+    }
 
 
 def _enrich_task(task: dict) -> dict:
@@ -478,6 +509,15 @@ async def clone_text_remix_task(
         bgs_meta = _json.loads(task.get("backgrounds_meta_json") or "[]")
     except Exception:
         raise HTTPException(status_code=500, detail="原任务参数解析失败")
+
+    # clone 同样扣图配额（克隆 = 重做一次）
+    count = int(task.get("count") or 1)
+    expected_images = count * len(text_sources) * len(bg_ids)
+    if expected_images > 0:
+        await quota_service.check_or_raise(
+            current_user, "daily_image_gen", delta=expected_images,
+        )
+
     new_id = await monitor_db.add_text_remix_task(
         user_id=user_id,
         post_url=task.get("post_url") or "",
@@ -486,9 +526,14 @@ async def clone_text_remix_task(
         text_sources=text_sources,
         background_ids=bg_ids,
         backgrounds_meta=bgs_meta,
-        count=int(task.get("count") or 1),
+        count=count,
         size=task.get("size") or "",
         style_hint=task.get("style_hint") or "",
         image_model_id=task.get("image_model_id"),
     )
-    return {"ok": True, "task_id": new_id}
+    if expected_images > 0:
+        try:
+            await quota_service.record_usage(user_id, "image_gen", delta=expected_images)
+        except Exception as e:
+            logger.warning(f"[text_remix] clone record_usage failed: {e}")
+    return {"ok": True, "task_id": new_id, "total_images": expected_images}

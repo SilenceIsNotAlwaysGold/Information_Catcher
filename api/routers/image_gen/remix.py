@@ -201,12 +201,16 @@ async def create_remix_task(
     if not ref_idxs:
         ref_idxs = [0]
 
-    # 配额按"实际生成图数"算，跟 product 模块语义一致：
-    #   总图数 = 套数(count) × 每套主体图数(len(ref_idxs))
-    # 旧版按套数扣，导致选 5 张参考图时配额低估 5 倍。
+    # 图文配额分轨：
+    #   - 图：套数(count) × 每套主体图数(len(ref_idxs)) → daily_image_gen
+    #   - 文：套数(count) 篇文案                    → daily_text_gen
     expected_images = count * max(1, len(ref_idxs))
+    expected_texts  = count
     await quota_service.check_or_raise(
-        current_user, "daily_remix_sets", delta=expected_images,
+        current_user, "daily_image_gen", delta=expected_images,
+    )
+    await quota_service.check_or_raise(
+        current_user, "daily_text_gen", delta=expected_texts,
     )
 
     # 立刻先解析一次，验证可达 + 拿参考图 URL，避免任务跑起来才发现链接挂了
@@ -244,6 +248,7 @@ async def create_remix_task(
     ref_urls = [imgs[i] for i in ref_idxs]
     # 截边界后 ref 数量可能比 check 时少，重算真实图数（多扣的会自动反映在记账上）
     actual_images = count * len(ref_idxs)
+    actual_texts  = count
 
     user_id = current_user.get("id") if current_user else None
     task_id = await monitor_db.create_remix_task(
@@ -268,7 +273,8 @@ async def create_remix_task(
     )
 
     try:
-        await quota_service.record_usage(user_id, "remix_sets", delta=actual_images)
+        await quota_service.record_usage(user_id, "image_gen", delta=actual_images)
+        await quota_service.record_usage(user_id, "text_gen",  delta=actual_texts)
     except Exception as e:
         logger.warning(f"[remix] record_usage failed: {e}")
 
@@ -286,6 +292,7 @@ async def create_remix_task(
         "count": count,
         "refs_per_set": len(ref_idxs),
         "total_images": actual_images,
+        "total_texts":  actual_texts,
     }
 
 
@@ -349,8 +356,12 @@ async def clone_remix_task(
     count = max(1, min(int(src.get("count") or 1), 30))
     # 配额按实际生图数算（套数 × 每套主体图数），跟提交端点一致
     expected_images = count * max(1, len(ref_idxs))
+    expected_texts  = count
     await quota_service.check_or_raise(
-        current_user, "daily_remix_sets", delta=expected_images,
+        current_user, "daily_image_gen", delta=expected_images,
+    )
+    await quota_service.check_or_raise(
+        current_user, "daily_text_gen", delta=expected_texts,
     )
     new_id = await monitor_db.create_remix_task(
         user_id=user_id,
@@ -371,7 +382,8 @@ async def clone_remix_task(
         image_model_id=src.get("image_model_id"),
     )
     try:
-        await quota_service.record_usage(user_id, "remix_sets", delta=expected_images)
+        await quota_service.record_usage(user_id, "image_gen", delta=expected_images)
+        await quota_service.record_usage(user_id, "text_gen",  delta=expected_texts)
     except Exception as e:
         logger.warning(f"[remix] clone record_usage failed: {e}")
     try:

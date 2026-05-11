@@ -929,6 +929,9 @@ async def _migrate(db):
     # 公众号扩展字段：打赏数 + 发布者 IP 属地（来自 /mp/getappmsgext）
     await _ensure_column(db, "monitor_posts", "reward_total", "INTEGER DEFAULT 0")
     await _ensure_column(db, "monitor_posts", "ip_wording", "TEXT DEFAULT ''")
+    # 配额分轨：图配额（daily_image_gen）+ 文配额（daily_text_gen）独立累计。
+    # 老表只有 image_gen_count / remix_sets_count；这里加 text_gen_count。
+    await _ensure_column(db, "daily_usage", "text_gen_count", "INTEGER DEFAULT 0")
     # 关联到博主（来自博主追新的帖子才有；普通监控帖为 NULL）
     # 用于在 CreatorsCard 折叠展开时展示该博主的作品列表
     await _ensure_column(db, "monitor_posts", "creator_id", "INTEGER")
