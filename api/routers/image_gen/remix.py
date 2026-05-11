@@ -42,6 +42,13 @@ class CreateRemixTaskRequest(BaseModel):
     # 高级：用户自定义 prompt（留空走默认模板）
     image_prompt: Optional[str] = ""     # 图片生成 prompt 模板（替代 REMIX_PROMPT_EN）
     caption_prompt: Optional[str] = ""   # 文案改写 system_prompt（替代 _generate_caption 默认）
+    # 统一风格：开启时多套图共享同一份 image prompt（不注入每套差异化的文案主题）
+    unified_style: Optional[bool] = False
+    # P15.7: 可选指定 AI 模型 row id（null = 用用户偏好 / 系统默认）
+    text_model_id: Optional[int] = None
+    image_model_id: Optional[int] = None
+
+    model_config = {"protected_namespaces": ()}
 
 
 async def _fetch_image_dataurl(url: str, platform: str) -> str:
@@ -256,6 +263,9 @@ async def create_remix_task(
         style_keywords=(req.style_keywords or "").strip(),
         image_prompt=(req.image_prompt or "").strip(),
         caption_prompt=(req.caption_prompt or "").strip(),
+        unified_style=bool(req.unified_style),
+        text_model_id=req.text_model_id,
+        image_model_id=req.image_model_id,
     )
 
     try:
@@ -351,6 +361,10 @@ async def clone_remix_task(
         count=count,
         size=(src.get("size") or "").strip(),
         style_keywords=(src.get("style_keywords") or "").strip(),
+        image_prompt=(src.get("image_prompt") or "").strip(),
+        caption_prompt=(src.get("caption_prompt") or "").strip(),
+        text_model_id=src.get("text_model_id"),
+        image_model_id=src.get("image_model_id"),
     )
     try:
         await quota_service.record_usage(user_id, "remix_sets", delta=count)

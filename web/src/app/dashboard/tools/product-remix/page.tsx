@@ -14,6 +14,7 @@ import {
 import { useMe, useAiModels } from "@/lib/useApi";
 import { toastOk, toastErr } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
+import { ModelSelector } from "@/components/ModelSelector";
 
 import { IMAGE_API, proxyUrl } from "@/components/product-image/utils";
 import { useImageConfig } from "@/components/product-image/useImageConfig";
@@ -148,6 +149,8 @@ export default function ProductRemixPage() {
   // ── 步骤 2：提交参数 ────────────────────────────────────────────────────
   const [count, setCount] = useState(5);
   const [styleKeywords, setStyleKeywords] = useState("");
+  // 统一风格：开启时多套图共享同一份 prompt 基调（不注入每套文案主题）
+  const [unifiedStyle, setUnifiedStyle] = useState(true);
   // 高级：用户自定义 prompt（留空则用默认）
   const [imagePrompt, setImagePrompt] = useState("");
   const [captionPrompt, setCaptionPrompt] = useState("");
@@ -287,6 +290,9 @@ export default function ProductRemixPage() {
   // P15: 兼容老 cfg + 新 ai_models
   const { models: availableImageModels } = useAiModels("image");
   const hasAnyImageModel = availableImageModels.length > 0 || !!cfg.has_key;
+  // P15.7: 任务级别的模型选择（不传 = 用用户偏好 / 系统默认）
+  const [taskTextModelId, setTaskTextModelId] = useState<number | null>(null);
+  const [taskImageModelId, setTaskImageModelId] = useState<number | null>(null);
 
   const handleSubmit = async () => {
     if (!post) { toastErr("请先加载作品"); return; }
@@ -302,8 +308,11 @@ export default function ProductRemixPage() {
           ref_image_idx: refIdxs[0] ?? 0,
           count,
           style_keywords: styleKeywords.trim(),
+          unified_style: unifiedStyle,
           image_prompt: imagePrompt.trim(),
           caption_prompt: captionPrompt.trim(),
+          text_model_id: taskTextModelId,
+          image_model_id: taskImageModelId,
         }),
       });
       const data = await r.json().catch(() => ({}));
@@ -608,6 +617,23 @@ export default function ProductRemixPage() {
               </p>
             </div>
 
+            {/* 统一风格开关 */}
+            <div className="flex items-start gap-2 py-1">
+              <input
+                id="unified-style"
+                type="checkbox"
+                className="mt-1 accent-secondary"
+                checked={unifiedStyle}
+                onChange={(e) => setUnifiedStyle(e.target.checked)}
+              />
+              <label htmlFor="unified-style" className="text-sm text-default-700 cursor-pointer select-none">
+                统一风格
+                <span className="text-xs text-default-400 ml-2">
+                  多套图共用同一基调（不再按每套文案主题改背景）；文案仍每套不同
+                </span>
+              </label>
+            </div>
+
             {/* 风格关键词（可选） */}
             <div className="space-y-2">
               <p className="text-sm text-default-700">
@@ -734,6 +760,22 @@ export default function ProductRemixPage() {
                   </p>
                 </div>
               )}
+            </div>
+
+            {/* P15.7: AI 模型选择（文本 + 图像） */}
+            <div className="grid md:grid-cols-2 gap-3">
+              <ModelSelector
+                usage="text"
+                value={taskTextModelId}
+                onChange={setTaskTextModelId}
+                label="文本模型（用于文案改写）"
+              />
+              <ModelSelector
+                usage="image"
+                value={taskImageModelId}
+                onChange={setTaskImageModelId}
+                label="图像模型（用于换风格生图）"
+              />
             </div>
 
             <Button

@@ -21,6 +21,7 @@ import httpx
 from . import monitor_db
 from . import qiniu_uploader
 from . import local_storage
+from . import ai_client
 from ..routers.image_gen._common import (
     DEFAULT_SIZE, call_edits, max_per_batch_for, MAX_TOTAL,
 )
@@ -63,16 +64,15 @@ CAPTION_PROMPT_TEMPLATE = (
 def _prompt_with_caption(
     caption_title: str, caption_body: str, style_keywords: str = "",
     base_prompt: str = "",
+    unified_style: bool = False,
 ) -> str:
     """把当前套的"变种文案主题" + 用户自定义风格关键词 注入图片 prompt。
 
-    流程：先生成文案 → 用文案主题做图 prompt → 调 API 换背景换风格。
-    这里只取标题/正文前 200 字作为风格提示，避免 prompt 过长被截断。
-    style_keywords 为用户填的自由文本（"日系简约 / 赛博朋克 / 莫兰迪色调"等），
-    优先级最高，附加到 prompt 末尾。
+    unified_style=True 时：不注入每套文案主题，多套图风格统一（由 base_prompt
+    和 style_keywords 决定基调）。文案仍按 _generate_caption 每套不同。
     """
-    theme = (caption_title or caption_body or "").strip()
     parts = [(base_prompt or REMIX_PROMPT_EN).strip()]
+    theme = "" if unified_style else (caption_title or caption_body or "").strip()
     if theme:
         theme = theme[:200].replace("\n", " ").strip()
         parts.append(
@@ -133,50 +133,39 @@ async def _download_ref_image(url: str) -> Optional[bytes]:
 async def _generate_caption(
     *, post_title: str, post_desc: str, set_idx: int, n_total: int,
     prompt_template: str = "",
+    user_id: Optional[int] = None,
+    model_id: Optional[int] = None,  # P15.7: 任务指定模型
 ) -> tuple[str, str, str]:
     """让 AI 基于原文案改写一份新版本（标题 + 正文）。返回 (title, body, error)。"""
-    ai_base_url = (await monitor_db.get_setting("ai_base_url", "")).strip()
-    ai_api_key = (await monitor_db.get_setting("ai_api_key", "")).strip()
-    ai_model = (await monitor_db.get_setting("ai_model", "gpt-4o-mini")).strip() or "gpt-4o-mini"
-    if not ai_base_url or not ai_api_key:
-        return "", "", "AI 未配置"
-
     # 用用户传入的模板（若有）或默认模板；占位符 {n_total} {set_idx} 渲染时替换
     tpl = (prompt_template or "").strip() or CAPTION_PROMPT_TEMPLATE
     try:
         system_prompt = tpl.format(n_total=n_total, set_idx=set_idx)
     except (KeyError, IndexError, ValueError):
-        # 用户传了不规范模板（少了占位符或多余 {}），退回默认
         system_prompt = CAPTION_PROMPT_TEMPLATE.format(n_total=n_total, set_idx=set_idx)
     user_msg = (
         f"原标题：{post_title}\n\n"
         f"原正文：{post_desc[:600]}\n\n"
         f"请写第 {set_idx} 版本。注意要与其它版本有差异化的角度。"
     )
-    headers = {"Authorization": f"Bearer {ai_api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": ai_model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_msg},
-        ],
-        "temperature": 1.05,
-        "max_tokens": 1000,
-        "response_format": {"type": "json_object"},
-    }
-    url = f"{ai_base_url.rstrip('/')}/chat/completions"
     try:
-        async with httpx.AsyncClient(timeout=45) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            if resp.status_code >= 400:
-                return "", "", f"AI HTTP {resp.status_code}: {resp.text[:200]}"
-            data = resp.json()
-    except httpx.TimeoutException:
-        return "", "", "AI 响应超时（45s）"
+        content = await ai_client.call_text(
+            user_msg,
+            system_prompt=system_prompt,
+            model_id=model_id,
+            user_id=user_id,
+            feature="remix_caption",
+            temperature=1.05,
+            max_tokens=1000,
+            timeout=45.0,
+            extra_payload={"response_format": {"type": "json_object"}},
+        )
+    except ai_client.AIModelNotConfigured as e:
+        return "", "", str(e)
     except Exception as e:
         return "", "", f"AI 调用异常：{e}"
 
-    content = (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+    content = (content or "").strip()
     if not content:
         return "", "", "AI 未返回内容"
     try:
@@ -190,20 +179,24 @@ async def _gen_one_image(
     client: httpx.AsyncClient, *, base_url: str, api_key: str, model: str,
     size: str, ref_bytes: bytes, user_id: Optional[int] = None,
     prompt: str = REMIX_PROMPT_EN,
+    image_model_row_id: int = 0,
+    image_max_concurrent: int = 0,
 ) -> dict:
     """对一张参考图调一次 edits，返回 {image_url, image_b64, error}。
 
     prompt 默认用通用 REMIX_PROMPT_EN；调用方可注入"文案主题"个性化 prompt。
+    P15.8: 走模型级并发控制（acquire_slot）。
     """
     auth_headers = {"Authorization": f"Bearer {api_key}"}
 
     images = None
     last_err = ""
     for attempt in range(2):
-        result, err = await call_edits(
-            client, base_url=base_url, model=model, prompt=prompt,
-            n=1, size=size, img_bytes=ref_bytes, headers=auth_headers,
-        )
+        async with ai_client.acquire_slot(image_model_row_id, image_max_concurrent):
+            result, err = await call_edits(
+                client, base_url=base_url, model=model, prompt=prompt,
+                n=1, size=size, img_bytes=ref_bytes, headers=auth_headers,
+            )
         if result:
             images = result
             break
@@ -240,6 +233,10 @@ async def _gen_one_set(
     style_keywords: str = "",
     image_prompt_override: str = "",
     caption_prompt_template: str = "",
+    unified_style: bool = False,
+    text_model_id: Optional[int] = None,  # P15.7: 任务指定的文本模型
+    image_model_row_id: int = 0,           # P15.8
+    image_max_concurrent: int = 0,         # P15.8
     progress_cb=None,
     cancel_check=None,
 ) -> dict:
@@ -276,6 +273,8 @@ async def _gen_one_set(
         post_title=post_title, post_desc=post_desc,
         set_idx=set_idx, n_total=total,
         prompt_template=caption_prompt_template,
+        user_id=user_id,
+        model_id=text_model_id,
     )
     await _emit(title, body, cerr)
 
@@ -283,6 +282,7 @@ async def _gen_one_set(
     image_prompt = _prompt_with_caption(
         title, body, style_keywords=style_keywords,
         base_prompt=image_prompt_override,
+        unified_style=unified_style,
     )
 
     # ── 第 3 步：套内 K 张并发 ───────────────────────────────────────────
@@ -297,6 +297,8 @@ async def _gen_one_set(
             client, base_url=base_url, api_key=api_key, model=model,
             size=size, ref_bytes=ref_bytes, user_id=user_id,
             prompt=image_prompt,
+            image_model_row_id=image_model_row_id,
+            image_max_concurrent=image_max_concurrent,
         )
         async with sem:
             images[j] = result
@@ -329,6 +331,9 @@ async def _gen_one_set(
 async def _process_task(task: dict) -> None:
     task_id = task["id"]
     user_id = task.get("user_id")
+    # P15.7: 任务可携带显式的 AI 模型 row_id；不传走用户偏好 / 系统默认
+    task_text_model_id = task.get("text_model_id")
+    task_image_model_id = task.get("image_model_id")
 
     # 解析参考图列表：v2 优先用 ref_image_urls(JSON)，v1 fallback 单值字段
     ref_urls: list = []
@@ -348,10 +353,20 @@ async def _process_task(task: dict) -> None:
         await monitor_db.finish_remix_task(task_id, status="error", error="参考图 URL 为空")
         return
 
-    base_url = (await monitor_db.get_setting("image_api_base_url", "")).strip()
-    api_key = (await monitor_db.get_setting("image_api_key", "")).strip()
-    model = (await monitor_db.get_setting("image_api_model", "")).strip()
-    cfg_size = (await monitor_db.get_setting("image_api_size", DEFAULT_SIZE)).strip() or DEFAULT_SIZE
+    # P15: 通过 ai_client 解析图像模型（多渠道 + 用户偏好 + 任务显式选择）
+    try:
+        _img_cfg = await ai_client.get_active_model_config(
+            usage_type="image", user_id=user_id, model_id=task_image_model_id,
+        )
+    except ai_client.AIModelNotConfigured as e:
+        await monitor_db.finish_remix_task(task_id, status="error", error=str(e))
+        return
+    base_url = _img_cfg["base_url"]
+    api_key = _img_cfg["api_key"]
+    model = _img_cfg["model_id"]
+    cfg_size = (_img_cfg.get("extra_config") or {}).get("size") or DEFAULT_SIZE
+    img_model_row_id = int(_img_cfg.get("model_row_id") or 0)
+    img_max_concurrent = int(_img_cfg.get("max_concurrent") or 0)  # P15.8
     if not base_url or not api_key or not model:
         await monitor_db.finish_remix_task(task_id, status="error",
                                             error="图像 API 未配置")
@@ -379,6 +394,7 @@ async def _process_task(task: dict) -> None:
     style_keywords = (task.get("style_keywords") or "").strip()
     image_prompt_override = (task.get("image_prompt") or "").strip()
     caption_prompt_template = (task.get("caption_prompt") or "").strip()
+    unified_style = bool(task.get("unified_style"))
 
     async def _is_cancelled() -> bool:
         try:
@@ -425,6 +441,10 @@ async def _process_task(task: dict) -> None:
                     style_keywords=style_keywords,
                     image_prompt_override=image_prompt_override,
                     caption_prompt_template=caption_prompt_template,
+                    unified_style=unified_style,
+                    text_model_id=task_text_model_id,  # P15.7
+                    image_model_row_id=img_model_row_id,    # P15.8
+                    image_max_concurrent=img_max_concurrent,
                     progress_cb=_progress,
                     cancel_check=_is_cancelled,
                 )

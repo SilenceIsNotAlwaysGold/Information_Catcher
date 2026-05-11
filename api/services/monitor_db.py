@@ -471,6 +471,55 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor_id, created_at DE
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_logs(target_type, target_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
+
+-- P15: AI 渠道（admin 配 N 个 LLM/图像 API provider）
+CREATE TABLE IF NOT EXISTS ai_providers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,                 -- 显示名："OpenAI" / "DeepSeek 官方" / "硅基流动"
+    base_url TEXT NOT NULL,             -- https://api.openai.com/v1
+    api_key TEXT NOT NULL,
+    enabled INTEGER DEFAULT 1,          -- 渠道总开关（关闭时其下所有 model 不可用）
+    sort_order INTEGER DEFAULT 0,
+    note TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+
+-- 模型（挂在 provider 下，按 usage_type 区分文本 / 图像）
+CREATE TABLE IF NOT EXISTS ai_models (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id INTEGER NOT NULL REFERENCES ai_providers(id) ON DELETE CASCADE,
+    model_id TEXT NOT NULL,             -- API 调用时传的 model 名："gpt-4o-mini"
+    display_name TEXT NOT NULL,         -- 用户看到的："GPT-4o Mini · 便宜快"
+    usage_type TEXT NOT NULL DEFAULT 'text',  -- 'text' | 'image'
+    published INTEGER DEFAULT 0,        -- 是否上架给普通用户（admin 永远能看到全部）
+    is_default INTEGER DEFAULT 0,       -- 该 usage_type 的系统默认
+    extra_config TEXT DEFAULT '{}',     -- JSON：图像模型的 size / 其他扩展参数
+    sort_order INTEGER DEFAULT 0,
+    note TEXT DEFAULT '',
+    max_concurrent INTEGER DEFAULT 0,   -- P15.8: 该模型同时进行中的请求上限（0 = 不限）
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_ai_models_usage ON ai_models(usage_type, published);
+CREATE INDEX IF NOT EXISTS idx_ai_models_provider ON ai_models(provider_id);
+
+-- AI 调用记录（计费 / 排查 / 使用统计用）
+CREATE TABLE IF NOT EXISTS ai_usage_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,                    -- NULL = 系统调用（如调度器后台改写）
+    model_id INTEGER,                   -- 对应 ai_models.id（model 删除后保留为 NULL）
+    model_id_str TEXT DEFAULT '',       -- 冗余存模型 name 便于 model 删除后仍可追溯
+    usage_type TEXT NOT NULL,           -- 'text' | 'image'
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    image_count INTEGER DEFAULT 0,      -- 图像生成次数（usage_type=image）
+    latency_ms INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'ok',           -- ok | error
+    error TEXT DEFAULT '',
+    feature TEXT DEFAULT '',            -- 来源场景：rewrite / cross_rewrite / product_image / image_gen / remix
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_user_date ON ai_usage_logs(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_model ON ai_usage_logs(model_id, created_at DESC);
 """
 
 
@@ -717,6 +766,13 @@ async def _migrate(db):
     await _ensure_column(db, "remix_tasks", "style_keywords", "TEXT DEFAULT ''")
     await _ensure_column(db, "remix_tasks", "image_prompt", "TEXT DEFAULT ''")
     await _ensure_column(db, "remix_tasks", "caption_prompt", "TEXT DEFAULT ''")
+    # 统一风格：开启后多套图共享同一份 image prompt（不注入每套差异化文案主题）
+    await _ensure_column(db, "remix_tasks", "unified_style", "INTEGER DEFAULT 0")
+    # P15.7: 仿写任务可选指定 AI 模型（NULL = 用用户偏好 / 系统默认）
+    await _ensure_column(db, "remix_tasks", "text_model_id",  "INTEGER")
+    await _ensure_column(db, "remix_tasks", "image_model_id", "INTEGER")
+    # P15.8: 每个模型独立的并发上限（0 = 不限）
+    await _ensure_column(db, "ai_models", "max_concurrent", "INTEGER DEFAULT 0")
     # 博主追新健康度 + 未读：让列表能区分"挂了 / 卡 cookie / 有新内容"
     await _ensure_column(db, "monitor_creators", "last_check_status", "TEXT DEFAULT 'unknown'")
     await _ensure_column(db, "monitor_creators", "last_check_error",  "TEXT DEFAULT ''")
@@ -732,6 +788,58 @@ async def _migrate(db):
     await _ensure_column(db, "monitor_groups", "platform", "TEXT DEFAULT ''")
     # P14: monitor_alerts 按平台隔离展示
     await _ensure_column(db, "monitor_alerts", "platform", "TEXT DEFAULT ''")
+
+    # P15: 老 ai_* / image_api_* settings → ai_providers + ai_models 自动迁移
+    # 只迁一次：若 ai_providers 表为空 + 老 settings 有 key，建一个"默认"渠道
+    async with db.execute("SELECT COUNT(*) FROM ai_providers") as cur:
+        provider_count = (await cur.fetchone())[0]
+    if provider_count == 0:
+        # 拉老 settings
+        async def _get(k, default=""):
+            async with db.execute(
+                "SELECT value FROM monitor_settings WHERE key=?", (k,)
+            ) as c:
+                r = await c.fetchone()
+                return (r[0] if r else default) or default
+
+        # 文本渠道
+        text_key = await _get("ai_api_key")
+        if text_key:
+            text_base = await _get("ai_base_url", "https://api.openai.com/v1")
+            text_model = await _get("ai_model", "gpt-4o-mini")
+            cur = await db.execute(
+                "INSERT INTO ai_providers (name, base_url, api_key, enabled, sort_order, note) "
+                "VALUES (?,?,?,1,0,?)",
+                ("默认文本渠道（迁移）", text_base, text_key, "自动从老 settings 迁移"),
+            )
+            pid = cur.lastrowid
+            await db.execute(
+                "INSERT INTO ai_models "
+                "(provider_id, model_id, display_name, usage_type, published, is_default, sort_order) "
+                "VALUES (?,?,?,?,1,1,0)",
+                (pid, text_model, text_model, "text"),
+            )
+
+        # 图像渠道
+        img_key = await _get("image_api_key")
+        if img_key:
+            img_base = await _get("image_api_base_url", "https://api.openai.com/v1")
+            img_model = await _get("image_api_model", "gpt-image-1")
+            img_size = await _get("image_api_size", "1024x1024")
+            cur = await db.execute(
+                "INSERT INTO ai_providers (name, base_url, api_key, enabled, sort_order, note) "
+                "VALUES (?,?,?,1,0,?)",
+                ("默认图像渠道（迁移）", img_base, img_key, "自动从老 settings 迁移"),
+            )
+            pid = cur.lastrowid
+            import json as _j
+            await db.execute(
+                "INSERT INTO ai_models "
+                "(provider_id, model_id, display_name, usage_type, published, is_default, extra_config, sort_order) "
+                "VALUES (?,?,?,?,1,1,?,0)",
+                (pid, img_model, img_model, "image", _j.dumps({"size": img_size})),
+            )
+        await db.commit()
     # 老数据补 platform：通过 note_id JOIN monitor_posts 反推
     await db.execute(
         "UPDATE monitor_alerts SET platform=("
@@ -2780,12 +2888,17 @@ async def create_remix_task(
     style_keywords: str = "",
     image_prompt: str = "",
     caption_prompt: str = "",
+    unified_style: bool = False,
+    text_model_id: Optional[int] = None,
+    image_model_id: Optional[int] = None,
 ) -> int:
     """创建 remix 任务。
 
     多图（v2，新建议）：传 ref_image_urls + ref_image_idxs（list）。
     单图（v1，向后兼容）：传 ref_image_url + ref_image_idx。
     两组字段都会写入，worker 优先读 list 字段；若 list 为空 fallback 单值字段。
+
+    P15.7: text_model_id / image_model_id 可选指定 AI 模型 row id；不传走用户偏好。
     """
     import json as _json
     idxs_json = _json.dumps(ref_image_idxs) if ref_image_idxs else ""
@@ -2797,13 +2910,16 @@ async def create_remix_task(
                 ref_image_url, ref_image_idx,
                 ref_image_urls, ref_image_idxs,
                 count, done_count, items_json, size, style_keywords,
-                image_prompt, caption_prompt)
-               VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?, ?, ?, ?)""",
+                image_prompt, caption_prompt, unified_style,
+                text_model_id, image_model_id)
+               VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?, ?, ?, ?, ?, ?, ?)""",
             (user_id, post_url, post_title, post_desc, platform,
              ref_image_url, ref_image_idx,
              urls_json, idxs_json,
              count, size, (style_keywords or "")[:200],
-             (image_prompt or "")[:4000], (caption_prompt or "")[:4000]),
+             (image_prompt or "")[:4000], (caption_prompt or "")[:4000],
+             1 if unified_style else 0,
+             text_model_id, image_model_id),
         )
         await db.commit()
         return cur.lastrowid or 0
