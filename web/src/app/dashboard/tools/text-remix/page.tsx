@@ -92,51 +92,58 @@ export default function TextRemixPage() {
   };
 
   // ── 步骤 2：OCR ───────────────────────────────────────────────────────
+  // ocrTexts[idx] = 该源图的提取文字（用户可编辑）；ocrStatus[idx]: idle/running/done/error
+  const [ocrTexts, setOcrTexts] = useState<Record<number, string>>({});
+  const [ocrStatus, setOcrStatus] = useState<Record<number, "idle" | "running" | "done" | "error">>({});
+  const [ocrErrors, setOcrErrors] = useState<Record<number, string>>({});
   const [ocring, setOcring] = useState(false);
-  const [extractedText, setExtractedText] = useState("");
-  // 用户可选哪个模型做 OCR（必须支持视觉，如 gpt-4o / claude / gemini / qwen-vl）
   const [ocrModelId, setOcrModelId] = useState<number | null>(null);
 
-  const handleExtract = async () => {
-    if (!post || sourceImgIdxs.length === 0) {
-      toastErr("请至少选一张源图");
-      return;
+  // 兼容旧缓存：把合并的 extractedText 拆到 ocrTexts[0]
+  const [extractedText, setExtractedText] = useState("");  // 仅用于 localStorage 兼容
+  useEffect(() => {
+    if (extractedText && Object.keys(ocrTexts).length === 0) {
+      setOcrTexts({ 0: extractedText });
+      setExtractedText("");
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [extractedText]);
+
+  const _ocrOne = async (idx: number): Promise<void> => {
+    if (!post) return;
+    const imgUrl = post.image_urls[idx] || post.images[idx];
+    if (!imgUrl) return;
+    setOcrStatus((s) => ({ ...s, [idx]: "running" }));
+    setOcrErrors((s) => ({ ...s, [idx]: "" }));
+    try {
+      const r = await fetch(IMAGE_API("/text-remix/extract-text"), {
+        method: "POST", headers,
+        body: JSON.stringify({ image_url: imgUrl, model_id: ocrModelId }),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        setOcrStatus((s) => ({ ...s, [idx]: "error" }));
+        setOcrErrors((s) => ({ ...s, [idx]: data.detail || "未知错误" }));
+        return;
+      }
+      setOcrTexts((s) => ({ ...s, [idx]: (data.text || "").trim() }));
+      setOcrStatus((s) => ({ ...s, [idx]: "done" }));
+    } catch (e: any) {
+      setOcrStatus((s) => ({ ...s, [idx]: "error" }));
+      setOcrErrors((s) => ({ ...s, [idx]: e?.message || String(e) }));
+    }
+  };
+
+  const handleExtract = async () => {
+    if (!post || sourceImgIdxs.length === 0) { toastErr("请至少选一张源图"); return; }
     setOcring(true);
     try {
-      // 多选时按顺序串行 OCR；任一张失败就停（避免重复抛同样的错误，且后续大概率也同样错）
-      const parts: string[] = [];
-      let failedAt = -1;
-      let failMsg = "";
-      for (const idx of sourceImgIdxs) {
-        const imgUrl = post.image_urls[idx] || post.images[idx];
-        if (!imgUrl) continue;
-        const r = await fetch(IMAGE_API("/text-remix/extract-text"), {
-          method: "POST", headers,
-          body: JSON.stringify({ image_url: imgUrl, model_id: ocrModelId }),
-        });
-        const data = await r.json();
-        if (!r.ok) {
-          failedAt = idx;
-          failMsg = data.detail || "未知错误";
-          break;
-        }
-        const txt = (data.text || "").trim();
-        if (txt) {
-          parts.push(
-            sourceImgIdxs.length > 1 ? `--- 第 ${idx + 1} 张 ---\n${txt}` : txt
-          );
-        }
-      }
-      const merged = parts.join("\n\n");
-      if (merged) setExtractedText(merged);
-      if (failedAt >= 0) {
-        toastErr(`第 ${failedAt + 1} 张 OCR 失败：${failMsg.slice(0, 200)}`);
-      } else {
-        toastOk(`已合并 ${parts.length} 张文字，请确认后再生成`);
-      }
-    } catch (e: any) { toastErr(`OCR 失败：${e?.message || e}`); }
-    finally { setOcring(false); }
+      // 并发跑所有选中的源图（Promise.allSettled 不会因单张失败中断其他）
+      await Promise.allSettled(sourceImgIdxs.map((idx) => _ocrOne(idx)));
+      // 统计
+      const ok = sourceImgIdxs.filter((i) => (ocrTexts[i] || "").trim()).length;
+      toastOk(`OCR 完成（具体看每张下方文字框）`);
+    } finally { setOcring(false); }
   };
 
   const toggleSourceImg = (i: number) => {
@@ -222,7 +229,9 @@ export default function TextRemixPage() {
       if (!raw) return;
       const d = JSON.parse(raw);
       if (d.postUrl) setPostUrl(d.postUrl);
-      if (d.extractedText) setExtractedText(d.extractedText);
+      if (typeof d.extractedText === "string" && d.extractedText) setExtractedText(d.extractedText);  // 老版本兼容
+      if (d.ocrTexts && typeof d.ocrTexts === "object") setOcrTexts(d.ocrTexts);
+      if (Array.isArray(d.sourceImgIdxs) && d.sourceImgIdxs.length > 0) setSourceImgIdxs(d.sourceImgIdxs);
       if (typeof d.ocrModelId === "number") setOcrModelId(d.ocrModelId);
       if (typeof d.styleHint === "string") setStyleHint(d.styleHint);
       if (typeof d.count === "number") setCount(d.count);
@@ -234,48 +243,76 @@ export default function TextRemixPage() {
     if (_firstLoad.current) { _firstLoad.current = false; return; }
     try {
       localStorage.setItem(PERSIST_KEY, JSON.stringify({
-        postUrl, extractedText, ocrModelId, styleHint, count, selectedBgIds,
+        postUrl, ocrTexts, sourceImgIdxs, ocrModelId, styleHint, count, selectedBgIds,
       }));
     } catch {}
-  }, [postUrl, extractedText, ocrModelId, styleHint, count, selectedBgIds, PERSIST_KEY]);
+  }, [postUrl, ocrTexts, sourceImgIdxs, ocrModelId, styleHint, count, selectedBgIds, PERSIST_KEY]);
 
   const handleGenerate = async () => {
-    if (!extractedText.trim()) { toastErr("请先提取并确认文字"); return; }
+    // 收集有效"文字源"（必须有提取出来的非空文字）
+    const validSources = sourceImgIdxs.filter((idx) => (ocrTexts[idx] || "").trim());
+    if (validSources.length === 0) { toastErr("没有可用的提取文字。请先 OCR 至少一张源图"); return; }
     if (selectedBgIds.length === 0) { toastErr("请至少选一张背景图"); return; }
+
     setGenerating(true);
     setResults([]);
-    try {
-      // 多张背景图按顺序生成；每张背景图各调一次后端，count 张/张背景
-      const all: ResultItem[] = [];
+
+    // 拼成「源图 × 背景图」笛卡尔积任务列表
+    type Job = { srcIdx: number; bgId: number; bgName: string; text: string };
+    const jobs: Job[] = [];
+    for (const srcIdx of validSources) {
+      const text = (ocrTexts[srcIdx] || "").trim();
       for (const bgId of selectedBgIds) {
         const bg = backgrounds.find((b) => b.id === bgId);
-        const r = await fetch(IMAGE_API("/text-remix/generate"), {
-          method: "POST", headers,
-          body: JSON.stringify({
-            background_id: bgId,
-            text_content: extractedText,
-            count,
-            style_hint: styleHint.trim(),
-          }),
-        });
-        const data = await r.json();
-        if (!r.ok) {
-          toastErr(`背景「${bg?.name || bgId}」生成失败：${data.detail || "未知"}`);
-          continue;
+        jobs.push({ srcIdx, bgId, bgName: bg?.name || `背景 ${bgId}`, text });
+      }
+    }
+
+    // 限 3 并发跑（image edits 上游限流，太多会 fail）
+    const concurrency = 3;
+    const all: ResultItem[] = [];
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < jobs.length) {
+        const i = cursor++;
+        const job = jobs[i];
+        try {
+          const r = await fetch(IMAGE_API("/text-remix/generate"), {
+            method: "POST", headers,
+            body: JSON.stringify({
+              background_id: job.bgId,
+              text_content: job.text,
+              count,
+              style_hint: styleHint.trim(),
+            }),
+          });
+          const data = await r.json();
+          if (!r.ok) {
+            all.push({
+              image_url: "", error: data.detail || "未知",
+              bg_name: `源${job.srcIdx + 1}×${job.bgName}`,
+            });
+          } else {
+            const items: ResultItem[] = (data.results || []).map((x: any) => ({
+              ...x,
+              bg_name: `源${job.srcIdx + 1}×${job.bgName}`,
+            } as any));
+            all.push(...items);
+          }
+        } catch (e: any) {
+          all.push({
+            image_url: "", error: e?.message || String(e),
+            bg_name: `源${job.srcIdx + 1}×${job.bgName}`,
+          });
         }
-        // 给每条结果带上 bg 名字，方便区分
-        const items: ResultItem[] = (data.results || []).map((x: any) => ({
-          ...x,
-          bg_name: bg?.name || `背景 ${bgId}`,
-        } as any));
-        all.push(...items);
         setResults([...all]);  // 流式更新
       }
+    };
+    try {
+      await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, () => worker()));
       const ok = all.filter((x) => x.image_url).length;
-      const total = selectedBgIds.length * count;
-      toastOk(`生成完成：${ok}/${total} 张成功（${selectedBgIds.length} 个背景 × ${count}）`);
-    } catch (e: any) { toastErr(`生成失败：${e?.message || e}`); }
-    finally { setGenerating(false); }
+      toastOk(`生成完成：${ok}/${jobs.length * count} 张（${validSources.length} 源 × ${selectedBgIds.length} 背景 × ${count}）`);
+    } finally { setGenerating(false); }
   };
 
   return (
@@ -335,8 +372,8 @@ export default function TextRemixPage() {
                 />
                 <Button color="secondary" size="sm" isLoading={ocring}
                   onPress={handleExtract}
-                  isDisabled={!post.images.length}>
-                  提取文字（OCR）
+                  isDisabled={!post.images.length || sourceImgIdxs.length === 0}>
+                  并发提取所有选中（{sourceImgIdxs.length} 张）
                 </Button>
               </div>
             </div>
@@ -368,21 +405,58 @@ export default function TextRemixPage() {
               })}
             </div>
 
-            {/* OCR 结果：可编辑 */}
-            <div>
-              <p className="text-xs text-default-700 mb-1">
-                提取的文字（可编辑确认，生成时按此文字渲染）
-              </p>
-              <textarea
-                className="w-full border border-divider rounded-md p-2 text-sm bg-background min-h-[120px]"
-                placeholder={ocring ? "OCR 中…" : "未提取。点上方「提取文字 OCR」按钮"}
-                value={extractedText}
-                onChange={(e) => setExtractedText(e.target.value)}
-              />
-              <p className="text-[11px] text-default-400 mt-1">
-                生成时会把这段文字"印"到背景图上，保持换行结构。
-              </p>
-            </div>
+            {/* OCR 结果：每张选中图独立一行（小预览 + 文字框 + 状态 + 重试） */}
+            {sourceImgIdxs.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs text-default-700">
+                  每张源图独立提取，可单独编辑/重试；生成时按每张文字配每张背景产出。
+                </p>
+                {sourceImgIdxs.map((idx) => {
+                  const u = post.images[idx];
+                  const txt = ocrTexts[idx] || "";
+                  const st = ocrStatus[idx] || "idle";
+                  const err = ocrErrors[idx] || "";
+                  return (
+                    <div key={idx} className="flex gap-2 items-start p-2 rounded-md border border-default-200 bg-content1">
+                      <div className="relative w-16 h-16 shrink-0 rounded overflow-hidden bg-default-100">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={u?.startsWith("data:") ? u : proxyUrl(u || "")}
+                          referrerPolicy="no-referrer" alt={`图 ${idx + 1}`}
+                          className="w-full h-full object-cover" />
+                        <span className="absolute top-0.5 left-0.5 bg-black/60 text-white text-[9px] px-1 rounded">
+                          {idx + 1}
+                        </span>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[11px] text-default-500">
+                            第 {idx + 1} 张
+                            {st === "running" && <span className="ml-2 text-secondary">提取中…</span>}
+                            {st === "done" && <span className="ml-2 text-success-600">✓ 已提取（可编辑）</span>}
+                            {st === "error" && <span className="ml-2 text-danger">提取失败</span>}
+                          </span>
+                          <button type="button"
+                            disabled={st === "running"}
+                            onClick={() => _ocrOne(idx)}
+                            className="text-[11px] text-primary hover:underline disabled:opacity-40">
+                            {st === "done" || st === "error" ? "重新提取" : "提取"}
+                          </button>
+                        </div>
+                        <textarea
+                          className="w-full border border-divider rounded-md p-2 text-xs bg-background min-h-[70px]"
+                          placeholder={st === "running" ? "提取中…" : "（空 / 点右上「提取」按钮）"}
+                          value={txt}
+                          onChange={(e) => setOcrTexts((s) => ({ ...s, [idx]: e.target.value }))}
+                        />
+                        {err && (
+                          <p className="text-[10px] text-danger mt-0.5">{err.slice(0, 200)}</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </CardBody>
         </Card>
       )}
@@ -487,18 +561,23 @@ export default function TextRemixPage() {
           <Button color="secondary" size="lg" className="w-full"
             startContent={<Wand2 size={18} />}
             isLoading={generating}
-            isDisabled={!extractedText.trim() || selectedBgIds.length === 0 || generating}
+            isDisabled={
+              sourceImgIdxs.filter((i) => (ocrTexts[i] || "").trim()).length === 0
+              || selectedBgIds.length === 0 || generating
+            }
             onPress={handleGenerate}>
-            {generating
-              ? "生成中…"
-              : `生成 ${selectedBgIds.length || 0} 个背景 × ${count} = ${(selectedBgIds.length || 0) * count} 张`}
+            {(() => {
+              const valid = sourceImgIdxs.filter((i) => (ocrTexts[i] || "").trim()).length;
+              const total = valid * selectedBgIds.length * count;
+              return generating ? "生成中…" : `生成 ${valid} 源 × ${selectedBgIds.length} 背景 × ${count} = ${total} 张`;
+            })()}
           </Button>
-          {!extractedText.trim() && (
+          {sourceImgIdxs.filter((i) => (ocrTexts[i] || "").trim()).length === 0 && (
             <p className="text-xs text-warning-600 flex items-center gap-1">
-              <AlertCircle size={12} />请先在上方提取并确认文字
+              <AlertCircle size={12} />请先 OCR 至少一张源图（点上方每行的「提取」）
             </p>
           )}
-          {extractedText.trim() && selectedBgIds.length === 0 && (
+          {sourceImgIdxs.filter((i) => (ocrTexts[i] || "").trim()).length > 0 && selectedBgIds.length === 0 && (
             <p className="text-xs text-warning-600 flex items-center gap-1">
               <AlertCircle size={12} />请至少选一张背景图（可多选）
             </p>
