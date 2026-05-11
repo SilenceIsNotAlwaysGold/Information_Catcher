@@ -160,22 +160,11 @@ async def fetch_post_cover(
     if not image_urls:
         return {"error": "未能从作品中提取到任何图片"}
 
-    # 并发下载并 base64 内嵌：前端展示用 data URL，绕过 CDN 防盗链
-    import asyncio as _asyncio
-    sem = _asyncio.Semaphore(6)
-
-    async def _one(u: str) -> str:
-        async with sem:
-            return await _fetch_image_dataurl(u, plat.name)
-
-    data_urls = await _asyncio.gather(
-        *(_one(u) for u in image_urls), return_exceptions=False,
-    )
-    # 没下载成功的 fallback 用原 URL（让前端尝试直加载，至少有占位）
-    images_for_display = [d or u for d, u in zip(data_urls, image_urls)]
-
+    # 之前会把每张图 base64 内嵌进响应，导致 response 体积 N×MB（10 张图 ~14MB），
+    # 经 cloudflare tunnel 慢得离谱。前端早已支持 proxyUrl() 走 /monitor/image/proxy
+    # 代理拉图（带 Referer 绕 CDN 防盗链），不再需要内嵌 → response 几 KB，秒回。
     return {
-        "images": images_for_display,   # 展示用：优先 data:URL
+        "images": image_urls,           # 展示用：前端 proxyUrl() 包裹后渲染
         "image_urls": image_urls,       # 原 CDN URL：worker 提交任务时引用
         "title": metrics.get("title") or "",
         "desc": (metrics.get("desc") or "")[:500],
@@ -398,11 +387,11 @@ async def list_remix_tasks(
     limit: int = 30,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    role = (current_user or {}).get("role") or "user"
+    """「我的任务」 — 始终按当前用户隔离，admin 也只看自己的（自己用工具时的任务）。
+    admin 要查别人的任务请走 admin 后台（如有专门页面）。"""
     user_id = current_user.get("id") if current_user else None
-    scope_uid = None if role == "admin" else user_id
     rows = await monitor_db.list_remix_tasks(
-        user_id=scope_uid, limit=max(1, min(limit, 100)),
+        user_id=user_id, limit=max(1, min(limit, 100)),
     )
     return {"tasks": rows}
 
