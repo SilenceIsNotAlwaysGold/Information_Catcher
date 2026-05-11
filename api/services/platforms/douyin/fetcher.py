@@ -226,6 +226,32 @@ class DouyinPlatform(Platform):
 
         title = detail.get("desc") or ""
 
+        # 图文笔记（aweme_type==68）：detail.images 含全部图，每张取 url_list[0]
+        # 优先 download_url_list（高清原图），fallback url_list
+        images: list = []
+        for img in (detail.get("images") or []):
+            if not isinstance(img, dict):
+                continue
+            urls = img.get("download_url_list") or img.get("url_list") or []
+            if isinstance(urls, list) and urls:
+                u = urls[0]
+                if u:
+                    images.append(u)
+        # 没拿到，再兜底 image_post_info（旧 schema）
+        if not images:
+            ipi = detail.get("image_post_info") or {}
+            for img in (ipi.get("images") or []):
+                if not isinstance(img, dict):
+                    continue
+                display = img.get("display_image") or img.get("origin_image") or {}
+                urls = display.get("url_list") if isinstance(display, dict) else None
+                if isinstance(urls, list) and urls:
+                    images.append(urls[0])
+
+        aweme_type = detail.get("aweme_type")
+        is_image_post = bool(images) or aweme_type in (68, 51, 53)  # 68/51/53 都是图文系
+        note_type = "image_post" if is_image_post else "video"
+
         # 话题：优先 cha_list，没有就 desc 里 #xxx 提取
         tags: list = []
         for c in (detail.get("cha_list") or []):
@@ -251,11 +277,12 @@ class DouyinPlatform(Platform):
             "collected_count": _parse_count(stats.get("collect_count")),
             "comment_count": _parse_count(stats.get("comment_count")),
             "share_count": _parse_count(stats.get("share_count")),
-            "cover_url": cover_url,
-            "images": [],
-            "video_url": video_url,
-            "video_url_clean": video_url_clean,
-            "note_type": "video",
+            "cover_url": cover_url or (images[0] if images else ""),
+            "images": images,
+            # 图文笔记没视频
+            "video_url": "" if is_image_post else video_url,
+            "video_url_clean": "" if is_image_post else video_url_clean,
+            "note_type": note_type,
             "author": author.get("nickname") or "",
         }, "ok")
 
