@@ -242,6 +242,8 @@ async def create_remix_task(
     # 越界的 idx 截掉；如果一个都不剩兜底成 [0]
     ref_idxs = [i for i in ref_idxs if i < len(imgs)] or [0]
     ref_urls = [imgs[i] for i in ref_idxs]
+    # 截边界后 ref 数量可能比 check 时少，重算真实图数（多扣的会自动反映在记账上）
+    actual_images = count * len(ref_idxs)
 
     user_id = current_user.get("id") if current_user else None
     task_id = await monitor_db.create_remix_task(
@@ -266,7 +268,7 @@ async def create_remix_task(
     )
 
     try:
-        await quota_service.record_usage(user_id, "remix_sets", delta=count)
+        await quota_service.record_usage(user_id, "remix_sets", delta=actual_images)
     except Exception as e:
         logger.warning(f"[remix] record_usage failed: {e}")
 
@@ -283,6 +285,7 @@ async def create_remix_task(
         "status": "pending",
         "count": count,
         "refs_per_set": len(ref_idxs),
+        "total_images": actual_images,
     }
 
 
@@ -344,7 +347,11 @@ async def clone_remix_task(
         ref_idxs = [int(src.get("ref_image_idx") or 0)]
 
     count = max(1, min(int(src.get("count") or 1), 30))
-    await quota_service.check_or_raise(current_user, "daily_remix_sets", delta=count)
+    # 配额按实际生图数算（套数 × 每套主体图数），跟提交端点一致
+    expected_images = count * max(1, len(ref_idxs))
+    await quota_service.check_or_raise(
+        current_user, "daily_remix_sets", delta=expected_images,
+    )
     new_id = await monitor_db.create_remix_task(
         user_id=user_id,
         post_url=src.get("post_url") or "",
@@ -364,7 +371,7 @@ async def clone_remix_task(
         image_model_id=src.get("image_model_id"),
     )
     try:
-        await quota_service.record_usage(user_id, "remix_sets", delta=count)
+        await quota_service.record_usage(user_id, "remix_sets", delta=expected_images)
     except Exception as e:
         logger.warning(f"[remix] clone record_usage failed: {e}")
     try:

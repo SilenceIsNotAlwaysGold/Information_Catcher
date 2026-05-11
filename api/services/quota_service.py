@@ -8,6 +8,9 @@ admin 永远豁免；plan 中 -1 表示无限制。
 - accounts：count(monitor_accounts where user_id=?)
 - daily_image_gen：daily_usage.image_gen_count where user_id=? and date=today
 - daily_remix_sets：daily_usage.remix_sets_count where user_id=? and date=today
+  ⚠ 字段名是 sets 但 2026-05 起含义改为"实际生成图数"
+  （= count × len(ref_image_idxs)）。原因：选多张参考图时，1 套实际生 K 张，
+  老逻辑按 sets 扣会让配额低估 K 倍。
 """
 from __future__ import annotations
 
@@ -154,7 +157,9 @@ def _human(key: str) -> str:
         "monitor_posts": "监控帖子",
         "accounts": "账号池",
         "daily_image_gen": "今日商品图生成",
-        "daily_remix_sets": "今日仿写套数",
+        # 旧名 remix_sets 沿用（DB 列名也是 remix_sets_count），但实际语义
+        # 已从"套数"改为"实际生成图数"（套 × 每套主体图数）
+        "daily_remix_sets": "今日仿写图数",
     }.get(key, key)
 
 

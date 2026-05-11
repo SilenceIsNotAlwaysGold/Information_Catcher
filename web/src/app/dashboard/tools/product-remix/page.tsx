@@ -643,6 +643,11 @@ export default function ProductRemixPage() {
               <p className="text-xs text-default-400">
                 上限 30 套。一套内 {refIdxs.length} 张图并发生成，预计单套 ~30 秒，
                 {count} 套总计 ~{Math.ceil(count * 30 / 60)} 分钟。
+                {" "}
+                <span className="text-secondary font-medium">
+                  本次共扣 {count * refIdxs.length} 张图配额
+                </span>
+                （= {count} 套 × {refIdxs.length} 张/套）。
               </p>
             </div>
 

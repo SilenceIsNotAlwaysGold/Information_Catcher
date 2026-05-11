@@ -39,7 +39,7 @@ const ITEMS: { key: keyof Omit<UsageSummary, "plan">; label: string; suffix: str
   { key: "monitor_posts", label: "监控帖子", suffix: "帖" },
   { key: "accounts", label: "账号池", suffix: "个" },
   { key: "daily_image_gen", label: "今日商品图", suffix: "张" },
-  { key: "daily_remix_sets", label: "今日仿写", suffix: "套" },
+  { key: "daily_remix_sets", label: "今日仿写图数", suffix: "张" },
 ];
 
 export function PlanUsageCard() {
