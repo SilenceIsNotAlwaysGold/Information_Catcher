@@ -1,5 +1,6 @@
 import logging
 import aiosqlite
+from . import db as _db
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
@@ -1117,7 +1118,7 @@ async def _seed_default_prompt(db):
 
 
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         # WAL 模式：写不阻塞读，多进程并发性能 5-10×；synchronous=NORMAL 牺牲极端
         # 崩溃时最近几秒数据，换 ~2× 写吞吐。这两个 PRAGMA 持久化在 DB 文件，一次设置永久生效。
         # 注意：journal_mode=WAL 必须在没有其它连接时设；init_db 是 app 启动第一调用，安全。
@@ -1154,27 +1155,27 @@ def parse_ids_csv(csv_value: str) -> List[int]:
 # ── Settings ────────────────────────────────────────────────────────────────
 
 async def get_setting(key: str, default: str = "") -> str:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         async with db.execute("SELECT value FROM monitor_settings WHERE key=?", (key,)) as cur:
             row = await cur.fetchone()
             return row[0] if row else default
 
 
 async def set_setting(key: str, value: str):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute("INSERT OR REPLACE INTO monitor_settings VALUES (?,?)", (key, value))
         await db.commit()
 
 
 async def delete_setting(key: str):
     """删除指定 key（用于"沿用全局"清除平台覆盖键）。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute("DELETE FROM monitor_settings WHERE key=?", (key,))
         await db.commit()
 
 
 async def get_all_settings() -> Dict[str, str]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         async with db.execute("SELECT key, value FROM monitor_settings") as cur:
             return {r[0]: r[1] for r in await cur.fetchall()}
 
@@ -1207,7 +1208,7 @@ async def add_account(
     is_shared: bool = False,
     platform: str = "xhs",
 ) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO monitor_accounts
                (name, cookie, proxy_url, user_agent, viewport, timezone, locale,
@@ -1231,7 +1232,7 @@ async def update_account(account_id: int, **fields) -> bool:
         return False
     set_clause = ", ".join(f"{k}=?" for k in updates)
     values = list(updates.values()) + [account_id]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(f"UPDATE monitor_accounts SET {set_clause} WHERE id=?", values)
         await db.commit()
     return True
@@ -1267,7 +1268,7 @@ async def get_accounts(
         sql += " AND COALESCE(platform,'xhs') = ?"
         params.append(platform)
     sql += " ORDER BY id"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
@@ -1289,7 +1290,7 @@ async def get_account(account_id: int, user_id: Optional[int] = None) -> Optiona
     if user_id is not None:
         sql += " AND (user_id = ? OR is_shared = 1)"
         params.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             row = await cur.fetchone()
@@ -1309,7 +1310,7 @@ async def pick_shared_account() -> Optional[Dict]:
         "ORDER BY COALESCE(last_used_at, '1970-01-01') ASC, id ASC "
         "LIMIT 1"
     )
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql) as cur:
             row = await cur.fetchone()
@@ -1318,7 +1319,7 @@ async def pick_shared_account() -> Optional[Dict]:
 
 async def mark_account_used(account_id: int) -> None:
     """记录账号最近一次被调度的时间，供 LRU 排序。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE monitor_accounts "
             "SET last_used_at = datetime('now', 'localtime'), "
@@ -1335,7 +1336,7 @@ async def update_cookie_status(account_id: int, status: str) -> None:
     - cookie_last_check：探针专用 ISO 时间戳，给 admin/前端展示「上次检测时间」。
     """
     now_iso = datetime.now().isoformat(timespec="seconds")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE monitor_accounts SET cookie_status=?, "
             "cookie_checked_at=datetime('now', 'localtime'), "
@@ -1346,7 +1347,7 @@ async def update_cookie_status(account_id: int, status: str) -> None:
 
 
 async def get_account_cookie(account_id: int) -> Optional[str]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT cookie FROM monitor_accounts WHERE id=?", (account_id,)
         ) as cur:
@@ -1360,7 +1361,7 @@ async def update_cookie_via_bridge(
     """CookieBridge 浏览器扩展推送的 cookie 写入：同时刷新 cookie_synced_*
     并把 cookie_status 重置为 valid（让后台健康度 job 复测，避免误用过期态）。"""
     now_iso = datetime.now().isoformat(timespec="seconds")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE monitor_accounts SET cookie=?, cookie_status='valid', "
             "cookie_synced_at=?, cookie_synced_via=? WHERE id=?",
@@ -1373,7 +1374,7 @@ async def find_account_id_by_name_and_user(
     name: str, user_id: int, platform: str = "xhs",
 ) -> Optional[int]:
     """CookieBridge 用 (account_name, user_id) 找账号 id（多租户隔离）。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT id FROM monitor_accounts "
             "WHERE name=? AND user_id=? AND COALESCE(platform,'xhs')=? "
@@ -1385,7 +1386,7 @@ async def find_account_id_by_name_and_user(
 
 
 async def delete_account(account_id: int, user_id: Optional[int] = None):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         if user_id is not None:
             await db.execute(
                 "UPDATE monitor_accounts SET is_active=0 WHERE id=? AND user_id=?",
@@ -1418,7 +1419,7 @@ async def add_post(
     is_new=True 表示该 note_id 在 user×platform 下首次入库；False 表示已存在被
     UPDATE。调用方据此判断"真正的新增"，进行飞书推送 / 未读累计等操作。
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT id FROM monitor_posts "
             "WHERE note_id=? AND COALESCE(user_id, 0)=COALESCE(?, 0) AND platform=?",
@@ -1477,7 +1478,7 @@ async def list_creator_posts(
     sql_parts.append("ORDER BY p.id DESC LIMIT ?")
     args.append(limit)
     sql = " ".join(sql_parts)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, args) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -1512,14 +1513,14 @@ async def get_posts(
         sql += " AND p.platform = ?"
         params.append(platform)
     sql += " ORDER BY p.created_at DESC"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
 
 async def update_post_group(note_id: str, group_id: Optional[int], user_id: Optional[int] = None) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         if user_id is not None:
             await db.execute(
                 "UPDATE monitor_posts SET group_id=? WHERE note_id=? AND user_id=?",
@@ -1545,14 +1546,14 @@ async def get_active_posts(user_id: Optional[int] = None) -> List[Dict]:
     if user_id is not None:
         sql += " AND p.user_id = ?"
         args.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, args) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
 
 async def delete_post(note_id: str, user_id: Optional[int] = None):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         if user_id is not None:
             await db.execute(
                 "UPDATE monitor_posts SET is_active=0 WHERE note_id=? AND user_id=?",
@@ -1564,7 +1565,7 @@ async def delete_post(note_id: str, user_id: Optional[int] = None):
 
 
 async def get_post_history(note_id: str, limit: int = 100) -> List[Dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM monitor_snapshots WHERE note_id=? ORDER BY checked_at DESC LIMIT ?",
@@ -1575,7 +1576,7 @@ async def get_post_history(note_id: str, limit: int = 100) -> List[Dict]:
 
 async def get_snapshot_at_or_before(note_id: str, hours_ago: int = 24) -> Optional[Dict]:
     """拿 hours_ago 小时之前最近的一条 snapshot，用于「N 小时涨幅」规则。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT liked_count, collected_count, comment_count, share_count, checked_at "
@@ -1589,7 +1590,7 @@ async def get_snapshot_at_or_before(note_id: str, hours_ago: int = 24) -> Option
 
 
 async def get_latest_snapshot(note_id: str) -> Optional[Dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM monitor_snapshots WHERE note_id=? ORDER BY checked_at DESC LIMIT 1",
@@ -1606,7 +1607,7 @@ async def save_snapshot(
     comment_count: int,
     share_count: int,
 ):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO monitor_snapshots (note_id,liked_count,collected_count,comment_count,share_count) VALUES (?,?,?,?,?)",
             (note_id, liked_count, collected_count, comment_count, share_count),
@@ -1652,7 +1653,7 @@ async def search_posts(
     sql += " ORDER BY p.created_at DESC LIMIT ?"
     params.append(limit)
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -1663,7 +1664,7 @@ async def add_creator(
     creator_name: str = "", creator_id: str = "",
 ) -> int:
     """添加订阅博主。重复 (user, platform, url) 直接 IGNORE 不报错。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT OR IGNORE INTO monitor_creators "
             "(user_id, platform, creator_url, creator_name, creator_id, is_active) "
@@ -1698,14 +1699,14 @@ async def list_creators(user_id: Optional[int] = None) -> List[Dict]:
         "          COALESCE(last_post_at,'') DESC,"
         "          id DESC"
     )
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
 
 async def delete_creator(creator_id: int, user_id: Optional[int] = None) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         if user_id is not None:
             await db.execute(
                 "UPDATE monitor_creators SET is_active=0 WHERE id=? AND user_id=?",
@@ -1724,7 +1725,7 @@ async def update_creator_check(
     notes_count: Optional[int] = None,
     creator_desc: str = "",
 ) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         sets = ["last_check_at=datetime('now','localtime')"]
         vals: list = []
         if last_post_id:
@@ -1765,7 +1766,7 @@ async def update_creator_settings(
     if not sets:
         return False
     vals.extend([creator_id, user_id])
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             f"UPDATE monitor_creators SET {','.join(sets)} WHERE id=? AND user_id=?",
             vals,
@@ -1781,7 +1782,7 @@ async def mark_creator_status(
 
     前端用这个字段给 chip 着色，让用户一眼看到"哪些博主挂了"。
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE monitor_creators SET last_check_status=?, last_check_error=?, "
             "last_check_at=datetime('now','localtime') WHERE id=?",
@@ -1800,7 +1801,7 @@ async def add_creator_unread(
     if delta <= 0:
         return
     now_iso = last_post_at or datetime.now().isoformat(timespec="seconds")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE monitor_creators SET "
             "  unread_count = COALESCE(unread_count,0)+?, "
@@ -1830,7 +1831,7 @@ async def mark_creators_seen(
     if creator_ids:
         sql += " AND id IN (" + ",".join("?" * len(creator_ids)) + ")"
         params.extend(creator_ids)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(sql, params)
         await db.commit()
         return cur.rowcount or 0
@@ -1840,7 +1841,7 @@ async def add_live(
     user_id: int, platform: str, room_url: str,
     streamer_name: str = "", online_alert_threshold: int = 0,
 ) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT OR IGNORE INTO monitor_lives "
             "(user_id, platform, room_url, streamer_name, online_alert_threshold, is_active) "
@@ -1865,14 +1866,14 @@ async def list_lives(user_id: Optional[int] = None) -> List[Dict]:
         sql += " AND user_id=?"
         params.append(user_id)
     sql += " ORDER BY id DESC"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
 
 async def delete_live(live_id: int, user_id: Optional[int] = None) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         if user_id is not None:
             await db.execute(
                 "UPDATE monitor_lives SET is_active=0 WHERE id=? AND user_id=?",
@@ -1887,7 +1888,7 @@ async def update_live_check(
     live_id: int, online: int = 0, gifts_json: str = "",
     streamer_name: str = "", room_id: str = "",
 ) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         sets = ["last_check_at=datetime('now','localtime')", "last_online=?"]
         vals: list = [online]
         if gifts_json:
@@ -1912,7 +1913,7 @@ async def log_fetch(
 ) -> None:
     """记录一次 fetch 调用（fire-and-forget）。失败时静默吞掉，不影响主流程。"""
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db.connect(DB_PATH) as db:
             await db.execute(
                 "INSERT INTO fetch_log (platform, task_type, status, latency_ms, account_id, note_id, note) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1946,7 +1947,7 @@ async def list_fetch_log_for_trending_stats(
         args.append(f"%{user_tag} %")
     sql += "ORDER BY id DESC LIMIT ?"
     args.append(int(limit))
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, args) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -1954,7 +1955,7 @@ async def list_fetch_log_for_trending_stats(
 
 async def health_summary(days: int = 7) -> dict:
     """7 天内的抓取健康度聚合：按 platform / account / task_type 分组。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         # 按 platform × status
         async with db.execute(f"""
@@ -2004,7 +2005,7 @@ async def health_summary(days: int = 7) -> dict:
 
 async def get_post_by_note_id(note_id: str, user_id: Optional[int] = None) -> Optional[Dict]:
     """按 note_id（按 user_id 隔离）拿单条 active post 的所有字段。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         sql = "SELECT * FROM monitor_posts WHERE note_id=? AND is_active=1"
         params: list = [note_id]
@@ -2018,7 +2019,7 @@ async def get_post_by_note_id(note_id: str, user_id: Optional[int] = None) -> Op
 
 async def save_post_summary(note_id: str, summary: str, user_id: Optional[int] = None) -> None:
     """更新某帖子的 AI 摘要。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         if user_id is not None:
             await db.execute(
                 "UPDATE monitor_posts SET summary=?, summary_at=datetime('now','localtime') "
@@ -2041,7 +2042,7 @@ async def update_post_fetch_status(note_id: str, status: str) -> None:
     - 其他（login_required/deleted/error）→ fail_count += 1
     """
     is_ok = status == "ok"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         if is_ok:
             await db.execute(
                 "UPDATE monitor_posts SET last_fetch_status=?, "
@@ -2067,7 +2068,7 @@ DEAD_POST_FAIL_THRESHOLD = 5
 
 async def cleanup_dead_posts(user_id: Optional[int] = None) -> int:
     """把 fail_count >= 阈值的帖子设置 is_active=0，返回处理条数。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         if user_id is not None:
             cur = await db.execute(
                 "UPDATE monitor_posts SET is_active=0 "
@@ -2086,7 +2087,7 @@ async def cleanup_dead_posts(user_id: Optional[int] = None) -> int:
 
 async def has_recent_alert(note_id: str, alert_type: str, hours: int = 4) -> bool:
     """4 小时去抖动用：最近 N 小时内同 (note_id, alert_type) 是否已经告警过。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT 1 FROM monitor_alerts "
             "WHERE note_id=? AND alert_type=? "
@@ -2098,7 +2099,7 @@ async def has_recent_alert(note_id: str, alert_type: str, hours: int = 4) -> boo
 
 async def has_ever_alerted(note_id: str, alert_type: str) -> bool:
     """累计触发用：该 (note_id, alert_type) 是否曾经告警过（用于"首次达到"语义）。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT 1 FROM monitor_alerts WHERE note_id=? AND alert_type=? LIMIT 1",
             (note_id, alert_type),
@@ -2110,7 +2111,7 @@ async def save_alert(
     note_id: str, title: str, alert_type: str, message: str,
     user_id: Optional[int] = None, platform: str = "",
 ):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO monitor_alerts (note_id,title,alert_type,message,user_id,platform) "
             "VALUES (?,?,?,?,?,?)",
@@ -2137,7 +2138,7 @@ async def get_alerts(
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -2158,14 +2159,14 @@ async def clear_alerts(
     sql = "DELETE FROM monitor_alerts"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(sql, params)
         await db.commit()
         return cur.rowcount or 0
 
 
 async def delete_alert(alert_id: int, user_id: Optional[int] = None):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         if user_id is not None:
             await db.execute(
                 "DELETE FROM monitor_alerts WHERE id=? AND user_id=?",
@@ -2185,7 +2186,7 @@ async def ext_task_create(
 ) -> int:
     """新建一个 pending 任务，返回 id。"""
     import json as _json
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT INTO ext_tasks (user_id, type, payload, max_retries) VALUES (?, ?, ?, ?)",
             (int(user_id), task_type, _json.dumps(payload, ensure_ascii=False), max_retries),
@@ -2195,7 +2196,7 @@ async def ext_task_create(
 
 
 async def ext_task_mark_running(task_id: int) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE ext_tasks SET status='running', started_at=strftime('%s','now') WHERE id=?",
             (task_id,),
@@ -2205,7 +2206,7 @@ async def ext_task_mark_running(task_id: int) -> None:
 
 async def ext_task_mark_done(task_id: int, result: Optional[dict] = None) -> None:
     import json as _json
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE ext_tasks SET status='done', result=?, completed_at=strftime('%s','now') WHERE id=?",
             (_json.dumps(result, ensure_ascii=False) if result is not None else None, task_id),
@@ -2215,7 +2216,7 @@ async def ext_task_mark_done(task_id: int, result: Optional[dict] = None) -> Non
 
 async def ext_task_mark_failed(task_id: int, error: str) -> None:
     """失败：retries+1，到 max_retries 标 failed，否则回到 pending 等下次。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT retries, max_retries FROM ext_tasks WHERE id=?", (task_id,),
         )
@@ -2241,7 +2242,7 @@ async def ext_task_get_pending(user_id: Optional[int] = None, limit: int = 50) -
         params.append(int(user_id))
     sql += " ORDER BY id ASC LIMIT ?"
     params.append(limit)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
@@ -2257,7 +2258,7 @@ async def ext_task_get_pending(user_id: Optional[int] = None, limit: int = 50) -
 async def ext_task_cleanup_done(older_than_days: int = 7) -> int:
     """清理 N 天前的 done/failed 任务，返回删除数。"""
     cutoff = f"strftime('%s','now') - {older_than_days * 86400}"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             f"DELETE FROM ext_tasks WHERE status IN ('done','failed') AND completed_at < {cutoff}",
         )
@@ -2268,7 +2269,7 @@ async def ext_task_cleanup_done(older_than_days: int = 7) -> int:
 async def ext_task_running_timeout(timeout_sec: int = 300) -> int:
     """把超时（>5min 没完成）的 running 任务回退到 pending，返回处理数。"""
     cutoff = f"strftime('%s','now') - {timeout_sec}"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             f"UPDATE ext_tasks SET status='pending' WHERE status='running' AND started_at < {cutoff}",
         )
@@ -2277,7 +2278,7 @@ async def ext_task_running_timeout(timeout_sec: int = 300) -> int:
 
 
 async def ext_task_list_recent(user_id: int, limit: int = 50) -> List[Dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, type, status, retries, error, created_at, completed_at "
@@ -2300,7 +2301,7 @@ async def add_or_update_trending_post(
     多租户：同一个 note 可能在不同用户下各有一条独立记录（按 (note_id, user_id) 唯一）。
     user_id=None 仅旧代码兼容 — 新调用方（scheduler）必须传 user_id。
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT id FROM trending_posts WHERE note_id=? AND COALESCE(user_id,0)=?",
             (note_id, user_id or 0),
@@ -2356,7 +2357,7 @@ async def get_trending_posts(
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY found_at DESC LIMIT ?"
     params.append(limit)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -2380,7 +2381,7 @@ async def clear_trending_posts(
         params.append(platform)
     if where:
         sql += " WHERE " + " AND ".join(where)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(sql, params)
         await db.commit()
         return cur.rowcount or 0
@@ -2394,7 +2395,7 @@ async def update_trending_desc(
     if user_id is not None:
         sql += " AND user_id=?"
         params.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(sql, params)
         await db.commit()
 
@@ -2432,7 +2433,7 @@ async def update_trending_media(
     if user_id is not None:
         sql += " AND user_id=?"
         vals.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(sql, vals)
         await db.commit()
 
@@ -2446,7 +2447,7 @@ async def update_trending_rewrite(
     if user_id is not None:
         sql += " AND user_id=?"
         params.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(sql, params)
         await db.commit()
 
@@ -2459,7 +2460,7 @@ async def get_trending_post(
     if user_id is not None:
         sql += " AND user_id=?"
         params.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             row = await cur.fetchone()
@@ -2472,7 +2473,7 @@ async def mark_trending_synced(note_id: str, user_id: Optional[int] = None):
     if user_id is not None:
         sql += " AND user_id=?"
         params.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(sql, params)
         await db.commit()
 
@@ -2483,7 +2484,7 @@ async def get_unsynced_trending_posts(user_id: Optional[int] = None) -> List[Dic
     if user_id is not None:
         sql += " AND user_id=?"
         params.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -2525,7 +2526,7 @@ async def list_groups(
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY is_builtin DESC, id"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -2542,7 +2543,7 @@ async def get_group(group_id: int, user_id: Optional[int] = None) -> Optional[Di
     if user_id is not None:
         sql += " AND (is_builtin=1 OR user_id=?)"
         params.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             row = await cur.fetchone()
@@ -2562,7 +2563,7 @@ async def create_group(
       - 都为空 → 仅本地分组（不会触发告警推送）
       - platform：'xhs' / 'douyin' / 'mp' → 平台专属；'' → 跨平台
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT INTO monitor_groups (name, user_id, feishu_chat_id, feishu_webhook_url, platform) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -2597,7 +2598,7 @@ async def update_group(group_id: int, user_id: Optional[int] = None, **fields) -
     if user_id is not None:
         sql += " AND (is_builtin=1 OR user_id=?)"
         vals.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(sql, vals)
         await db.commit()
         return (cur.rowcount or 0) > 0
@@ -2613,7 +2614,7 @@ async def delete_group(
     user_id=None（admin）：可删任意非内置分组。
     user_id 传值：仅能删自己的分组；删别人的抛 PermissionError。
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT is_builtin, user_id FROM monitor_groups WHERE id=?", (group_id,)
         )
@@ -2643,7 +2644,7 @@ async def list_prompts(user_id: Optional[int] = None) -> List[Dict]:
         sql += " WHERE user_id IS NULL OR user_id = ?"
         params.append(user_id)
     sql += " ORDER BY is_default DESC, id"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -2660,7 +2661,7 @@ async def get_prompt(prompt_id: int, user_id: Optional[int] = None) -> Optional[
     if user_id is not None:
         sql += " AND (user_id IS NULL OR user_id=?)"
         params.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             row = await cur.fetchone()
@@ -2668,7 +2669,7 @@ async def get_prompt(prompt_id: int, user_id: Optional[int] = None) -> Optional[
 
 
 async def get_default_prompt() -> Optional[Dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM rewrite_prompts WHERE is_default=1 ORDER BY id LIMIT 1"
@@ -2685,7 +2686,7 @@ async def get_default_prompt() -> Optional[Dict]:
 
 
 async def create_prompt(name: str, content: str, user_id: Optional[int] = None) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT INTO rewrite_prompts (name, content, user_id) VALUES (?, ?, ?)",
             (name, content, user_id),
@@ -2717,7 +2718,7 @@ async def update_prompt(
     if user_id is not None:
         sql += " AND user_id=?"  # 不能改内置（user_id IS NULL），仅自己的
         values.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(sql, values)
         await db.commit()
         return (cur.rowcount or 0) > 0
@@ -2730,7 +2731,7 @@ async def delete_prompt(prompt_id: int, user_id: Optional[int] = None) -> bool:
     if user_id is not None:
         sql += " AND user_id=?"
         params.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(sql, params)
         await db.commit()
         return (cur.rowcount or 0) > 0
@@ -2747,7 +2748,7 @@ async def set_default_prompt(prompt_id: int, user_id: Optional[int] = None) -> b
         target = await get_prompt(prompt_id, user_id=user_id)
         if not target:
             return False
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute("UPDATE rewrite_prompts SET is_default=0")
         cur = await db.execute(
             "UPDATE rewrite_prompts SET is_default=1 WHERE id=?", (prompt_id,)
@@ -2765,7 +2766,7 @@ async def get_pending_trending_posts(user_id: Optional[int] = None) -> List[Dict
     if user_id is not None:
         sql += " AND user_id=?"
         params.append(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -2774,7 +2775,7 @@ async def get_pending_trending_posts(user_id: Optional[int] = None) -> List[Dict
 # ── Note Comments Cache ───────────────────────────────────────────────────────
 
 async def get_known_comment_ids(note_id: str) -> set:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT comment_id FROM note_comments_cache WHERE note_id=?", (note_id,)
         ) as cur:
@@ -2787,7 +2788,7 @@ async def add_note_comments(note_id: str, comments: List[Dict]) -> List[Dict]:
     new_comments = [c for c in comments if c.get("comment_id") and c["comment_id"] not in known]
     if not new_comments:
         return []
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         for c in new_comments:
             await db.execute(
                 """INSERT OR IGNORE INTO note_comments_cache
@@ -2814,7 +2815,7 @@ async def add_image_history(
     source_post_url: str = "", source_post_title: str = "",
     used_reference: bool = False,
 ) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO image_gen_history
                (user_id, prompt, negative_prompt, size, model,
@@ -2836,7 +2837,7 @@ async def add_image_history(
 
 async def list_pending_image_uploads(limit: int = 5) -> List[Dict]:
     """取还在等待上传到七牛的记录（按 id 升序，最旧的先传）。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM image_gen_history WHERE upload_status='pending' "
@@ -2849,7 +2850,7 @@ async def list_pending_image_uploads(limit: int = 5) -> List[Dict]:
 async def mark_image_upload_succeeded(
     record_id: int, qiniu_url: str, qiniu_key: str = "",
 ) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE image_gen_history "
             "SET qiniu_url=?, qiniu_key=?, upload_status='uploaded', upload_last_error='' "
@@ -2863,7 +2864,7 @@ async def mark_image_upload_failed(
     record_id: int, error: str, max_retries: int = 3,
 ) -> None:
     """递增 retries；超阈值标记 failed，否则保持 pending 等下次。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT upload_retries FROM image_gen_history WHERE id=?", (record_id,),
         ) as cur:
@@ -2882,7 +2883,7 @@ async def mark_image_upload_failed(
 
 async def reset_image_upload_failed(record_id: int) -> None:
     """手动重试：把 failed 记录重置为 pending、清空错误。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE image_gen_history "
             "SET upload_status='pending', upload_retries=0, upload_last_error='' "
@@ -2898,7 +2899,7 @@ async def list_image_history(
     """admin（user_id=None）看全部；普通用户只看自己的。"""
     where = "WHERE user_id=?" if user_id is not None else ""
     args = (user_id,) if user_id is not None else ()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"SELECT * FROM image_gen_history {where} "
@@ -2909,7 +2910,7 @@ async def list_image_history(
 
 
 async def get_image_history(record_id: int) -> Optional[Dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM image_gen_history WHERE id=?", (record_id,),
@@ -2919,7 +2920,7 @@ async def get_image_history(record_id: int) -> Optional[Dict]:
 
 
 async def mark_image_history_synced(record_id: int, bitable_record_id: str = "") -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE image_gen_history SET synced_to_bitable=1, bitable_record_id=? WHERE id=?",
             (bitable_record_id, record_id),
@@ -2931,7 +2932,7 @@ async def delete_image_history(record_id: int, user_id: Optional[int] = None) ->
     """删除一条历史记录。普通用户只能删自己的；admin（user_id=None）能删任何。"""
     where = "WHERE id=? AND user_id=?" if user_id is not None else "WHERE id=?"
     args = (record_id, user_id) if user_id is not None else (record_id,)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(f"DELETE FROM image_gen_history {where}", args)
         await db.commit()
         return (cur.rowcount or 0) > 0
@@ -2967,7 +2968,7 @@ async def create_remix_task(
     idxs_json = _json.dumps(ref_image_idxs) if ref_image_idxs else ""
     urls_json = _json.dumps(ref_image_urls or []) if ref_image_urls else ""
     per_set_json = _json.dumps(per_set_keywords, ensure_ascii=False) if per_set_keywords else ""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO remix_tasks
                (user_id, status, post_url, post_title, post_desc, platform,
@@ -2997,7 +2998,7 @@ async def add_text_remix_background(
     *, user_id: int, name: str, image_url: str,
     width: int = 0, height: int = 0,
 ) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT INTO text_remix_backgrounds "
             "(user_id, name, image_url, width, height) VALUES (?,?,?,?,?)",
@@ -3008,7 +3009,7 @@ async def add_text_remix_background(
 
 
 async def list_text_remix_backgrounds(user_id: int, limit: int = 100) -> List[Dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, name, image_url, width, height, created_at "
@@ -3020,7 +3021,7 @@ async def list_text_remix_backgrounds(user_id: int, limit: int = 100) -> List[Di
 
 
 async def delete_text_remix_background(bg_id: int, user_id: int) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "DELETE FROM text_remix_backgrounds WHERE id=? AND user_id=?",
             (int(bg_id), int(user_id)),
@@ -3030,7 +3031,7 @@ async def delete_text_remix_background(bg_id: int, user_id: int) -> bool:
 
 
 async def get_text_remix_background(bg_id: int, user_id: int) -> Optional[Dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM text_remix_backgrounds WHERE id=? AND user_id=?",
@@ -3046,7 +3047,7 @@ async def cancel_remix_task(task_id: int, user_id: Optional[int] = None) -> bool
     user_id 给定时只能取消自己的（前端校验 + 后端兜底）。
     返回是否真有改动（如已 done/error 不会被 cancel）。
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         if user_id is not None:
             cur = await db.execute(
                 "UPDATE remix_tasks SET status='cancelled', "
@@ -3067,7 +3068,7 @@ async def cancel_remix_task(task_id: int, user_id: Optional[int] = None) -> bool
 
 async def get_remix_task_status(task_id: int) -> Optional[str]:
     """轻量查询：只取 status 字段，给 worker 做 cancel 检查用。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT status FROM remix_tasks WHERE id=?", (task_id,),
         ) as cur:
@@ -3076,7 +3077,7 @@ async def get_remix_task_status(task_id: int) -> Optional[str]:
 
 
 async def get_remix_task(task_id: int) -> Optional[Dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM remix_tasks WHERE id=?", (task_id,),
@@ -3090,7 +3091,7 @@ async def list_remix_tasks(
 ) -> List[Dict]:
     where = "WHERE user_id=?" if user_id is not None else ""
     args = (user_id,) if user_id is not None else ()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"SELECT * FROM remix_tasks {where} "
@@ -3108,7 +3109,7 @@ async def revive_stuck_running_remix_tasks(stuck_minutes: int = 5) -> int:
 
     返回被复活的任务数。
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "UPDATE remix_tasks SET status='pending' "
             "WHERE status='running' "
@@ -3122,7 +3123,7 @@ async def revive_stuck_running_remix_tasks(stuck_minutes: int = 5) -> int:
 
 async def claim_pending_remix_task() -> Optional[Dict]:
     """原子取一条 pending 任务并标记 running。返回该任务（或 None）。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
         async with db.execute(
@@ -3145,7 +3146,7 @@ async def claim_pending_remix_task() -> Optional[Dict]:
 async def update_remix_task_progress(
     task_id: int, *, items_json: str, done_count: int,
 ) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE remix_tasks SET items_json=?, done_count=? WHERE id=?",
             (items_json, done_count, task_id),
@@ -3157,7 +3158,7 @@ async def finish_remix_task(
     task_id: int, *, status: str = "done", error: str = "",
 ) -> None:
     """status: done / error。设置 finished_at。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE remix_tasks "
             "SET status=?, error=?, finished_at=datetime('now','localtime') "
@@ -3168,13 +3169,13 @@ async def finish_remix_task(
 
 
 async def delete_remix_task(task_id: int) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute("DELETE FROM remix_tasks WHERE id=?", (task_id,))
         await db.commit()
 
 
 async def has_pending_remix_tasks() -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT 1 FROM remix_tasks WHERE status='pending' LIMIT 1",
         ) as cur:
@@ -3198,7 +3199,7 @@ async def add_text_remix_task(
     image_model_id: Optional[int] = None,
 ) -> int:
     import json as _json
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO text_remix_tasks
                (user_id, status, post_url, post_title, platform,
@@ -3223,7 +3224,7 @@ async def list_text_remix_tasks(
 ) -> List[Dict]:
     where = "WHERE user_id=?" if user_id is not None else ""
     args = (user_id,) if user_id is not None else ()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"SELECT * FROM text_remix_tasks {where} "
@@ -3234,7 +3235,7 @@ async def list_text_remix_tasks(
 
 
 async def get_text_remix_task(task_id: int) -> Optional[Dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM text_remix_tasks WHERE id=?", (task_id,),
@@ -3244,7 +3245,7 @@ async def get_text_remix_task(task_id: int) -> Optional[Dict]:
 
 
 async def get_text_remix_task_status(task_id: int) -> Optional[str]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT status FROM text_remix_tasks WHERE id=?", (task_id,),
         ) as cur:
@@ -3255,7 +3256,7 @@ async def get_text_remix_task_status(task_id: int) -> Optional[str]:
 async def cancel_text_remix_task(
     task_id: int, user_id: Optional[int] = None,
 ) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         if user_id is not None:
             cur = await db.execute(
                 "UPDATE text_remix_tasks SET status='cancelled', "
@@ -3275,7 +3276,7 @@ async def cancel_text_remix_task(
 
 
 async def claim_pending_text_remix_task() -> Optional[Dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
         async with db.execute(
@@ -3298,7 +3299,7 @@ async def claim_pending_text_remix_task() -> Optional[Dict]:
 async def update_text_remix_task_progress(
     task_id: int, *, items_json: str, done_count: int,
 ) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE text_remix_tasks SET items_json=?, done_count=? WHERE id=?",
             (items_json, done_count, task_id),
@@ -3309,7 +3310,7 @@ async def update_text_remix_task_progress(
 async def finish_text_remix_task(
     task_id: int, *, status: str = "done", error: str = "",
 ) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE text_remix_tasks "
             "SET status=?, error=?, finished_at=datetime('now','localtime') "
@@ -3320,13 +3321,13 @@ async def finish_text_remix_task(
 
 
 async def delete_text_remix_task(task_id: int) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute("DELETE FROM text_remix_tasks WHERE id=?", (task_id,))
         await db.commit()
 
 
 async def has_pending_text_remix_tasks() -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT 1 FROM text_remix_tasks WHERE status='pending' LIMIT 1",
         ) as cur:
@@ -3334,7 +3335,7 @@ async def has_pending_text_remix_tasks() -> bool:
 
 
 async def revive_stuck_running_text_remix_tasks(stuck_minutes: int = 5) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "UPDATE text_remix_tasks SET status='pending' "
             "WHERE status='running' "
@@ -3358,7 +3359,7 @@ async def archive_enqueue(
     if not note_id or not src_url:
         return None
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db.connect(DB_PATH) as db:
             cur = await db.execute(
                 """INSERT INTO media_archive
                    (user_id, platform, note_id, note_url, note_title, author,
@@ -3375,7 +3376,7 @@ async def archive_enqueue(
 
 
 async def archive_list_pending(limit: int = 30) -> List[Dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM media_archive "
@@ -3391,7 +3392,7 @@ async def archive_mark_done(
     sha256: str, size_bytes: int,
 ) -> None:
     now_iso = datetime.now().isoformat(timespec="seconds")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE media_archive SET status='done', storage_url=?, "
             "storage_backend=?, sha256=?, size_bytes=?, archived_at=?, last_error='' "
@@ -3402,7 +3403,7 @@ async def archive_mark_done(
 
 
 async def archive_mark_failed(archive_id: int, error: str = "") -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE media_archive "
             "SET status=CASE WHEN fail_count>=2 THEN 'failed' ELSE 'pending' END, "
@@ -3432,7 +3433,7 @@ async def archive_list_for_user(
         params.append(status)
     sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -3452,7 +3453,7 @@ async def archive_count_for_user(
     if status:
         sql += " AND status=?"
         params.append(status)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         async with db.execute(sql, params) as cur:
             row = await cur.fetchone()
             return int(row[0]) if row else 0
@@ -3472,7 +3473,7 @@ async def creator_stats_upsert(
     ]
     values = [int(fields.get(c, 0) or 0) for c in cols]
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             f"""INSERT INTO creator_stats
                 (user_id, account_id, platform, snapshot_date, raw_json,
@@ -3509,7 +3510,7 @@ async def creator_stats_list(
     params.append(f"-{int(days)} days")
     sql += " ORDER BY cs.snapshot_date DESC, cs.account_id ASC"
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -3532,7 +3533,7 @@ async def creator_stats_latest_per_account(
         sql += " AND cs.user_id=?"
         params.append(user_id)
     sql += " ORDER BY cs.account_id ASC"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -3543,7 +3544,7 @@ async def creator_stats_latest_per_account(
 async def cursor_mark_running(task: str, key: str) -> None:
     """处理某条目前调用：UPSERT 进 idle/running 状态。"""
     now_iso = datetime.now().isoformat(timespec="seconds")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO crawl_cursor(task, key, status, last_run_at) "
             "VALUES (?, ?, 'running', ?) "
@@ -3557,7 +3558,7 @@ async def cursor_mark_running(task: str, key: str) -> None:
 async def cursor_mark_done(task: str, key: str, cursor: str = "") -> None:
     """处理成功：清零 fail_count，状态置 done。"""
     now_iso = datetime.now().isoformat(timespec="seconds")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO crawl_cursor(task, key, cursor, status, fail_count, last_run_at, last_error) "
             "VALUES (?, ?, ?, 'done', 0, ?, '') "
@@ -3572,7 +3573,7 @@ async def cursor_mark_done(task: str, key: str, cursor: str = "") -> None:
 async def cursor_mark_failed(task: str, key: str, error: str = "") -> int:
     """处理失败：fail_count +1，返回新值（调用方可据此熔断）。"""
     now_iso = datetime.now().isoformat(timespec="seconds")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO crawl_cursor(task, key, status, fail_count, last_run_at, last_error) "
             "VALUES (?, ?, 'failed', 1, ?, ?) "
@@ -3590,7 +3591,7 @@ async def cursor_mark_failed(task: str, key: str, error: str = "") -> int:
 
 
 async def cursor_get(task: str, key: str) -> Optional[Dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM crawl_cursor WHERE task=? AND key=?", (task, key),
@@ -3608,7 +3609,7 @@ async def cursor_sort_by_last_run(
     """
     if not candidate_keys:
         return []
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         placeholders = ",".join("?" * len(candidate_keys))
         async with db.execute(
@@ -3637,7 +3638,7 @@ async def cursor_sort_by_last_run(
 async def get_user_pace_last_run(user_id: int, kind: str) -> Optional[str]:
     """返回用户该 kind 上次跑的时间戳（ISO）。从未跑过 → None。"""
     key = f"{kind}:{user_id}"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT last_run_at FROM crawl_cursor WHERE task='user_pace' AND key=?",
             (key,),
@@ -3652,7 +3653,7 @@ async def mark_user_pace_run(user_id: int, kind: str) -> None:
     """记录用户该 kind 这一次跑的时间。每次跑完用户对应任务后调一次。"""
     key = f"{kind}:{user_id}"
     now_iso = datetime.now().isoformat(timespec="seconds")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO crawl_cursor(task, key, status, last_run_at) "
             "VALUES ('user_pace', ?, 'done', ?) "
