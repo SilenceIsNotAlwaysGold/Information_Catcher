@@ -829,6 +829,17 @@ async def _migrate(db):
     # 是否支持视觉输入（OCR / 图像理解）。DeepSeek 等纯文本模型应为 0；
     # gpt-4o / claude-3.5-sonnet / gemini-1.5+ / qwen-vl 等为 1
     await _ensure_column(db, "ai_models", "supports_vision", "INTEGER DEFAULT 0")
+    # 用户自定义 AI 模型：owner_user_id IS NULL = admin 共享（原行为）；INT = 该用户私有
+    await _ensure_column(db, "ai_providers", "owner_user_id", "INTEGER")
+    await _ensure_column(db, "ai_models",    "owner_user_id", "INTEGER")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_models_owner "
+        "ON ai_models(owner_user_id, usage_type)",
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_providers_owner "
+        "ON ai_providers(owner_user_id)",
+    )
     # 博主追新健康度 + 未读：让列表能区分"挂了 / 卡 cookie / 有新内容"
     await _ensure_column(db, "monitor_creators", "last_check_status", "TEXT DEFAULT 'unknown'")
     await _ensure_column(db, "monitor_creators", "last_check_error",  "TEXT DEFAULT ''")

@@ -56,6 +56,7 @@ BACKEND_FILES=(
   api/routers/archive.py
   api/routers/creator_stats.py
   api/routers/extension.py
+  api/routers/admin_ai.py
   api/routers/image_gen/__init__.py
   api/routers/image_gen/remix.py
   api/routers/image_gen/product.py

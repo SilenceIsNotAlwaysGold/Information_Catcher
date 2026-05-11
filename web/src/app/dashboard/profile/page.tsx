@@ -15,6 +15,7 @@ import { FeishuBindingCard } from "@/components/FeishuBindingCard";
 import { PlanUsageCard } from "@/components/PlanUsageCard";
 import { FeishuPushToggle } from "@/components/FeishuPushToggle";
 import { AiPreferencesCard } from "@/components/AiPreferencesCard";
+import { MyAiModelsCard } from "@/components/MyAiModelsCard";
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -462,6 +463,9 @@ export default function MonitorSettingsPage() {
           </div>
         </CardBody>
       </Card>
+
+      {/* 用户自带的 OpenAI 兼容模型（出现在所有 ModelSelector 下拉里） */}
+      <MyAiModelsCard token={token} />
 
       {/* P15: AI 模型偏好（用户级） */}
       <AiPreferencesCard token={token} />

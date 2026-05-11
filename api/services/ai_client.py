@@ -95,6 +95,14 @@ async def _resolve_model(
             ) as cur:
                 return await cur.fetchone()
 
+        # 用户私有模型的归属判断（不需要 published，但要 enabled）
+        def _is_owned_by(row, uid) -> bool:
+            try:
+                ow = row["owner_user_id"]
+            except (KeyError, IndexError):
+                ow = None
+            return ow is not None and uid is not None and int(ow) == int(uid)
+
         # 取用户（用于白名单 + 偏好）
         u = None
         if user_id is not None:
@@ -103,13 +111,16 @@ async def _resolve_model(
 
         row = None
         if model_row_id is not None:
-            # 显式指定 → 检查用户白名单（admin 跳过）
-            if u and not is_model_allowed_for_user(u, int(model_row_id), usage_type):
+            candidate = await _load(int(model_row_id))
+            # 自己拥有的模型直接放行（不走白名单 / published 检查）
+            if candidate is not None and _is_owned_by(candidate, user_id):
+                row = candidate
+            elif u and not is_model_allowed_for_user(u, int(model_row_id), usage_type):
                 logger.info(
                     f"[ai_client] user {user_id} not allowed to use model {model_row_id}, fallback to default"
                 )
             else:
-                row = await _load(int(model_row_id))
+                row = candidate
 
         # 2. 用户偏好
         if row is None and u is not None:
@@ -581,31 +592,42 @@ async def log_usage(
 async def list_user_visible_models(
     usage_type: str, user: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """返回某 usage_type 下所有 published + provider_enabled 的模型。
+    """返回某 usage_type 下所有可见模型：admin 共享 published + 用户自己私有的。
 
-    user 给定时按 users.allowed_{text|image}_model_ids 白名单过滤：
-      - NULL/空字符串 = 允许全部 published（默认）
-      - '[]' = 显式禁用所有
-      - '[3, 7]' = 只允许 id 3 和 7
-    admin role 永远看到全部。
+    admin 共享：m.owner_user_id IS NULL AND m.published=1 AND p.enabled=1，再按白名单过滤
+    用户私有：m.owner_user_id = current_user.id AND p.enabled=1（不受 published / 白名单影响）
     """
+    uid = int(user.get("id")) if user and user.get("id") is not None else None
     async with aiosqlite.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
+        # 共享 + 私有 一次查
+        sql = (
             "SELECT m.id, m.model_id, m.display_name, m.usage_type, m.is_default, m.extra_config, "
+            "       m.owner_user_id, "
             "       p.name AS provider_name "
             "FROM ai_models m JOIN ai_providers p ON m.provider_id=p.id "
-            "WHERE m.usage_type=? AND m.published=1 AND p.enabled=1 "
-            "ORDER BY m.sort_order, m.id",
-            (usage_type,),
-        ) as cur:
+            "WHERE m.usage_type=? AND p.enabled=1 "
+            "  AND (m.published=1 OR m.owner_user_id IS NOT NULL) "
+            "ORDER BY (m.owner_user_id IS NULL) DESC, m.sort_order, m.id"
+        )
+        async with db.execute(sql, (usage_type,)) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
-    if not user or (user.get("role") or "").lower() == "admin":
-        return rows
-    allowed = _parse_allowed_models(user, usage_type)
-    if allowed is None:
-        return rows
-    return [r for r in rows if r["id"] in allowed]
+    out: List[Dict[str, Any]] = []
+    is_admin = bool(user) and (user.get("role") or "").lower() == "admin"
+    allowed = _parse_allowed_models(user, usage_type) if user and not is_admin else None
+    for r in rows:
+        ow = r.get("owner_user_id")
+        if ow is None:
+            # 共享模型：admin 永远看；普通用户按白名单
+            if is_admin or not user:
+                out.append(r)
+            elif allowed is None or r["id"] in allowed:
+                out.append(r)
+        else:
+            # 私有：只属于自己（admin 也看不到别人的）
+            if uid is not None and int(ow) == uid:
+                out.append(r)
+    return out
 
 
 def _parse_allowed_models(user: Dict[str, Any], usage_type: str) -> Optional[set]:
@@ -633,11 +655,27 @@ def is_model_allowed_for_user(
 ) -> bool:
     """检查 user 是否能使用 ai_models.id=model_row_id 的模型。
     admin 永远 True；无 user → True（系统调用，scheduler 等）。
+    自己创建的私有模型永远 True（不受 allowed_*_model_ids 白名单影响）。
     """
     if not user:
         return True
     if (user.get("role") or "").lower() == "admin":
         return True
+    # 检查是否是该用户私有模型（同步 sqlite，简单且这条 hot path 也不会卡）
+    try:
+        import sqlite3 as _sq3
+        conn = _sq3.connect(monitor_db.DB_PATH)
+        try:
+            cur = conn.execute(
+                "SELECT owner_user_id FROM ai_models WHERE id=?", (int(model_row_id),),
+            )
+            r = cur.fetchone()
+            if r and r[0] is not None and int(r[0]) == int(user.get("id") or 0):
+                return True
+        finally:
+            conn.close()
+    except Exception:
+        pass
     allowed = _parse_allowed_models(user, usage_type)
     if allowed is None:
         return True
