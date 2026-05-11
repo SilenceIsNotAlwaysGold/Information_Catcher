@@ -196,6 +196,9 @@ class GenerateRequest(BaseModel):
     count: int = 1              # 生成几张（MVP 同步实现，建议 1-3）
     size: Optional[str] = None
     style_hint: Optional[str] = ""  # 附加风格提示（"小红书风 / 简约清新" 等）
+    image_model_id: Optional[int] = None  # 可选指定 ai_models.id（image）；None 走用户默认
+
+    model_config = {"protected_namespaces": ()}
 
 
 @router.post("/text-remix/generate", summary="用背景图 + 文字生成新图")
@@ -238,9 +241,12 @@ async def text_remix_generate(
 
     # 调图模型 N 次
     from ._common import DEFAULT_SIZE, call_edits
-    img_cfg = await ai_client.get_active_model_config(
-        usage_type="image", user_id=user_id,
-    )
+    try:
+        img_cfg = await ai_client.get_active_model_config(
+            usage_type="image", user_id=user_id, model_id=req.image_model_id,
+        )
+    except ai_client.AIModelNotConfigured as e:
+        raise HTTPException(status_code=400, detail=str(e))
     base_url = img_cfg.get("base_url")
     api_key = img_cfg.get("api_key")
     model = img_cfg.get("model_id")

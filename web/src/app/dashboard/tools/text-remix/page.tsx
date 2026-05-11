@@ -182,6 +182,12 @@ export default function TextRemixPage() {
 
   useEffect(() => { loadBackgrounds(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
+  // 上传进度：null=未开始；0-100=上传中；"processing"=已传完等后端
+  // 用 XHR 而非 fetch，浏览器不支持 fetch 上传进度回调
+  const [uploadProgress, setUploadProgress] = useState<number | "processing" | null>(null);
+  const [uploadingName, setUploadingName] = useState<string>("");
+  const [uploadPreview, setUploadPreview] = useState<string>("");
+
   const handleUploadBg = async (file: File) => {
     if (!file) return;
     if (file.size > 10 * 1024 * 1024) { toastErr("文件超过 10MB"); return; }
@@ -189,18 +195,49 @@ export default function TextRemixPage() {
     const fd = new FormData();
     fd.append("file", file);
     fd.append("name", name);
+
+    setUploadingName(name);
+    setUploadProgress(0);
+    // 本地预览，先放一张占位图在网格里
+    const localUrl = URL.createObjectURL(file);
+    setUploadPreview(localUrl);
+
     try {
-      const r = await fetch(IMAGE_API("/text-remix/backgrounds"), {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },  // 不带 Content-Type 让浏览器自己设 multipart boundary
-        body: fd,
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", IMAGE_API("/text-remix/backgrounds"));
+        xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            setUploadProgress(Math.min(99, Math.round((e.loaded / e.total) * 100)));
+          }
+        };
+        xhr.upload.onload = () => setUploadProgress("processing");
+        xhr.onerror = () => reject(new Error("网络错误"));
+        xhr.onload = () => {
+          try {
+            const data = JSON.parse(xhr.responseText || "{}");
+            if (xhr.status >= 200 && xhr.status < 300) {
+              toastOk(`背景图已上传：${name}`);
+              setSelectedBgIds((prev) => [...prev, data.id]);
+              loadBackgrounds().then(() => resolve());
+            } else {
+              reject(new Error(data.detail || `HTTP ${xhr.status}`));
+            }
+          } catch (e: any) {
+            reject(new Error(e?.message || "解析响应失败"));
+          }
+        };
+        xhr.send(fd);
       });
-      const data = await r.json();
-      if (!r.ok) { toastErr(data.detail || "上传失败"); return; }
-      toastOk(`背景图已上传：${name}`);
-      setSelectedBgIds((prev) => [...prev, data.id]);
-      await loadBackgrounds();
-    } catch (e: any) { toastErr(`上传失败：${e?.message || e}`); }
+    } catch (e: any) {
+      toastErr(`上传失败：${e?.message || e}`);
+    } finally {
+      setUploadProgress(null);
+      setUploadingName("");
+      URL.revokeObjectURL(localUrl);
+      setUploadPreview("");
+    }
   };
 
   const handleDeleteBg = async (id: number) => {
@@ -226,6 +263,7 @@ export default function TextRemixPage() {
   const [generating, setGenerating] = useState(false);
   const [results, setResults] = useState<ResultItem[]>([]);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
+  const [imageModelId, setImageModelId] = useState<number | null>(null);
   const bgFileRef = useRef<HTMLInputElement | null>(null);
 
   // ── localStorage 缓存：刷新页面后状态不丢 ─────────────────────────────
@@ -243,6 +281,7 @@ export default function TextRemixPage() {
       if (typeof d.styleHint === "string") setStyleHint(d.styleHint);
       if (typeof d.count === "number") setCount(d.count);
       if (Array.isArray(d.selectedBgIds)) setSelectedBgIds(d.selectedBgIds);
+      if (typeof d.imageModelId === "number") setImageModelId(d.imageModelId);
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [PERSIST_KEY]);
@@ -250,7 +289,7 @@ export default function TextRemixPage() {
     if (_firstLoad.current) { _firstLoad.current = false; return; }
     try {
       localStorage.setItem(PERSIST_KEY, JSON.stringify({
-        postUrl, ocrTexts, sourceImgIdxs, ocrModelId, styleHint, count, selectedBgIds,
+        postUrl, ocrTexts, sourceImgIdxs, ocrModelId, styleHint, count, selectedBgIds, imageModelId,
       }));
     } catch {}
   }, [postUrl, ocrTexts, sourceImgIdxs, ocrModelId, styleHint, count, selectedBgIds, PERSIST_KEY]);
@@ -289,7 +328,7 @@ export default function TextRemixPage() {
         const job = jobs[i];
         const label = `第${job.setIdx}套·源${job.srcIdx + 1}×${job.bgName}`;
         try {
-          // 后端单次 count=1（套数由前端循环控制；后端不再聚合）
+          // 后端单次 count=1（套数由前端循环控制；套间循环放前端，方便流式展示进度）
           const r = await fetch(IMAGE_API("/text-remix/generate"), {
             method: "POST", headers,
             body: JSON.stringify({
@@ -297,12 +336,24 @@ export default function TextRemixPage() {
               text_content: job.text,
               count: 1,
               style_hint: styleHint.trim(),
+              image_model_id: imageModelId,
             }),
           });
-          const data = await r.json();
+          // 安全解析：返回 HTML/空文本时不能直接 .json()，否则前端只能看到
+          // "Unexpected token '<'..." 这种没用的错误
+          const ct = (r.headers.get("content-type") || "").toLowerCase();
+          const txt = await r.text();
+          let data: any = {};
+          if (ct.includes("application/json")) {
+            try { data = txt ? JSON.parse(txt) : {}; } catch { data = {}; }
+          } else if (txt.trim().startsWith("<")) {
+            data = { detail: `网关返回了 HTML 而非 JSON（HTTP ${r.status}），可能是上游超时/反代异常；首字符："${txt.slice(0, 80).replace(/\s+/g, " ")}…"` };
+          } else {
+            data = { detail: txt.slice(0, 200) || `HTTP ${r.status}` };
+          }
           if (!r.ok) {
             all.push({
-              image_url: "", error: data.detail || "未知",
+              image_url: "", error: data.detail || `HTTP ${r.status}`,
               bg_name: label, set_idx: job.setIdx, src_idx: job.srcIdx,
             });
           } else {
@@ -506,16 +557,22 @@ export default function TextRemixPage() {
                 e.target.value = "";  // 允许重复选择同一个文件
               }} />
             <Button size="sm" variant="flat" color="primary"
-              startContent={<Upload size={14} />}
+              startContent={uploadProgress === null ? <Upload size={14} /> : undefined}
+              isLoading={uploadProgress !== null}
+              isDisabled={uploadProgress !== null}
               onPress={() => bgFileRef.current?.click()}>
-              上传新背景
+              {uploadProgress === null
+                ? "上传新背景"
+                : uploadProgress === "processing"
+                  ? "服务器处理中…"
+                  : `上传中 ${uploadProgress}%`}
             </Button>
           </div>
         </CardHeader>
         <CardBody>
           {bgLoading ? (
             <div className="text-default-400 text-sm">加载中…</div>
-          ) : backgrounds.length === 0 ? (
+          ) : backgrounds.length === 0 && uploadProgress === null ? (
             <div className="text-center py-6 text-default-400 text-sm space-y-2">
               <ImageIcon size={28} className="mx-auto opacity-30" />
               <p>还没上传过背景图</p>
@@ -527,6 +584,39 @@ export default function TextRemixPage() {
             </div>
           ) : (
             <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-7 gap-2">
+              {/* 上传中占位卡片：放最前面，跟用户的眼神先一致 */}
+              {uploadProgress !== null && (
+                <div className="relative aspect-square rounded-md overflow-hidden border-2 border-primary/60 bg-default-50">
+                  {uploadPreview ? (
+                    /* eslint-disable-next-line @next/next/no-img-element */
+                    <img src={uploadPreview} alt="上传预览"
+                      className="w-full h-full object-cover opacity-60" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center">
+                      <ImageIcon size={24} className="opacity-30" />
+                    </div>
+                  )}
+                  {/* 中间半透明遮罩 + 状态文字 */}
+                  <div className="absolute inset-0 bg-black/40 flex flex-col items-center justify-center text-white text-[11px] gap-1">
+                    <Spinner size="sm" color="white" />
+                    <span className="font-medium">
+                      {uploadProgress === "processing"
+                        ? "处理中…"
+                        : `${uploadProgress}%`}
+                    </span>
+                  </div>
+                  {/* 底部进度条 */}
+                  {typeof uploadProgress === "number" && (
+                    <div className="absolute bottom-0 left-0 right-0 h-1 bg-default-200">
+                      <div className="h-full bg-primary transition-all"
+                        style={{ width: `${uploadProgress}%` }} />
+                    </div>
+                  )}
+                  <span className="absolute top-0 left-0 right-0 bg-primary/80 text-white text-[10px] px-1 py-0.5 truncate">
+                    {uploadingName || "上传中"}
+                  </span>
+                </div>
+              )}
               {backgrounds.map((bg) => {
                 const on = selectedBgIds.includes(bg.id);
                 return (
@@ -600,10 +690,19 @@ export default function TextRemixPage() {
               上限 30 套。前端限 3 并发跑上游图像 API，单张约 30s。
             </p>
           </div>
-          <div>
-            <Input size="sm" label="风格提示（可选）" labelPlacement="outside"
-              placeholder="如：小红书风 / 简约清新 / 高级感"
-              value={styleHint} onValueChange={setStyleHint} />
+          <div className="flex flex-wrap gap-3 items-end">
+            <ModelSelector
+              usage="image"
+              value={imageModelId}
+              onChange={setImageModelId}
+              label="图像生成模型"
+              className="min-w-[220px]"
+            />
+            <div className="flex-1 min-w-[200px]">
+              <Input size="sm" label="风格提示（可选）" labelPlacement="outside"
+                placeholder="如：小红书风 / 简约清新 / 高级感"
+                value={styleHint} onValueChange={setStyleHint} />
+            </div>
           </div>
           <Button color="secondary" size="lg" className="w-full"
             startContent={<Wand2 size={18} />}
