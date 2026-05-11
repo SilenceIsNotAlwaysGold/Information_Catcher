@@ -253,3 +253,4 @@ certs/
 
 .deploy.env
 scripts/pg_migrate/out/
+scripts/pg_migrate/_tmp_*/
