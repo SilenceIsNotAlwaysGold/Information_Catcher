@@ -5,7 +5,7 @@ import Link from "next/link";
 import {
   LayoutDashboard, Upload, Settings, LogOut, TrendingUp,
   ShieldCheck, Music2, Newspaper, ChevronDown, ChevronRight,
-  FileText, Users, Moon, Sun, X, Sparkles, Link2, SlidersHorizontal, Server,
+  FileText, Users, Moon, Sun, X, Sparkles, Link2, SlidersHorizontal,
   Image as ImageIcon, Wand2, Ticket, History as HistoryIcon, Puzzle, Wrench,
 } from "lucide-react";
 import { Button } from "@nextui-org/button";
@@ -94,7 +94,6 @@ const adminNavItems: NavItem[] = [
   { key: "admin-ai",       href: "/dashboard/admin/ai",       icon: <Sparkles size={16} />,           label: "AI 模型",  module: "admin" },
   { key: "admin-feishu",   href: "/dashboard/admin/feishu",   icon: <Link2 size={16} />,              label: "飞书应用", module: "admin" },
   { key: "admin-system",   href: "/dashboard/admin/system",   icon: <SlidersHorizontal size={16} />,  label: "系统配置", module: "admin" },
-  { key: "admin-accounts", href: "/dashboard/admin/accounts", icon: <Server size={16} />,             label: "账号管理", module: "admin" },
 ];
 
 const COLLAPSE_KEY = "sidebar.collapsed.modules";

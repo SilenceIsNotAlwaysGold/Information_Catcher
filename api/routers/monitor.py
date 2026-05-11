@@ -9,11 +9,7 @@ logger = logging.getLogger(__name__)
 from ..schemas.monitor import (
     AddPostsRequest,
     UpdatePostRequest,
-    AddAccountRequest,
-    CookieSyncRequest,
-    UpdateAccountRequest,
     UpdateSettingsRequest,
-    QRLoginStartRequest,
     CreatePromptRequest,
     UpdatePromptRequest,
     RewriteTrendingRequest,
@@ -28,14 +24,11 @@ from ..schemas.monitor import (
 from ..services import monitor_db as db
 from ..services import monitor_fetcher as fetcher
 from ..services import scheduler as sched
-from ..services import qr_login
-from ..services import cookie_health
 from ..services import ai_rewriter  # noqa: F401 kept for any external imports
 from ..services import ai_client
 from ..services import feishu_bitable
 from ..services import proxy_forwarder
 from ..services import platforms as platform_registry
-from ..services.account_browser import validate_proxy_url
 from .auth import get_current_user
 
 router = APIRouter(prefix="/monitor", tags=["监控"])
@@ -991,173 +984,12 @@ async def list_accounts(
     return {"accounts": await db.get_accounts(user_id=user_id, platform=platform)}
 
 
-@router.post("/accounts", summary="添加账号")
-async def add_account(req: AddAccountRequest, current_user: dict = Depends(get_current_user)):
-    is_admin = (current_user.get("role") or "user") == "admin"
-    # 只有 admin 才能把账号标记为共享池资源
-    is_shared = bool(req.is_shared) and is_admin
-
-    # 代理校验：拒绝实际不会生效的 SOCKS5 鉴权代理等
-    err = validate_proxy_url(req.proxy_url or "")
-    if err:
-        raise HTTPException(status_code=400, detail=err)
-
-    # 配额检查：账号池上限（admin 不限）。共享池账号不计入个人配额。
-    if not is_shared:
-        from ..services import quota_service
-        await quota_service.check_or_raise(current_user, "accounts", delta=1)
-
-    aid = await db.add_account(
-        name=req.name,
-        cookie=req.cookie,
-        proxy_url=req.proxy_url or "",
-        user_agent=req.user_agent or "",
-        viewport=req.viewport or "",
-        timezone=req.timezone or "Asia/Shanghai",
-        locale=req.locale or "zh-CN",
-        fp_browser_type=req.fp_browser_type or "builtin",
-        fp_profile_id=req.fp_profile_id or "",
-        fp_api_url=req.fp_api_url or "",
-        user_id=current_user["id"],
-        is_shared=is_shared,
-        platform=(req.platform or "xhs"),
-    )
-    # 如果代理是 socks5+鉴权，启动本地转发
-    if proxy_forwarder.needs_forwarder(req.proxy_url or ""):
-        acc = await db.get_account(aid)
-        if acc:
-            await proxy_forwarder.ensure_forwarder(acc)
-    return {"ok": True, "id": aid}
-
-
-@router.patch("/accounts/{account_id}", summary="更新账号")
-async def update_account(
-    account_id: int,
-    req: UpdateAccountRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    fields = req.model_dump(exclude_none=True)
-    # is_shared 仅 admin 可改，普通用户的请求会静默丢弃这个字段
-    if (current_user.get("role") or "user") != "admin":
-        fields.pop("is_shared", None)
-    # 代理校验
-    if "proxy_url" in fields:
-        err = validate_proxy_url(fields["proxy_url"] or "")
-        if err:
-            raise HTTPException(status_code=400, detail=err)
-    changed = await db.update_account(account_id, **fields)
-    if not changed:
-        raise HTTPException(status_code=400, detail="no fields to update")
-    # 代理变化时同步本地转发
-    if "proxy_url" in fields:
-        new_proxy = fields.get("proxy_url") or ""
-        if proxy_forwarder.needs_forwarder(new_proxy):
-            acc = await db.get_account(account_id)
-            if acc:
-                await proxy_forwarder.ensure_forwarder(acc)
-        else:
-            await proxy_forwarder.drop_forwarder(account_id)
-    return {"ok": True}
-
-
-@router.delete("/accounts/{account_id}", summary="删除账号")
-async def delete_account(account_id: int, current_user: dict = Depends(get_current_user)):
-    await db.delete_account(account_id, user_id=_scope_uid(current_user))
-    await proxy_forwarder.drop_forwarder(account_id)
-    return {"ok": True}
-
-
-@router.post("/accounts/{account_id}/check-cookie", summary="检查账号 Cookie 状态")
-async def check_account_cookie(account_id: int, _: dict = Depends(get_current_user)):
-    acc = await db.get_account(account_id)
-    if not acc:
-        raise HTTPException(status_code=404, detail="账号不存在")
-    status = await cookie_health.check_cookie(acc)
-    await db.update_cookie_status(account_id, status)
-    return {"ok": True, "status": status}
-
-
-@router.post("/accounts/cookie/sync", summary="CookieBridge 扩展推送 cookie")
-async def cookie_bridge_sync(
-    req: CookieSyncRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    """浏览器扩展同步 cookie 到 Pulse。
-
-    设计取舍：
-      - 通过 (account_name, platform, user_id) 定位现有账号；不自动创建账号，
-        避免任何登录浏览器的扩展往后端灌一堆未受控的账号。
-      - 校验 cookie 必须带 a1（小红书签名核心字段），其它字段交给 cookie_health
-        job 异步复测，立刻把状态打回 'valid' 让监控立刻能用。
-    """
-    cookie = (req.cookie or "").strip()
-    if not cookie:
-        raise HTTPException(status_code=400, detail="cookie 不能为空")
-    platform = (req.platform or "xhs").lower()
-    # 至少要带 a1（XHS 签名核心字段）；其它平台只校验非空
-    if platform == "xhs" and "a1=" not in cookie:
-        raise HTTPException(status_code=400, detail="XHS cookie 必须包含 a1 字段")
-
-    account_id = await db.find_account_id_by_name_and_user(
-        name=req.account_name, user_id=current_user["id"], platform=platform,
-    )
-    if not account_id:
-        raise HTTPException(
-            status_code=404,
-            detail=f"未找到账号 '{req.account_name}'（平台 {platform}）。"
-                   f"请先在 Pulse 添加同名账号占位。",
-        )
-    await db.update_cookie_via_bridge(
-        account_id=account_id, cookie=cookie, source=(req.source or "extension"),
-    )
-    return {"ok": True, "account_id": account_id}
-
-
-@router.post("/accounts/check-cookies", summary="检查全部账号 Cookie")
-async def check_all_cookies(
-    background_tasks: BackgroundTasks,
-    _: dict = Depends(get_current_user),
-):
-    background_tasks.add_task(sched.run_cookie_health_check)
-    return {"ok": True, "message": "已触发全量检查，结果稍后会更新"}
-
-
-# ── QR Login ────────────────────────────────────────────────────────────────
-
-@router.post("/accounts/qr-login/start", summary="启动扫码登录")
-async def qr_login_start(
-    req: QRLoginStartRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    platform = (req.platform or "xhs").lower()
-    if platform != "xhs":
-        # v1：抖音/公众号扫码登录待实现（依赖 douyin/wechat-mp 各自的 cookie 流）
-        raise HTTPException(
-            status_code=501,
-            detail=f"{platform} 扫码登录开发中，请用「手动录入 Cookie」入口",
-        )
-    payload = req.model_dump()
-    # 把当前用户塞进 template，登录成功保存账号时 user_id 才有值（多租户隔离）
-    payload["user_id"] = current_user["id"]
-    try:
-        data = await qr_login.start_session(payload)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    return data
-
-
-@router.get("/accounts/qr-login/{session_id}", summary="查询扫码登录状态")
-async def qr_login_status(session_id: str, _: dict = Depends(get_current_user)):
-    info = qr_login.get_status(session_id)
-    if not info:
-        raise HTTPException(status_code=404, detail="session not found or expired")
-    return info
-
-
-@router.post("/accounts/qr-login/{session_id}/cancel", summary="取消扫码登录")
-async def qr_login_cancel(session_id: str, _: dict = Depends(get_current_user)):
-    ok = await qr_login.cancel_session(session_id)
-    return {"ok": ok}
+# NOTE: 账户管理已于 2026-05 全面下线 —— 现在统一走浏览器扩展通道，
+# 不再需要在 Pulse 后端维护 cookie / 代理。
+# POST/PATCH/DELETE/check-cookie/cookie/sync/check-cookies/qr-login 端点已移除。
+# 保留 GET /accounts（返回空列表给老前端的 useAccounts SWR 用，下拉就消失）
+# 以及 GET /admin/users/{user_id}/accounts（admin 工具，看老数据）。
+# monitor_accounts 表 + DAO 函数仍保留，scheduler 仍可读 account_cookie 兼容老监控帖。
 
 
 # ── Settings ─────────────────────────────────────────────────────────────────

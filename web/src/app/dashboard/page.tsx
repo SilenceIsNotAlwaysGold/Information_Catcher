@@ -11,7 +11,6 @@ import {
   Bell,
   RefreshCw,
   Users,
-  ShieldCheck,
   TrendingUp,
   Inbox,
   Heart,
@@ -207,14 +206,6 @@ export default function DashboardPage() {
       icon: <Activity size={18} />,
       color: "text-primary",
       href: "/dashboard/monitor",
-    },
-    {
-      label: "有效账号",
-      value: `${quota.accounts.valid} / ${quota.accounts.total}`,
-      icon: <ShieldCheck size={18} />,
-      color: "text-success",
-      hint: quota.accounts.expired > 0 ? `${quota.accounts.expired} 个已过期` : undefined,
-      href: "/dashboard/admin/accounts",
     },
     {
       label: "订阅创作者",
