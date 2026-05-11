@@ -695,6 +695,13 @@ async function runXhsCreatorPosts(payload) {
         if (!profile?.likes_count && dom.interactions_text) profile.likes_count = parseCount(dom.interactions_text);
         if (!profile?.notes_count && dom.notes_text) profile.notes_count = parseCount(dom.notes_text);
         if (!profile?.following_count && dom.follows_text) profile.following_count = parseCount(dom.follows_text);
+        // creator_name：DOM 最可信（用户实际看到的页面标题）
+        // 仅在 XHR/SSR 没拿到时用 DOM；如果 XHR 拿的是奇怪短串（≤2 字 / 纯数字）也用 DOM 覆盖
+        const xhrName = (profile?.creator_name || "").trim();
+        const domName = (dom.creator_name || "").trim();
+        if (domName && (!xhrName || xhrName.length < 2 || /^[0-9]+$/.test(xhrName))) {
+          profile.creator_name = domName;
+        }
         // 合并 posts（DOM 抓到的封面/标题对缺失字段做补全）
         if (Array.isArray(dom.posts) && dom.posts.length) {
           const byId = new Map(posts.map((p) => [p.post_id, p]));
@@ -873,10 +880,9 @@ function extractXhsCreatorPosts(hits) {
       const tok = n.xsec_token || "";
       const user = n.user || {};
       const cover = n.cover || {};
-      // user_posted 里 user 通常只有 nickname + image；先 fallback 给 profile
-      if (!profile.creator_name && (user.nick_name || user.nickname || user.name)) {
-        profile.creator_name = user.nick_name || user.nickname || user.name;
-      }
+      // 不再从 user_posted 的 n.user 反推 profile.creator_name —— 该 user 是
+      // 笔记作者，在转发/折叠场景下不一定等于页面博主，导致博主名抓错（见用户反馈）。
+      // creator_name 现统一由：otherinfo XHR / __INITIAL_STATE__ / DOM 兜底。
       if (!profile.avatar_url && (user.image || user.images)) {
         profile.avatar_url = user.image || user.images;
       }

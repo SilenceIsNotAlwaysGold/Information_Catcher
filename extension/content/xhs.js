@@ -109,7 +109,10 @@ async function readInitialStateUser(timeoutMs = 1500) {
 // DOM 兜底 —— 用户截图确认 selector 是 .user-interactions
 // 容器内文本形如："122 关注 631 粉丝 1677 获赞与收藏"
 function readDomCreatorStats() {
-  const out = { fans_text: "", interactions_text: "", notes_text: "", follows_text: "", debug: {} };
+  const out = {
+    fans_text: "", interactions_text: "", notes_text: "", follows_text: "",
+    creator_name: "", debug: {},
+  };
   try {
     const NUM = "([0-9][0-9.,]*\\s*[万亿wWkK]?)";
     const scope = document.querySelector(".user-interactions");
@@ -133,6 +136,50 @@ function readDomCreatorStats() {
     // 之前优先取 tab 文字会命中"笔记 14"这种 badge 误差值，远小于实际数。
     const items = document.querySelectorAll("section.note-item");
     if (items.length) out.notes_text = String(items.length);
+
+    // ─── creator_name DOM 提取 ──────────────────────────────────────────
+    // 之前完全靠 XHR 的 data.nickname / n.user.nickname，但 XHR 不一定发或
+    // 字段会变（折叠/转发场景 n.user 可能不是页面博主），就拿到错的名字。
+    // DOM 是用户实际看到的标题，最可靠。多套选择器 + meta + title 兜底。
+    const nameCandidates = [];
+    const sels = [
+      ".user-info .user-name",
+      ".user-info .nickname",
+      ".user-nickname-content",
+      ".user-info-wrapper .user-name",
+      ".profile-info .name",
+      ".user-info [class*='nick']",
+      ".user-info [class*='name']",
+      ".user-basic-info .name",
+      "h1[class*='user']",
+    ];
+    for (const s of sels) {
+      const el = document.querySelector(s);
+      const t = el ? (el.textContent || "").trim() : "";
+      if (t && t.length <= 50) { nameCandidates.push({ src: "sel:" + s, val: t }); break; }
+    }
+    // meta og:title 多为「XXX 的小红书」，扒掉后缀
+    const og = document.querySelector('meta[property="og:title"]')
+      || document.querySelector('meta[name="og:title"]');
+    if (og) {
+      const t = String(og.getAttribute("content") || "")
+        .replace(/[ \-—]*\s*小红书.*$/u, "")
+        .replace(/的小红书$/u, "")
+        .trim();
+      if (t) nameCandidates.push({ src: "og:title", val: t });
+    }
+    // document.title 类似「XXX 的小红书」/「XXX - 小红书」
+    if (document.title) {
+      const t = document.title
+        .replace(/[ \-—]*\s*小红书.*$/u, "")
+        .replace(/的小红书$/u, "")
+        .trim();
+      if (t && t.length <= 50 && !/^(用户主页|小红书)$/.test(t)) {
+        nameCandidates.push({ src: "doc.title", val: t });
+      }
+    }
+    out.debug.name_candidates = nameCandidates.slice(0, 5);
+    if (nameCandidates.length) out.creator_name = nameCandidates[0].val;
   } catch (e) {
     out.debug.error = String(e?.message || e);
   }
