@@ -85,6 +85,22 @@ _DATE_DELTA = re.compile(
 # 但 OR IGNORE 不是 PG 语法，单独翻译）
 _INSERT_OR_IGNORE = re.compile(r"\bINSERT\s+OR\s+IGNORE\b", re.IGNORECASE)
 _INSERT_OR_REPLACE = re.compile(r"\bINSERT\s+OR\s+REPLACE\b", re.IGNORECASE)
+# INTEGER PRIMARY KEY AUTOINCREMENT → BIGSERIAL PRIMARY KEY
+_AUTOINC = re.compile(
+    r"INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT", re.IGNORECASE,
+)
+# 单独的 AUTOINCREMENT 关键字（如 BIGINT AUTOINCREMENT 等异常写法）
+_AUTOINC_BARE = re.compile(r"\bAUTOINCREMENT\b", re.IGNORECASE)
+# PRAGMA journal_mode / synchronous / busy_timeout / foreign_keys 在 PG 无意义
+_PRAGMA_NOOP = re.compile(
+    r"PRAGMA\s+(journal_mode|synchronous|busy_timeout|foreign_keys|cache_size|"
+    r"temp_store|mmap_size|page_size|auto_vacuum)\s*=\s*\S+", re.IGNORECASE,
+)
+# PRAGMA table_info(t) → 转 PG information_schema 查询，列顺序模拟 sqlite 输出
+_PRAGMA_TABLE_INFO = re.compile(r"PRAGMA\s+table_info\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)", re.IGNORECASE)
+# sqlite_master：sqlite 内置系统表，PG 没有。所有查询替换为空集，让 schema 探测类
+# 迁移函数自动 short-circuit（这些迁移在 PG 部署上本来就不需要——_INIT_SQL 已建新结构）
+_SQLITE_MASTER = re.compile(r"\bFROM\s+sqlite_master\b", re.IGNORECASE)
 
 
 def _translate_sql_for_pg(sql: str) -> str:
@@ -94,6 +110,31 @@ def _translate_sql_for_pg(sql: str) -> str:
     s = _DATETIME_NOW.sub("NOW()", s)
     s = _DATE_DELTA.sub(lambda m: f"(CURRENT_DATE + INTERVAL '{m.group(1)} days')", s)
     s = _DATE_NOW.sub("CURRENT_DATE", s)
+
+    # AUTOINCREMENT：必须在 PRIMARY KEY 同行先合并替换，避免后面 _AUTOINC_BARE 误伤
+    s = _AUTOINC.sub("BIGSERIAL PRIMARY KEY", s)
+    s = _AUTOINC_BARE.sub("", s)  # 兜底：剩下的 AUTOINCREMENT 移除
+
+    # PRAGMA：sqlite 专用，PG 全部 no-op 化（保留 SELECT 1 以便有合法 SQL）
+    s = _PRAGMA_NOOP.sub("SELECT 1", s)
+    # sqlite_master：PG 没有该系统表，让查询返回空集
+    s = _SQLITE_MASTER.sub("FROM (SELECT NULL::TEXT AS sql, NULL::TEXT AS name, NULL::TEXT AS type WHERE FALSE) _empty", s)
+    # PRAGMA table_info(t) → 等价 PG 查询，列顺序与 sqlite 一致：(cid,name,type,notnull,dflt_value,pk)
+    m = _PRAGMA_TABLE_INFO.search(s)
+    if m:
+        tbl = m.group(1)
+        repl = (
+            "SELECT (ordinal_position - 1)::INTEGER AS cid, "
+            "column_name AS name, "
+            "data_type AS type, "
+            "CASE WHEN is_nullable='NO' THEN 1 ELSE 0 END AS notnull, "
+            "column_default AS dflt_value, "
+            "0 AS pk "
+            "FROM information_schema.columns "
+            f"WHERE table_name='{tbl}' AND table_schema='public' "
+            "ORDER BY ordinal_position"
+        )
+        s = _PRAGMA_TABLE_INFO.sub(repl, s)
 
     # INSERT OR IGNORE：PG 语义需要 ON CONFLICT DO NOTHING
     if _INSERT_OR_IGNORE.search(s):
@@ -245,12 +286,18 @@ class _PGConnection:
         return _PGCursor(self, sql, params)
 
     async def executescript(self, sql_script: str) -> None:
-        """多语句执行：asyncpg 不支持单次 fetch 多语句，按 ; 拆分。"""
-        translated = _translate_sql_for_pg(sql_script)
+        """多语句执行：asyncpg 不支持单次 fetch 多语句，按 ; 拆分逐条翻译执行。
+
+        必须先 split 再翻译——否则 INSERT OR IGNORE 这类需要在末尾追加
+        ON CONFLICT 的语句只会处理最后一条。
+        """
         # 简单 split（在引号/CTE 里有 ; 时会出问题，但 _INIT_SQL 没那种用法）
-        stmts = [s.strip() for s in translated.split(";") if s.strip()]
+        raw_stmts = [s.strip() for s in sql_script.split(";") if s.strip()]
         async with self._acquire() as raw:
-            for s in stmts:
+            for raw_stmt in raw_stmts:
+                s = _translate_sql_for_pg(raw_stmt)
+                if not s.strip():
+                    continue
                 try:
                     await raw.execute(s)
                 except Exception as e:
