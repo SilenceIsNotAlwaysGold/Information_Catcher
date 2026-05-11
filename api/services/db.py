@@ -309,22 +309,43 @@ def _wrap_row(record, row_factory):
 
 
 class _PGConnection:
-    """模拟 aiosqlite Connection。"""
+    """模拟 aiosqlite Connection。
+
+    一个 async with db.connect() as conn 块整个共享同一条 PG 连接，让
+    BEGIN/COMMIT 和"前一条 INSERT 影响下一条 SELECT"这种 sqlite 语义可用。
+    """
 
     def __init__(self):
-        self._pool: Any = None
-        self.row_factory = None  # 调用方可设 aiosqlite.Row 风格
+        self._raw: Any = None
+        self._pool_ctx: Any = None
+        self._in_tx: bool = False  # 跟踪是否进入显式事务（BEGIN）
+        self.row_factory = None    # 调用方可设 aiosqlite.Row 风格
 
     @asynccontextmanager
     async def _acquire(self) -> AsyncIterator[Any]:
-        if self._pool is None:
-            self._pool = await _get_pg_pool()
-        async with self._pool.acquire() as raw:
-            yield raw
+        """所有 SQL 共享 __aenter__ 阶段拿到的同一条 raw 连接。"""
+        if self._raw is None:
+            # 兜底：调用方未走 async with（罕见），临时拿一条连接
+            pool = await _get_pg_pool()
+            async with pool.acquire() as raw:
+                yield raw
+            return
+        yield self._raw
 
     def execute(self, sql: str, params: Sequence[Any] = ()):
         """注意：跟 aiosqlite 一样，execute 返回 cursor 而非 coroutine。
-        await execute(...) 也能工作（async __aenter__ 在 await 时触发）。"""
+        await execute(...) 也能工作（async __aenter__ 在 await 时触发）。
+
+        识别 BEGIN/COMMIT/ROLLBACK 用来跟踪显式事务状态——pool release 时若仍在
+        事务里，asyncpg 会 ERROR log "Resetting connection with an active transaction"。
+        """
+        upper = sql.strip().upper()
+        if upper.startswith(("BEGIN", "START TRANSACTION")):
+            self._in_tx = True
+        elif upper.startswith(("COMMIT", "END")):
+            self._in_tx = False
+        elif upper.startswith("ROLLBACK"):
+            self._in_tx = False
         return _PGCursor(self, sql, params)
 
     async def executescript(self, sql_script: str) -> None:
@@ -350,18 +371,42 @@ class _PGConnection:
                     )
 
     async def commit(self) -> None:
-        # asyncpg 默认 autocommit；连接池的连接每次 acquire 都是 fresh
-        # 不需要显式 commit
-        return None
+        """如果在显式事务里就真发 COMMIT；否则 no-op（asyncpg 默认 autocommit）。"""
+        if self._in_tx and self._raw is not None:
+            try:
+                await self._raw.execute("COMMIT")
+            except Exception:
+                pass
+            self._in_tx = False
 
     async def close(self) -> None:
+        # 由 __aexit__ 统一处理连接归还
         return None
 
     async def __aenter__(self):
+        # 进入块时从池里 acquire 一条连接，整个块共享
+        pool = await _get_pg_pool()
+        self._pool_ctx = pool.acquire()
+        self._raw = await self._pool_ctx.__aenter__()
         return self
 
-    async def __aexit__(self, *_):
-        await self.close()
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        try:
+            # 兜底：块结束时若仍处于事务，按异常状态决定 COMMIT/ROLLBACK
+            if self._in_tx and self._raw is not None:
+                try:
+                    if exc_type is None:
+                        await self._raw.execute("COMMIT")
+                    else:
+                        await self._raw.execute("ROLLBACK")
+                except Exception:
+                    pass
+                self._in_tx = False
+        finally:
+            if self._pool_ctx is not None:
+                await self._pool_ctx.__aexit__(exc_type, exc_val, exc_tb)
+            self._raw = None
+            self._pool_ctx = None
 
 
 # ── 统一入口：connect(path) 返回兼容 aiosqlite 的连接 ────────────────────
