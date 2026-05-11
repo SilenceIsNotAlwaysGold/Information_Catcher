@@ -92,6 +92,12 @@ BACKEND_FILES=(
   api/services/platforms/xhs/sign_service.py
   api/services/platforms/xhs/fetcher.py
   api/services/platforms/xhs/creator_dashboard_fetcher.py
+  api/services/platforms/douyin/__init__.py
+  api/services/platforms/douyin/fetcher.py
+  api/services/platforms/douyin/live_fetcher.py
+  api/services/platforms/douyin/trendinsight_fetcher.py
+  api/services/platforms/mp/__init__.py
+  api/services/platforms/mp/fetcher.py
   pyproject.toml
 )
 
