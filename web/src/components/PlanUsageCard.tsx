@@ -43,8 +43,10 @@ type ItemKey = keyof Omit<UsageSummary, "plan" | "daily_remix_sets">;
 type ItemDef = { key: ItemKey; label: string; suffix: string; hint?: string };
 // 分两组：上方"账号资源"长期累计；下方"AI 用量"日清零
 const ACCOUNT_ITEMS: ItemDef[] = [
-  { key: "monitor_posts", label: "监控帖子", suffix: "帖" },
-  { key: "accounts",      label: "账号池",   suffix: "个" },
+  { key: "monitor_posts", label: "监控帖子", suffix: "帖",
+    hint: "已加入监控的小红书 / 抖音 / 公众号 帖子总数" },
+  { key: "accounts",      label: "已绑平台账号", suffix: "个",
+    hint: "绑到 Pulse 的小红书 / 抖音 / 公众号 cookie 账号数。爬虫用这些账号拿真实数据" },
 ];
 const AI_ITEMS: ItemDef[] = [
   { key: "daily_image_gen", label: "今日生图", suffix: "张",

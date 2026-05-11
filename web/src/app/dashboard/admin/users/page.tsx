@@ -502,10 +502,10 @@ export default function AdminUsersPage() {
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     {[
-                      ["monitor_posts",   "监控帖子",   "帖"],
-                      ["accounts",        "账号池",     "个"],
-                      ["daily_image_gen", "每日生图",   "张"],
-                      ["daily_text_gen",  "每日写文",   "篇"],
+                      ["monitor_posts",   "监控帖子",     "帖"],
+                      ["accounts",        "已绑平台账号", "个"],
+                      ["daily_image_gen", "每日生图",     "张"],
+                      ["daily_text_gen",  "每日写文",     "篇"],
                     ].map(([k, label, suffix]) => (
                       <Input key={k}
                         label={label}
