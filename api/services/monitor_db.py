@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS monitor_accounts (
 
 CREATE TABLE IF NOT EXISTS monitor_posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    note_id TEXT NOT NULL UNIQUE,
+    note_id TEXT NOT NULL,
     title TEXT,
     short_url TEXT,
     note_url TEXT,
@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS monitor_posts (
     is_active INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
+-- 注意：复合 UNIQUE 索引在 _migrate 末尾创建（user_id 列由 _ensure_column 后补）
 
 CREATE TABLE IF NOT EXISTS monitor_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,7 +150,7 @@ CREATE INDEX IF NOT EXISTS idx_ext_tasks_user ON ext_tasks(user_id, created_at D
 
 CREATE TABLE IF NOT EXISTS trending_posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    note_id TEXT NOT NULL UNIQUE,
+    note_id TEXT NOT NULL,
     title TEXT,
     desc_text TEXT,
     note_url TEXT,
@@ -164,6 +165,7 @@ CREATE TABLE IF NOT EXISTS trending_posts (
     found_at TEXT DEFAULT (datetime('now', 'localtime')),
     synced_to_bitable INTEGER DEFAULT 0
 );
+-- 注意：复合 UNIQUE 索引在 _migrate 末尾创建（user_id / platform 列由 _ensure_column 后补）
 
 CREATE TABLE IF NOT EXISTS own_comments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1039,7 +1041,8 @@ async def _migrate(db):
             old_val = (row[0] if row else "").strip()
         if old_val:
             await db.execute(
-                "INSERT OR REPLACE INTO monitor_settings VALUES ('self_monitor_account_ids', ?)",
+                "INSERT INTO monitor_settings(key, value) VALUES ('self_monitor_account_ids', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (old_val,),
             )
     # FTS5 全文索引：实测 trigram tokenizer 在中文+大量数据时会导致
@@ -1057,6 +1060,37 @@ async def _migrate(db):
         """)
     except Exception:
         pass
+
+    # PG 老部署：1.5 阶段从 sqlite dump 出来的 schema 仍含单列 `note_id UNIQUE`
+    # 约束（约束名 monitor_posts_note_id_key / trending_posts_note_id_key），
+    # 阻挡同 note_id 多用户共存。这里在 PG 上 DROP 掉，让复合 UNIQUE 索引接管。
+    if _db.is_pg():
+        for tbl in ("monitor_posts", "trending_posts"):
+            try:
+                await db.execute(
+                    f"ALTER TABLE {tbl} DROP CONSTRAINT IF EXISTS {tbl}_note_id_key"
+                )
+            except Exception as e:
+                logger.warning(f"[_migrate] drop {tbl}_note_id_key: {e}")
+
+    # 复合 UNIQUE 索引：必须在 _ensure_column 把 user_id/platform 加完之后建。
+    # 新部署（sqlite + PG 都适用）：_INIT_SQL 已去掉列级 UNIQUE，这里直接建。
+    # 老 sqlite 部署：上面的 _migrate_*_posts_unique 已重建表 + 加好索引，重复 CREATE
+    # 也安全（IF NOT EXISTS）。
+    try:
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_monitor_posts_note_user "
+            "ON monitor_posts(note_id, COALESCE(user_id, 0))"
+        )
+    except Exception as e:
+        logger.warning(f"[_migrate] idx_monitor_posts_note_user: {e}")
+    try:
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trending_note_user "
+            "ON trending_posts(note_id, COALESCE(user_id, 0))"
+        )
+    except Exception as e:
+        logger.warning(f"[_migrate] idx_trending_note_user: {e}")
 
 
 async def _seed_default_groups(db):
@@ -1168,7 +1202,11 @@ async def get_setting(key: str, default: str = "") -> str:
 
 async def set_setting(key: str, value: str):
     async with _db.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO monitor_settings VALUES (?,?)", (key, value))
+        await db.execute(
+            "INSERT INTO monitor_settings(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
         await db.commit()
 
 
@@ -1970,7 +2008,7 @@ async def health_summary(days: int = 7) -> dict:
             GROUP BY platform, status
         """, (f"-{int(days)} days",)) as cur:
             by_platform = [dict(r) for r in await cur.fetchall()]
-        # 按 account_id × status
+        # 按 account_id × status（GROUP BY 必须含所有非聚合列以兼容 PG 严格模式）
         async with db.execute(f"""
             SELECT a.id AS account_id, a.name AS account_name, a.platform AS acc_platform,
                    l.status, COUNT(*) AS n, AVG(l.latency_ms) AS avg_ms,
@@ -1979,7 +2017,7 @@ async def health_summary(days: int = 7) -> dict:
             LEFT JOIN monitor_accounts a ON a.id = l.account_id
             WHERE l.created_at >= datetime('now','localtime', ?)
               AND l.account_id IS NOT NULL
-            GROUP BY l.account_id, l.status
+            GROUP BY l.account_id, l.status, a.id, a.name, a.platform
         """, (f"-{int(days)} days",)) as cur:
             by_account = [dict(r) for r in await cur.fetchall()]
         # 总数
@@ -3119,8 +3157,8 @@ async def revive_stuck_running_remix_tasks(stuck_minutes: int = 5) -> int:
             "UPDATE remix_tasks SET status='pending' "
             "WHERE status='running' "
             "  AND started_at IS NOT NULL "
-            "  AND datetime(started_at, '+' || ? || ' minutes') < datetime('now', 'localtime')",
-            (stuck_minutes,),
+            "  AND started_at < datetime('now', 'localtime', ?)",
+            (f"-{int(stuck_minutes)} minutes",),
         )
         await db.commit()
         return cur.rowcount or 0
@@ -3345,8 +3383,8 @@ async def revive_stuck_running_text_remix_tasks(stuck_minutes: int = 5) -> int:
             "UPDATE text_remix_tasks SET status='pending' "
             "WHERE status='running' "
             "  AND started_at IS NOT NULL "
-            "  AND datetime(started_at, '+' || ? || ' minutes') < datetime('now', 'localtime')",
-            (stuck_minutes,),
+            "  AND started_at < datetime('now', 'localtime', ?)",
+            (f"-{int(stuck_minutes)} minutes",),
         )
         await db.commit()
         return cur.rowcount or 0
@@ -3583,7 +3621,7 @@ async def cursor_mark_failed(task: str, key: str, error: str = "") -> int:
             "INSERT INTO crawl_cursor(task, key, status, fail_count, last_run_at, last_error) "
             "VALUES (?, ?, 'failed', 1, ?, ?) "
             "ON CONFLICT(task, key) DO UPDATE SET "
-            "  status='failed', fail_count=fail_count+1, "
+            "  status='failed', fail_count=crawl_cursor.fail_count+1, "
             "  last_run_at=excluded.last_run_at, last_error=excluded.last_error",
             (task, key, now_iso, (error or "")[:500]),
         )

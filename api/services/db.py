@@ -86,6 +86,19 @@ _DATE_NOW = re.compile(r"date\(\s*'now'\s*(?:,\s*'localtime'\s*)?\)", re.IGNOREC
 _DATE_DELTA = re.compile(
     r"date\(\s*'now'\s*,\s*'(-?\d+)\s+days'\s*(?:,\s*'localtime'\s*)?\)", re.IGNORECASE,
 )
+# datetime('now','localtime', '-N units') 字面量 → (NOW() + INTERVAL '-N units')
+_DATETIME_NOW_3ARG_LIT = re.compile(
+    r"datetime\(\s*'now'\s*,\s*'localtime'\s*,\s*'(-?\d+\s+\w+)'\s*\)",
+    re.IGNORECASE,
+)
+# datetime('now','localtime', ?) 占位符 → (NOW() + (?)::interval)
+# ? 保留以待后续 placeholder 阶段替换为 $N
+_DATETIME_NOW_3ARG_PARAM = re.compile(
+    r"datetime\(\s*'now'\s*,\s*'localtime'\s*,\s*\?\s*\)",
+    re.IGNORECASE,
+)
+# date('now', ?) 占位符 → (CURRENT_DATE + (?)::interval)
+_DATE_PARAM = re.compile(r"date\(\s*'now'\s*,\s*\?\s*\)", re.IGNORECASE)
 # INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING（PG 支持原生 ON CONFLICT，
 # 但 OR IGNORE 不是 PG 语法，单独翻译）
 _INSERT_OR_IGNORE = re.compile(r"\bINSERT\s+OR\s+IGNORE\b", re.IGNORECASE)
@@ -112,14 +125,28 @@ _DROP_TRIGGER_NO_ON = re.compile(
     r"DROP\s+TRIGGER\s+IF\s+EXISTS\s+[a-zA-Z_][a-zA-Z0-9_]*\s*(?!ON\b)",
     re.IGNORECASE,
 )
+# BEGIN IMMEDIATE：sqlite 专属事务模式（立即写锁）。PG 无对应概念，统一翻 BEGIN。
+_BEGIN_IMMEDIATE = re.compile(r"\bBEGIN\s+IMMEDIATE\b", re.IGNORECASE)
 
 
 def _translate_sql_for_pg(sql: str) -> str:
     """把 SQLite 方言翻译为 PG 兼容的 SQL。"""
     s = sql
     s = _STRFTIME_S_NOW.sub("(EXTRACT(EPOCH FROM NOW())::BIGINT)", s)
-    s = _DATETIME_NOW.sub("NOW()", s)
+    # 三参数版本必须先于 _DATETIME_NOW（两参数）翻译——否则会被两参数规则吃掉。
+    # 输出 TO_CHAR text 格式（'YYYY-MM-DD"T"HH24:MI:SS'）以兼容应用层 isoformat(timespec='seconds')
+    # 存的 TEXT 列；PG timestamp 跟 TEXT 列比较会直接报错。
+    # interval 参数用 (?::text)::interval：避免 asyncpg 把占位符推断为 timedelta，
+    # 改为 text 走 PG 内部 cast。
+    _TS_FMT = "'YYYY-MM-DD\"T\"HH24:MI:SS'"
+    _DATE_FMT = "'YYYY-MM-DD'"
+    s = _DATETIME_NOW_3ARG_LIT.sub(
+        lambda m: f"TO_CHAR(NOW() + INTERVAL '{m.group(1)}', {_TS_FMT})", s,
+    )
+    s = _DATETIME_NOW_3ARG_PARAM.sub(f"TO_CHAR(NOW() + (?::text)::interval, {_TS_FMT})", s)
+    s = _DATETIME_NOW.sub(f"TO_CHAR(NOW(), {_TS_FMT})", s)
     s = _DATE_DELTA.sub(lambda m: f"(CURRENT_DATE + INTERVAL '{m.group(1)} days')", s)
+    s = _DATE_PARAM.sub(f"TO_CHAR(CURRENT_DATE + (?::text)::interval, {_DATE_FMT})", s)
     s = _DATE_NOW.sub("CURRENT_DATE", s)
 
     # AUTOINCREMENT：必须在 PRIMARY KEY 同行先合并替换，避免后面 _AUTOINC_BARE 误伤
@@ -132,6 +159,8 @@ def _translate_sql_for_pg(sql: str) -> str:
     s = _SQLITE_MASTER.sub("FROM (SELECT NULL::TEXT AS sql, NULL::TEXT AS name, NULL::TEXT AS type WHERE FALSE) _empty", s)
     # DROP TRIGGER IF EXISTS xxx（无 ON 子句）：PG 模式 no-op
     s = _DROP_TRIGGER_NO_ON.sub("SELECT 1 ", s)
+    # BEGIN IMMEDIATE → BEGIN
+    s = _BEGIN_IMMEDIATE.sub("BEGIN", s)
     # PRAGMA table_info(t) → 等价 PG 查询，列顺序与 sqlite 一致：(cid,name,type,notnull,dflt_value,pk)
     m = _PRAGMA_TABLE_INFO.search(s)
     if m:
