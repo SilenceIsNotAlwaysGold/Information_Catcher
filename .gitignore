@@ -252,3 +252,4 @@ certs/
 .playwright-mcp/
 
 .deploy.env
+scripts/pg_migrate/out/
