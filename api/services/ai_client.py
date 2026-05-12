@@ -48,6 +48,7 @@ class _ResolvedModel:
     api_key: str
     extra_config: dict
     max_concurrent: int = 0  # P15.8: 0 = 不限
+    supports_vision: int = 0  # 1 = 支持图片输入；OCR 调用前要预检
 
 
 class AIModelNotConfigured(Exception):
@@ -169,6 +170,10 @@ async def _resolve_model(
             mc = row["max_concurrent"]
         except (KeyError, IndexError):
             mc = 0
+        try:
+            sv = row["supports_vision"]
+        except (KeyError, IndexError):
+            sv = 0
         return _ResolvedModel(
             model_row_id=row["id"],
             model_id=row["model_id"],
@@ -179,6 +184,7 @@ async def _resolve_model(
             api_key=row["p_api_key"],
             extra_config=extra,
             max_concurrent=int(mc or 0),
+            supports_vision=int(sv or 0),
         )
 
 
@@ -311,6 +317,13 @@ async def call_vision_ocr(
     model = await _resolve_model(
         usage_type="text", model_row_id=model_id, user_id=user_id,
     )
+    # 预检：模型必须支持视觉，否则上游收到 image_url 大概率干等 → ReadTimeout
+    if not model.supports_vision:
+        raise AIModelNotConfigured(
+            f"模型「{model.display_name}」不支持图片输入（supports_vision=0），"
+            f"请在 admin → AI 模型管理 把它的「支持视觉」打开，"
+            f"或在「OCR 模型」下拉里换一个视觉模型（GPT-4o / Claude 3.5 / Gemini / Qwen-VL 等）。"
+        )
     # OpenAI 兼容的多模态格式：messages[0].content = [{type:"text"},{type:"image_url"}]
     messages = [
         {
