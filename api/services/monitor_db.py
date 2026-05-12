@@ -566,6 +566,32 @@ CREATE TABLE IF NOT EXISTS ai_usage_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_usage_user_date ON ai_usage_logs(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ai_usage_model ON ai_usage_logs(model_id, created_at DESC);
+
+-- ── SaaS 计费（v2）─────────────────────────────────────────────────────────
+-- 用户点数余额。balance 永远 == credit_ledger 里该用户所有 signed amount 之和（不变量，可对账）。
+CREATE TABLE IF NOT EXISTS user_credits (
+    user_id INTEGER PRIMARY KEY,
+    balance NUMERIC NOT NULL DEFAULT 0,        -- 当前余额（点数，支持小数）
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+
+-- 点数流水。每一笔变动（充值/扣费/退款/赠送/调整）都记一行，append-only。
+CREATE TABLE IF NOT EXISTS credit_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,                        -- recharge | deduct | refund | grant | adjust
+    amount NUMERIC NOT NULL,                   -- 正数；方向由 kind 决定（recharge/refund/grant/adjust 加，deduct 减）
+    balance_after NUMERIC NOT NULL,            -- 这笔变动后的余额（冗余，便于审计）
+    model_id INTEGER,                          -- 关联 ai_models.id（仅 deduct/refund 有）
+    feature TEXT DEFAULT '',                   -- ocr / image / comic_panel / novel_chapter / ...
+    task_ref TEXT DEFAULT '',                  -- 幂等键：同一 task_ref 的 deduct 不重复扣
+    operator TEXT DEFAULT '',                  -- 谁操作的（admin 用户名 / 'system' / ''）
+    note TEXT DEFAULT '',                      -- adjust 必填；其它可选
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_credit_ledger_user ON credit_ledger(user_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_task_ref
+    ON credit_ledger(task_ref) WHERE kind='deduct' AND task_ref != '';
 """
 
 
@@ -830,6 +856,7 @@ async def _migrate(db):
     # gpt-4o / claude-3.5-sonnet / gemini-1.5+ / qwen-vl 等为 1
     await _ensure_column(db, "ai_models", "supports_vision", "INTEGER DEFAULT 0")
     # 用户自定义 AI 模型：owner_user_id IS NULL = admin 共享（原行为）；INT = 该用户私有
+    # v2 起：用户私有渠道功能下架，但列保留（不删数据），_resolve_model 不再走 owner 路径
     await _ensure_column(db, "ai_providers", "owner_user_id", "INTEGER")
     await _ensure_column(db, "ai_models",    "owner_user_id", "INTEGER")
     await db.execute(
@@ -840,6 +867,11 @@ async def _migrate(db):
         "CREATE INDEX IF NOT EXISTS idx_ai_providers_owner "
         "ON ai_providers(owner_user_id)",
     )
+    # v2 SaaS 计费：每个模型的定价
+    #   price_per_call    — 每次调用的基础点数（按次计价）
+    #   feature_pricing   — JSON，按 feature 覆盖基础价：{"ocr": 0.3, "image": 1.0, "comic_panel": 0.5}
+    await _ensure_column(db, "ai_models", "price_per_call",  "NUMERIC DEFAULT 1")
+    await _ensure_column(db, "ai_models", "feature_pricing", "TEXT DEFAULT '{}'")
     # 博主追新健康度 + 未读：让列表能区分"挂了 / 卡 cookie / 有新内容"
     await _ensure_column(db, "monitor_creators", "last_check_status", "TEXT DEFAULT 'unknown'")
     await _ensure_column(db, "monitor_creators", "last_check_error",  "TEXT DEFAULT ''")
