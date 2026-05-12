@@ -151,6 +151,126 @@ async def batch_delete_posts(
     return {"ok": True, "deleted": deleted}
 
 
+class ImportFromCreatorRequest(BaseModel):
+    creator_url: str
+    platform: str        # 'xhs' | 'douyin'
+    group_id: int        # 落到哪个监控分组
+    max_count: Optional[int] = None  # 上限（None 表示扩展返回多少入多少）
+
+
+@router.post("/posts/import-from-creator", summary="一键导入博主全部作品到监控")
+async def import_posts_from_creator(
+    req: ImportFromCreatorRequest,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+):
+    """通过浏览器扩展抓博主主页的所有作品，批量加入用户的监控帖子列表。
+
+    跟「博主追新」的区别：不在 monitor_creators 表里建订阅记录，纯粹一次性导入。
+    需要前提：已安装 TrendPulse Helper 扩展 + 浏览器登录对应平台。
+    """
+    from ..services import extension_dispatcher, quota_service
+
+    url = (req.creator_url or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="creator_url 必填")
+    platform_name = (req.platform or "").strip().lower()
+    if platform_name not in ("xhs", "douyin"):
+        raise HTTPException(status_code=400, detail="仅支持 xhs / douyin")
+    if req.group_id is None:
+        raise HTTPException(status_code=400, detail="必须选择一个监控分组")
+
+    user_id = int(current_user["id"])
+    if not extension_dispatcher.has_online_extension(user_id):
+        raise HTTPException(
+            status_code=503,
+            detail="未检测到在线浏览器扩展。请先安装 TrendPulse Helper 扩展，并在浏览器登录目标平台。",
+        )
+
+    # 调扩展抓博主全部作品
+    try:
+        if platform_name == "xhs":
+            res = await extension_dispatcher.dispatch_xhs_creator_posts(
+                user_id=user_id, url=url,
+                timeout_ms=25000, overall_timeout=60.0,
+            )
+        else:
+            res = await extension_dispatcher.dispatch_douyin_creator_posts(
+                user_id=user_id, url=url,
+                timeout_ms=40000, overall_timeout=75.0,
+            )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"扩展抓取失败：{e}")
+
+    if not res.get("ok"):
+        raw = (res.get("error") or "")[:200]
+        msg = res.get("detail") or raw or "扩展返回空结果"
+        raise HTTPException(status_code=502, detail=msg)
+
+    posts = res.get("posts") or []
+    if not posts:
+        return {
+            "ok": True, "fetched": 0, "added": 0, "skipped": 0,
+            "warning": f"未拿到任何作品。请确认浏览器已登录{('小红书' if platform_name == 'xhs' else '抖音')}。",
+            "results": [],
+        }
+
+    # 上限裁剪
+    if req.max_count and req.max_count > 0:
+        posts = posts[: int(req.max_count)]
+
+    # 配额检查（避免一次导入超限）
+    try:
+        await quota_service.check_or_raise(current_user, "monitor_posts", delta=len(posts))
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # 配额服务异常不阻断导入
+
+    # 入库 — add_post 内已用 INSERT OR IGNORE (PG: ON CONFLICT DO NOTHING)，
+    # 重复 note_id 自动跳过；is_new 标识真正新增的
+    added = 0
+    skipped = 0
+    sample_titles = []
+    prof = res.get("profile") or {}
+    author_name = prof.get("creator_name") or ""
+    for p in posts:
+        pid = (p.get("post_id") or "").strip()
+        if not pid:
+            continue
+        try:
+            _, is_new = await db.add_post(
+                note_id=pid, title=p.get("title") or "",
+                short_url=p.get("url") or "", note_url=p.get("url") or "",
+                xsec_token=p.get("xsec_token", ""), xsec_source="app_share",
+                account_id=None, post_type="own",
+                group_id=req.group_id,
+                user_id=user_id,
+                platform=platform_name,
+                author=p.get("creator_name") or author_name,
+            )
+            if is_new:
+                added += 1
+                if len(sample_titles) < 5 and p.get("title"):
+                    sample_titles.append(p["title"][:40])
+            else:
+                skipped += 1
+        except Exception as e:
+            logger.warning(f"[import-from-creator] add_post {pid} failed: {e}")
+            skipped += 1
+
+    # 后台立刻跑一次 snapshot，让新加的帖子马上有数据
+    background_tasks.add_task(sched.run_monitor)
+    return {
+        "ok": True,
+        "fetched": len(posts),
+        "added": added,
+        "skipped": skipped,
+        "creator_name": author_name,
+        "sample_titles": sample_titles,
+    }
+
+
 class BatchMoveGroupRequest(BaseModel):
     note_ids: List[str]
     group_id: Optional[int] = None  # None 表示移到「未分组」

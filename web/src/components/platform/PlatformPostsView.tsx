@@ -38,6 +38,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
 import { MonitorPaceButton } from "@/components/MonitorPaceButton";
+import { ImportCreatorButton } from "@/components/platform/ImportCreatorButton";
 import { toastOk, toastErr } from "@/lib/toast";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import {
@@ -371,6 +372,12 @@ export function PlatformPostsView({
           )}
           <MonitorGroupsButton token={token} platform={platform} />
           <MonitorPaceButton />
+          {(platform === "xhs" || platform === "douyin") && (
+            <ImportCreatorButton
+              platform={platform as "xhs" | "douyin"}
+              onImported={() => mutatePosts()}
+            />
+          )}
           <Button size="sm" color="primary" startContent={<Plus size={16} />} onPress={onOpen}>
             {addLabel}
           </Button>
