@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 import aiosqlite
 
 from . import monitor_db
+from . import db as _db
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ async def log(
             except Exception:
                 meta = str(metadata)[:2000]
 
-        async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+        async with _db.connect(monitor_db.DB_PATH) as db:
             await db.execute(
                 "INSERT INTO audit_logs (actor_id, actor_username, action, target_type, "
                 "target_id, metadata, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -74,7 +75,7 @@ async def list_logs(
         where.append("created_at >= ?"); args.append(since)
     where_clause = ("WHERE " + " AND ".join(where)) if where else ""
 
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"SELECT * FROM audit_logs {where_clause} "
@@ -102,7 +103,7 @@ async def count_logs(
         where.append("created_at >= ?"); args.append(since)
     where_clause = ("WHERE " + " AND ".join(where)) if where else ""
 
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         async with db.execute(
             f"SELECT COUNT(*) FROM audit_logs {where_clause}", tuple(args),
         ) as cur:

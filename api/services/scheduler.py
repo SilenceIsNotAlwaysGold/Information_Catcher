@@ -7,6 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from . import monitor_db as db
+from . import db as _db
 from . import monitor_fetcher as fetcher
 from . import notifier
 from . import trending_fetcher
@@ -105,7 +106,7 @@ async def _check_post(post: dict, settings: dict, wecom_url: str, feishu_url: st
     if update_fields:
         set_clause = ", ".join(f"{k}=?" for k in update_fields)
         values = list(update_fields.values()) + [note_id]
-        async with aiosqlite.connect(db.DB_PATH) as conn:
+        async with _db.connect(db.DB_PATH) as conn:
             await conn.execute(
                 f"UPDATE monitor_posts SET {set_clause} WHERE note_id=?", values,
             )

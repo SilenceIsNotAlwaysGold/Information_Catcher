@@ -10,6 +10,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends
 
 from ..services import monitor_db as db
+from ..services import db as _db
 from .auth import get_current_user
 from .monitor import _scope_uid
 
@@ -44,7 +45,7 @@ async def _today_alerts_summary(scope_uid: Optional[int]) -> Dict[str, Any]:
     out_by_type = {"surge": 0, "comment": 0, "trending": 0}
     out_top: List[Dict[str, Any]] = []
     try:
-        async with aiosqlite.connect(db.DB_PATH) as conn:
+        async with _db.connect(db.DB_PATH) as conn:
             conn.row_factory = aiosqlite.Row
             sql = (
                 "SELECT id, note_id, title, alert_type, message, created_at "
@@ -82,7 +83,7 @@ async def _recent_fetches(scope_uid: Optional[int], limit: int = 8) -> List[Dict
     """
     out: List[Dict[str, Any]] = []
     try:
-        async with aiosqlite.connect(db.DB_PATH) as conn:
+        async with _db.connect(db.DB_PATH) as conn:
             conn.row_factory = aiosqlite.Row
             if scope_uid is None:
                 sql = (

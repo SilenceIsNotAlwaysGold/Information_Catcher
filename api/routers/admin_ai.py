@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..services import monitor_db, ai_client, auth_service
+from ..services import db as _db
 from .auth import get_current_user
 
 router = APIRouter(tags=["AI"])
@@ -62,7 +63,7 @@ def _mask_key(k: str) -> str:
 @router.get("/admin/ai/providers", summary="渠道列表")
 async def list_providers(current_user: dict = Depends(get_current_user)):
     _require_admin(current_user)
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM ai_providers ORDER BY sort_order, id"
@@ -78,7 +79,7 @@ async def list_providers(current_user: dict = Depends(get_current_user)):
 @router.post("/admin/ai/providers", summary="新增渠道")
 async def create_provider(body: ProviderIn, current_user: dict = Depends(get_current_user)):
     _require_admin(current_user)
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         cur = await db.execute(
             "INSERT INTO ai_providers (name, base_url, api_key, enabled, sort_order, note) "
             "VALUES (?,?,?,?,?,?)",
@@ -105,7 +106,7 @@ async def update_provider(
     if not fields:
         return {"ok": True, "changed": 0}
     values.append(pid)
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         await db.execute(f"UPDATE ai_providers SET {', '.join(fields)} WHERE id=?", values)
         await db.commit()
     return {"ok": True}
@@ -114,7 +115,7 @@ async def update_provider(
 @router.delete("/admin/ai/providers/{pid}", summary="删除渠道（同时级联删除其下模型）")
 async def delete_provider(pid: int, current_user: dict = Depends(get_current_user)):
     _require_admin(current_user)
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         # ON DELETE CASCADE 在创建表时已声明，但 SQLite 默认不强制外键，手动开
         await db.execute("PRAGMA foreign_keys = ON")
         # 显式删除 models 更可靠
@@ -175,7 +176,7 @@ async def list_models(
         sql += " WHERE m.usage_type=?"
         params.append(usage_type)
     sql += " ORDER BY m.usage_type, m.sort_order, m.id"
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
@@ -193,7 +194,7 @@ async def _enforce_single_default(db, model_id: int, usage_type: str):
 @router.post("/admin/ai/models", summary="新增模型")
 async def create_model(body: ModelIn, current_user: dict = Depends(get_current_user)):
     _require_admin(current_user)
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         # provider 存在校验
         async with db.execute(
             "SELECT id FROM ai_providers WHERE id=?", (body.provider_id,),
@@ -241,7 +242,7 @@ async def update_model(
     if not fields:
         return {"ok": True, "changed": 0}
     values.append(mid)
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         await db.execute(f"UPDATE ai_models SET {', '.join(fields)} WHERE id=?", values)
         if body.is_default:
             # 解析 usage_type：要么用 body 传的，要么读已有
@@ -260,7 +261,7 @@ async def update_model(
 @router.delete("/admin/ai/models/{mid}", summary="删除模型")
 async def delete_model(mid: int, current_user: dict = Depends(get_current_user)):
     _require_admin(current_user)
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         await db.execute("DELETE FROM ai_models WHERE id=?", (mid,))
         # 清掉所有用户偏好里指向这个模型的引用（fallback 到默认）
         await db.commit()
@@ -292,7 +293,7 @@ async def usage_summary(
     current_user: dict = Depends(get_current_user),
 ):
     _require_admin(current_user)
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         # 总览
         async with db.execute(
@@ -432,7 +433,7 @@ class MyModelUpdate(BaseModel):
 @router.get("/ai/my-models", summary="我的私有 AI 模型")
 async def list_my_models(current_user: dict = Depends(get_current_user)):
     uid = int(current_user["id"])
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT m.id, m.model_id, m.display_name, m.usage_type, "
@@ -461,7 +462,7 @@ async def create_my_model(
 ):
     uid = int(current_user["id"])
     extra_str = json.dumps(body.extra_config, ensure_ascii=False)
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         # 一条用户私有模型对应一条专属 provider（自动建，名字跟模型走）
         pcur = await db.execute(
             "INSERT INTO ai_providers (name, base_url, api_key, enabled, owner_user_id) "
@@ -489,7 +490,7 @@ async def update_my_model(
     current_user: dict = Depends(get_current_user),
 ):
     uid = int(current_user["id"])
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM ai_models WHERE id=? AND owner_user_id=?", (mid, uid),
@@ -535,7 +536,7 @@ async def delete_my_model(
     mid: int, current_user: dict = Depends(get_current_user),
 ):
     uid = int(current_user["id"])
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT provider_id FROM ai_models WHERE id=? AND owner_user_id=?",
@@ -573,7 +574,7 @@ async def test_my_model(
     只做 base_url 可达性 + 凭证基础校验。"""
     import httpx
     uid = int(current_user["id"])
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT m.usage_type, m.model_id, p.base_url, p.api_key "

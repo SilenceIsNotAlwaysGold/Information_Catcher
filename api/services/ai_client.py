@@ -27,6 +27,7 @@ import aiosqlite
 import httpx
 
 from . import monitor_db
+from . import db as _db
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ async def _resolve_model(
     user_id: Optional[int],
 ) -> _ResolvedModel:
     """按优先级解析出实际使用的模型 + provider 配置。"""
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
 
         # 1. 显式传 model_row_id —— 但必须 published（或 admin 调用未做限制）
@@ -199,7 +200,7 @@ async def _log_usage(
     error: str = "",
 ) -> None:
     try:
-        async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+        async with _db.connect(monitor_db.DB_PATH) as db:
             await db.execute(
                 "INSERT INTO ai_usage_logs "
                 "(user_id, model_id, model_id_str, usage_type, input_tokens, output_tokens, "
@@ -567,7 +568,7 @@ async def log_usage(
 ) -> None:
     """供 image_gen 这种自己发请求的调用方手动写日志。"""
     try:
-        async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+        async with _db.connect(monitor_db.DB_PATH) as db:
             await db.execute(
                 "INSERT INTO ai_usage_logs "
                 "(user_id, model_id, model_id_str, usage_type, input_tokens, output_tokens, "
@@ -598,7 +599,7 @@ async def list_user_visible_models(
     用户私有：m.owner_user_id = current_user.id AND p.enabled=1（不受 published / 白名单影响）
     """
     uid = int(user.get("id")) if user and user.get("id") is not None else None
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         # 共享 + 私有 一次查
         sql = (

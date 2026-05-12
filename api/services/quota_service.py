@@ -23,6 +23,7 @@ import aiosqlite
 from fastapi import HTTPException
 
 from . import monitor_db
+from . import db as _db
 from . import plans as plans_module
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ def _user_quota(user: Dict[str, Any], key: str) -> int:
 # ── 当前用量 ────────────────────────────────────────────────────────────────
 
 async def count_monitor_posts(user_id: int) -> int:
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         async with db.execute(
             "SELECT COUNT(*) FROM monitor_posts WHERE user_id=?", (user_id,),
         ) as cur:
@@ -61,7 +62,7 @@ async def count_monitor_posts(user_id: int) -> int:
 
 
 async def count_accounts(user_id: int) -> int:
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         async with db.execute(
             "SELECT COUNT(*) FROM monitor_accounts WHERE user_id=?", (user_id,),
         ) as cur:
@@ -76,7 +77,7 @@ async def get_daily_usage(user_id: int) -> Dict[str, int]:
     所有文案都走 text_gen。
     """
     today = _today()
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         async with db.execute(
             "SELECT image_gen_count, "
             "       COALESCE(text_gen_count, 0), "
@@ -100,7 +101,7 @@ async def get_total_image_used(user_id: int) -> int:
     DB 不动，每天一行，单用户一年才 365 行 SUM 起来微秒级。
     比起加 users.total_image_gen_count 列做一致性维护，这种实现更稳。
     """
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         async with db.execute(
             "SELECT COALESCE(SUM(image_gen_count), 0) "
             "  FROM daily_usage WHERE user_id=?",
@@ -237,7 +238,7 @@ async def record_usage(user_id: Optional[int], key: str, delta: int = 1) -> None
     if not col:
         return
     today = _today()
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         await db.execute(
             f"INSERT INTO daily_usage (user_id, date, {col}) VALUES (?, ?, ?) "
             f"ON CONFLICT(user_id, date) DO UPDATE SET {col} = {col} + excluded.{col}",

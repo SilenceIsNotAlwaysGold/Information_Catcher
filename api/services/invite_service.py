@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import aiosqlite
 
 from . import monitor_db
+from . import db as _db
 
 
 _ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"  # 去 0/O/1/I 歧义
@@ -37,7 +38,7 @@ async def create(
     for _ in range(5):
         code = _gen_code()
         try:
-            async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+            async with _db.connect(monitor_db.DB_PATH) as db:
                 await db.execute(
                     "INSERT INTO invite_codes (code, created_by, plan, max_uses, "
                     "expires_at, note) VALUES (?, ?, ?, ?, ?, ?)",
@@ -55,7 +56,7 @@ async def create(
 
 
 async def get(code: str) -> Optional[Dict[str, Any]]:
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM invite_codes WHERE code=?", (code,),
@@ -69,7 +70,7 @@ async def consume(code: str) -> Optional[Dict[str, Any]]:
     code = (code or "").strip().upper()
     if not code:
         return None
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
         async with db.execute(
@@ -101,7 +102,7 @@ async def consume(code: str) -> Optional[Dict[str, Any]]:
 
 
 async def list_all(limit: int = 100) -> List[Dict[str, Any]]:
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM invite_codes ORDER BY created_at DESC LIMIT ?",
@@ -111,7 +112,7 @@ async def list_all(limit: int = 100) -> List[Dict[str, Any]]:
 
 
 async def delete(code: str) -> bool:
-    async with aiosqlite.connect(monitor_db.DB_PATH) as db:
+    async with _db.connect(monitor_db.DB_PATH) as db:
         cur = await db.execute("DELETE FROM invite_codes WHERE code=?", (code,))
         await db.commit()
         return (cur.rowcount or 0) > 0
