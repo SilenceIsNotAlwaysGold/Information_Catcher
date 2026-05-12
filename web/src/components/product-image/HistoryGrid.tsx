@@ -13,6 +13,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { toastErr, toastOk } from "@/lib/toast";
 import { EmptyState } from "@/components/EmptyState";
 import { IMAGE_API, proxyUrl } from "./utils";
+import { BitablePushToggle } from "@/components/BitablePushToggle";
 
 type HistoryItem = {
   id: number;
@@ -240,6 +241,9 @@ export function HistoryGrid({ isAdmin, onPreview }: Props) {
         </div>
       </CardHeader>
       <CardBody>
+        <div className="mb-3">
+          <BitablePushToggle />
+        </div>
         {!qiniuConfigured && (
           <p className="text-xs text-warning-600 mb-3">
             ⚠️ 七牛云未配置或图未上传完成，飞书同步暂不可用（图必须先上传到七牛拿到公网 URL）。

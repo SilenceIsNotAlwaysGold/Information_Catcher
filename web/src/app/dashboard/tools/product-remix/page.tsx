@@ -17,6 +17,7 @@ import { confirmDialog } from "@/components/ConfirmDialog";
 import { ModelSelector } from "@/components/ModelSelector";
 
 import { IMAGE_API, proxyUrl, SIZE_OPTIONS } from "@/components/product-image/utils";
+import { BitablePushToggle } from "@/components/BitablePushToggle";
 import { useImageConfig } from "@/components/product-image/useImageConfig";
 import { ConfigStatusBar } from "@/components/product-image/ConfigStatusBar";
 import { ImagePreviewModal } from "@/components/product-image/ImagePreviewModal";
@@ -1118,22 +1119,25 @@ export default function ProductRemixPage() {
             )}
             {/* 飞书批量同步工具栏 */}
             {activeItems.length > 0 && (
-              <div className="flex items-center justify-between gap-2 flex-wrap p-2 rounded-md bg-default-50 border border-default-200">
-                <div className="flex items-center gap-2 text-xs text-default-600">
-                  <span>已勾选 <b className="text-primary">{selectedSetIdxs.length}</b> 套</span>
-                  <Button size="sm" variant="flat" onPress={selectAllReadySets}>
-                    全选有图的
+              <div className="space-y-2">
+                <BitablePushToggle />
+                <div className="flex items-center justify-between gap-2 flex-wrap p-2 rounded-md bg-default-50 border border-default-200">
+                  <div className="flex items-center gap-2 text-xs text-default-600">
+                    <span>已勾选 <b className="text-primary">{selectedSetIdxs.length}</b> 套</span>
+                    <Button size="sm" variant="flat" onPress={selectAllReadySets}>
+                      全选有图的
+                    </Button>
+                    <Button size="sm" variant="light"
+                      onPress={() => setSelectedSetIdxs([])}
+                      isDisabled={selectedSetIdxs.length === 0}>清空</Button>
+                  </div>
+                  <Button size="sm" color="primary"
+                    isLoading={batchSyncing}
+                    isDisabled={selectedSetIdxs.length === 0 || batchSyncing}
+                    onPress={batchSyncSelectedToFeishu}>
+                    批量同步到飞书（{selectedSetIdxs.length} 套）
                   </Button>
-                  <Button size="sm" variant="light"
-                    onPress={() => setSelectedSetIdxs([])}
-                    isDisabled={selectedSetIdxs.length === 0}>清空</Button>
                 </div>
-                <Button size="sm" color="primary"
-                  isLoading={batchSyncing}
-                  isDisabled={selectedSetIdxs.length === 0 || batchSyncing}
-                  onPress={batchSyncSelectedToFeishu}>
-                  批量同步到飞书（{selectedSetIdxs.length} 套）
-                </Button>
               </div>
             )}
             {activeItems.length > 0 && (
