@@ -81,6 +81,16 @@ async def get_chat_info(chat_id: str) -> Dict[str, Any]:
     return data.get("data") or {}
 
 
+async def list_chat_members(chat_id: str) -> List[str]:
+    """返回当前群里所有成员的 open_id 列表（批量补成员前要先拿）。"""
+    data = await get(
+        f"/im/v1/chats/{chat_id}/members",
+        params={"member_id_type": "open_id", "page_size": "100"},
+    )
+    items = (data.get("data") or {}).get("items") or []
+    return [m.get("member_id", "") for m in items if m.get("member_id")]
+
+
 # ── 消息发送 ────────────────────────────────────────────────────────────────
 
 async def send_text(chat_id: str, text: str) -> Dict[str, Any]:

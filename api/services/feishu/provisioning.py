@@ -27,7 +27,31 @@ class ProvisionResult(dict):
 
 
 async def _read_admin_open_id() -> str:
-    return (await monitor_db.get_setting("feishu_admin_open_id", "")).strip()
+    """优先读 monitor_settings.feishu_admin_open_id；空则 fallback 查 users 表里
+    role=admin 且已绑飞书的第一个用户。这样即使 admin 配置没填，也能保证拉群带 admin。
+    """
+    cached = (await monitor_db.get_setting("feishu_admin_open_id", "")).strip()
+    if cached:
+        return cached
+    # fallback：查 users 表
+    try:
+        with auth_service._get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT feishu_open_id FROM users "
+                "WHERE role='admin' AND feishu_open_id IS NOT NULL AND feishu_open_id != '' "
+                "ORDER BY id LIMIT 1"
+            ).fetchone()
+            if row and row[0]:
+                open_id = row[0].strip()
+                # 顺手回填 settings 减少下次查询
+                try:
+                    await monitor_db.set_setting("feishu_admin_open_id", open_id)
+                except Exception:
+                    pass
+                return open_id
+    except Exception as e:
+        logger.warning(f"[_read_admin_open_id] users 表 fallback 失败: {e}")
+    return ""
 
 
 async def _build_member_list(user: Dict[str, Any]) -> List[str]:
@@ -44,6 +68,25 @@ async def _build_member_list(user: Dict[str, Any]) -> List[str]:
     if admin_open and admin_open != user_open:
         members.append(admin_open)
     return members
+
+
+async def _backfill_missing_members(chat_id: str, expected: List[str]) -> int:
+    """检查群内现有成员，补齐缺失的 open_id。返回补加的人数（0 表示没缺）。
+
+    用于：建群时 admin 没绑/admin_open_id 没配；之后 admin 才进来 — 让旧群自动补 admin。
+    """
+    if not chat_id or not expected:
+        return 0
+    try:
+        existing = set(await chat_api.list_chat_members(chat_id))
+        missing = [oid for oid in expected if oid and oid not in existing]
+        if missing:
+            await chat_api.add_chat_members(chat_id, missing, succeed_type=1)
+            logger.info(f"[backfill_members] chat={chat_id} 补加 {len(missing)} 人")
+        return len(missing)
+    except FeishuApiError as e:
+        logger.warning(f"[backfill_members] chat={chat_id} 失败: {e}")
+        return 0
 
 
 # ── 各步骤实现 ──────────────────────────────────────────────────────────────
@@ -299,7 +342,7 @@ async def ensure_feature_chat(
     welcome = _FEATURE_INTROS[feature]
     username = user.get("username") or user.get("email") or f"uid{user['id']}"
 
-    # 已存在 → 直接复用
+    # 已存在 → 直接复用，但顺手把缺的成员（特别是 admin）补上
     if feature in _PER_PLATFORM_FEATURES:
         if not platform:
             logger.warning(f"[ensure_feature_chat] feat={feature} 需要 platform 参数")
@@ -307,12 +350,14 @@ async def ensure_feature_chat(
         chat_map = _read_chat_map(user, feature)
         existing = (chat_map.get(platform) or "").strip()
         if existing and not force_recreate:
+            await _backfill_missing_members(existing, await _build_member_list(user))
             return existing
         platform_zh = _PLATFORM_LABELS.get(platform, platform)
         name = f"TrendPulse {platform_zh} {label_zh} - {username}"
     else:
         existing = (user.get(_feature_chat_field(feature)) or "").strip()
         if existing and not force_recreate:
+            await _backfill_missing_members(existing, await _build_member_list(user))
             return existing
         name = f"TrendPulse {label_zh} - {username}"
 
