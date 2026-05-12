@@ -354,6 +354,13 @@ class XHSPlatform(Platform):
         if not link:
             return None
 
+        # 用户经常直接粘贴 App 分享文案（含前缀文字 + emoji + URL），先抠 URL 出来
+        # 例："12 【...】 😆 token 😆 https://www.xiaohongshu.com/discovery/item/..."
+        import re as _re
+        m = _re.search(r"https?://[^\s　一-鿿]+", link)
+        if m:
+            link = m.group(0).rstrip(",.;)】」\"'")
+
         if "xhslink.com" in link or "xiaohongshu.com" not in link:
             info = await monitor_fetcher.resolve_short_link(link)
             if not info:
@@ -362,22 +369,31 @@ class XHSPlatform(Platform):
             parsed = urlparse(link)
             params = parse_qs(parsed.query)
             parts = parsed.path.strip("/").split("/")
-            if len(parts) < 2 or parts[0] != "explore":
+            # 支持的路径形态：
+            #   /explore/{note_id}                  ← 桌面分享
+            #   /discovery/item/{note_id}            ← 移动 / pc_share
+            note_id = ""
+            if len(parts) >= 2 and parts[0] == "explore":
+                note_id = parts[1]
+            elif len(parts) >= 3 and parts[0] == "discovery" and parts[1] == "item":
+                note_id = parts[2]
+            if not note_id:
                 return None
+            # 保留原 xsec_source（pc_share / app_share / webshare 等都合法）；缺省回退 app_share
+            xsec_source = params.get("xsec_source", [""])[0] or "app_share"
             info = {
-                "note_id": parts[1],
+                "note_id": note_id,
                 "xsec_token": params.get("xsec_token", [""])[0],
-                "xsec_source": "app_share",
+                "xsec_source": xsec_source,
                 "note_url": link,
             }
 
-        info["xsec_source"] = "app_share"
         return {
             "platform": self.name,
             "post_id": info["note_id"],
             "url": info["note_url"],
             "xsec_token": info.get("xsec_token", ""),
-            "xsec_source": info["xsec_source"],
+            "xsec_source": info.get("xsec_source") or "app_share",
         }
 
     async def fetch_detail(
