@@ -303,7 +303,7 @@ async def call_vision_ocr(
     user_id: Optional[int] = None,
     model_id: Optional[int] = None,
     feature: str = "ocr",
-    timeout: float = 60.0,
+    timeout: float = 120.0,  # 真实 XHS 图大（base64 几 MB），上游需要更长时间
     prompt: str = (
         "你是 OCR 助手。请把图片里所有可见的中文/英文/数字文字按视觉阅读顺序"
         "原样提取出来（保留换行 / 段落结构）。只输出文字本身，不要加引号、"
