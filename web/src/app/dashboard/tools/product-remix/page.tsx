@@ -297,6 +297,10 @@ export default function ProductRemixPage() {
   const [submitting, setSubmitting] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<number | null>(null);
   const [activeTask, setActiveTask] = useState<RemixTask | null>(null);
+  // 飞书同步：每套独立状态 + 批量选中集合（复用 text-remix 的同款 UX）
+  const [syncStatus, setSyncStatus] = useState<Record<string, string>>({});
+  const [selectedSetIdxs, setSelectedSetIdxs] = useState<number[]>([]);
+  const [batchSyncing, setBatchSyncing] = useState(false);
 
   // P15: 兼容老 cfg + 新 ai_models
   const { models: availableImageModels } = useAiModels("image");
@@ -453,6 +457,72 @@ export default function ProductRemixPage() {
       await navigator.clipboard.writeText(text);
       toastOk("已复制");
     } catch { toastErr("复制失败"); }
+  };
+
+  // ── 飞书同步（复用商品图同款 /history/sync-bitable）─────────────────────
+  // remix_worker 写历史时用 batch_id=remix:{taskId}，set_idx 跟前端 it.idx 对齐。
+  const syncSetToFeishu = async (setIdx: number) => {
+    if (!activeTaskId) return;
+    const key = `${activeTaskId}:${setIdx}`;
+    setSyncStatus((s) => ({ ...s, [key]: "syncing" }));
+    try {
+      const r1 = await fetch(IMAGE_API(`/history?limit=300`), { headers });
+      const h = await r1.json().catch(() => ({}));
+      const all: any[] = h?.records || h?.history || [];
+      const myIds: number[] = all
+        .filter((x) => x.batch_id === `remix:${activeTaskId}` && Number(x.set_idx) === setIdx)
+        .map((x) => x.id);
+      if (myIds.length === 0) {
+        setSyncStatus((s) => ({ ...s, [key]: "error" }));
+        toastErr(`第 ${setIdx} 套没找到可同步的历史记录（图片可能还在上传中）`);
+        return;
+      }
+      const r2 = await fetch(IMAGE_API("/history/sync-bitable"), {
+        method: "POST", headers,
+        body: JSON.stringify({ record_ids: myIds }),
+      });
+      const d = await r2.json().catch(() => ({}));
+      if (!r2.ok || d?.error) {
+        setSyncStatus((s) => ({ ...s, [key]: "error" }));
+        toastErr(`同步失败：${d?.error || d?.detail || `HTTP ${r2.status}`}`);
+        return;
+      }
+      setSyncStatus((s) => ({ ...s, [key]: "done" }));
+      toastOk(`第 ${setIdx} 套已同步到飞书（${myIds.length} 张）`);
+    } catch (e: any) {
+      setSyncStatus((s) => ({ ...s, [key]: "error" }));
+      toastErr(`同步异常：${e?.message || e}`);
+    }
+  };
+
+  const toggleSetSelected = (setIdx: number) => {
+    setSelectedSetIdxs((prev) => prev.includes(setIdx)
+      ? prev.filter((x) => x !== setIdx)
+      : [...prev, setIdx].sort((a, b) => a - b));
+  };
+  const selectAllReadySets = () => {
+    if (!activeItems) return;
+    const ready = activeItems
+      .filter((it) => {
+        const subImages = (it.images && it.images.length > 0)
+          ? it.images
+          : (it.image_url ? [{ image_url: it.image_url }] : []);
+        return subImages.some((s) => s.image_url);
+      })
+      .map((it) => it.idx);
+    setSelectedSetIdxs(ready);
+  };
+  const batchSyncSelectedToFeishu = async () => {
+    if (selectedSetIdxs.length === 0) { toastErr("请先勾选要同步的套"); return; }
+    setBatchSyncing(true);
+    let ok = 0, fail = 0;
+    try {
+      for (const sidx of selectedSetIdxs) {
+        try { await syncSetToFeishu(sidx); ok += 1; }
+        catch { fail += 1; }
+      }
+      toastOk(`批量同步完成：成功 ${ok}，失败 ${fail}`);
+    } finally { setBatchSyncing(false); }
   };
 
   return (
@@ -1046,6 +1116,26 @@ export default function ProductRemixPage() {
                 <span>{activeTask.error}</span>
               </div>
             )}
+            {/* 飞书批量同步工具栏 */}
+            {activeItems.length > 0 && (
+              <div className="flex items-center justify-between gap-2 flex-wrap p-2 rounded-md bg-default-50 border border-default-200">
+                <div className="flex items-center gap-2 text-xs text-default-600">
+                  <span>已勾选 <b className="text-primary">{selectedSetIdxs.length}</b> 套</span>
+                  <Button size="sm" variant="flat" onPress={selectAllReadySets}>
+                    全选有图的
+                  </Button>
+                  <Button size="sm" variant="light"
+                    onPress={() => setSelectedSetIdxs([])}
+                    isDisabled={selectedSetIdxs.length === 0}>清空</Button>
+                </div>
+                <Button size="sm" color="primary"
+                  isLoading={batchSyncing}
+                  isDisabled={selectedSetIdxs.length === 0 || batchSyncing}
+                  onPress={batchSyncSelectedToFeishu}>
+                  批量同步到飞书（{selectedSetIdxs.length} 套）
+                </Button>
+              </div>
+            )}
             {activeItems.length > 0 && (
               <div className="space-y-3">
                 {activeItems.map((it) => {
@@ -1059,10 +1149,18 @@ export default function ProductRemixPage() {
                     key={it.idx}
                     className="border border-divider rounded-lg p-3 space-y-2"
                   >
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium">
-                        第 {it.idx} 套 <span className="text-default-400 text-xs">· {okImgs.length}/{subImages.length} 张</span>
-                      </span>
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div className="flex items-center gap-2">
+                        <input type="checkbox"
+                          checked={selectedSetIdxs.includes(it.idx)}
+                          disabled={okImgs.length === 0}
+                          onChange={() => toggleSetSelected(it.idx)}
+                          title={okImgs.length === 0 ? "本套还没有图，无法选中" : "勾选用于批量同步飞书"}
+                          className="cursor-pointer disabled:cursor-not-allowed" />
+                        <span className="text-sm font-medium">
+                          第 {it.idx} 套 <span className="text-default-400 text-xs">· {okImgs.length}/{subImages.length} 张</span>
+                        </span>
+                      </div>
                       <div className="flex items-center gap-2">
                         {it.error && okImgs.length === 0 && (
                           <Chip size="sm" color="danger" variant="flat">失败</Chip>
@@ -1071,13 +1169,28 @@ export default function ProductRemixPage() {
                           <Chip size="sm" color="warning" variant="flat">部分失败</Chip>
                         )}
                         {okImgs.length > 0 && (
-                          <Button
-                            size="sm" variant="flat" color="primary"
-                            startContent={<Download size={13} />}
-                            onPress={() => downloadSet(it.idx, subImages)}
-                          >
-                            下载本套 ({okImgs.length})
-                          </Button>
+                          <>
+                            <Button
+                              size="sm" variant="flat" color="primary"
+                              startContent={<Download size={13} />}
+                              onPress={() => downloadSet(it.idx, subImages)}
+                            >
+                              下载本套 ({okImgs.length})
+                            </Button>
+                            {(() => {
+                              const sk = `${activeTaskId}:${it.idx}`;
+                              const ss = syncStatus[sk] || "";
+                              return (
+                                <Button size="sm" variant="flat"
+                                  color={ss === "done" ? "success" : "primary"}
+                                  isLoading={ss === "syncing"}
+                                  isDisabled={ss === "syncing"}
+                                  onPress={() => syncSetToFeishu(it.idx)}>
+                                  {ss === "done" ? "✓ 已同步飞书" : "同步飞书"}
+                                </Button>
+                              );
+                            })()}
+                          </>
                         )}
                       </div>
                     </div>
