@@ -269,14 +269,14 @@ async def sync_history_to_bitable(
     for gkey, items in groups.items():
         first = items[0]
         src_url = (first.get("source_post_url") or "").strip()
+        # 飞书 URL 字段（type=15）不接受空字符串，会报 URLFieldConvFail。
+        # 空槽位直接不传 key（飞书会留空白单元）。
         image_cols = {}
         for i in range(9):
-            field = f"图片{i+1}"
             if i < len(items):
                 u = (items[i].get("qiniu_url") or "").strip()
-                image_cols[field] = {"link": u, "text": u} if u else ""
-            else:
-                image_cols[field] = ""
+                if u:
+                    image_cols[f"图片{i+1}"] = {"link": u, "text": u}
         fields_payload = {
             "套号": first.get("set_idx", 1),
             "张数": len(items),
@@ -286,10 +286,11 @@ async def sync_history_to_bitable(
             "Prompt": first.get("prompt", ""),
             "尺寸": first.get("size", ""),
             "模型": first.get("model", ""),
-            "来源链接": ({"link": src_url, "text": src_url} if src_url else ""),
             "来源标题": first.get("source_post_title", ""),
             "生成时间": first.get("created_at", ""),
         }
+        if src_url:
+            fields_payload["来源链接"] = {"link": src_url, "text": src_url}
         ids = [it["id"] for it in items]
         try:
             await feishu_bitable_v2.add_record(app_token, table_id, fields=fields_payload)
@@ -307,10 +308,14 @@ async def sync_history_to_bitable(
 
     # per-feature 推送：bitable 同步通知到「消息同步」专属群（开关开 + lazy 建群）
     chat_id = ""
-    if ok_count > 0 and current_user and current_user.get("bitable_push_enabled"):
+    push_on = bool(current_user and current_user.get("bitable_push_enabled"))
+    logger.info(f"[image_gen] sync done: ok={ok_count} fail={fail_count} push_on={push_on} user={(current_user or {}).get('id')}")
+    if ok_count > 0 and push_on:
         from ...services.feishu import provisioning as _prov
         chat_id = await _prov.ensure_feature_chat(current_user, "bitable") or ""
+        logger.info(f"[image_gen] resolved chat_id={chat_id!r}")
     if ok_count > 0 and chat_id:
+        logger.info(f"[image_gen] sending card to chat_id={chat_id}")
         try:
             from ...services.feishu import bitable as feishu_bitable_v2_2
             tables = await feishu_bitable_v2_2.list_tables(app_token)
@@ -329,7 +334,8 @@ async def sync_history_to_bitable(
                 "📋 商品图同步完成", content,
                 template="green" if fail_count == 0 else "orange",
             )
-            await chat_api.send_card(chat_id, card)
+            r = await chat_api.send_card(chat_id, card)
+            logger.info(f"[image_gen] send_card OK message_id={r.get('message_id', '')}")
         except Exception as e:
             logger.warning(f"[image_gen] post-sync chat notify failed: {e}")
 
