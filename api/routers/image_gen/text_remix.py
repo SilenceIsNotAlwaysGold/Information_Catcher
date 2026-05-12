@@ -187,6 +187,70 @@ async def extract_text(
     return {"ok": True, "text": text}
 
 
+# ── 笔记正文 AI 改写 ──────────────────────────────────────────────────────
+
+
+class RewriteTextRequest(BaseModel):
+    text: str
+    model_id: Optional[int] = None
+    style_hint: Optional[str] = ""   # 用户额外提示（"更口语化 / 加 emoji" 等）
+    n_variants: int = 3              # 1-3，多个不同温度
+
+
+_DEFAULT_REWRITE_PROMPT = (
+    "你是小红书爆款文案创作者，请将以下笔记正文改写得更吸引人："
+    "保留核心信息，语气更活泼自然、有共鸣感，可适当加 emoji，"
+    "结构清晰（短句、分点）。{style_hint}\n\n原文：\n{content}"
+)
+
+
+@router.post("/text-remix/rewrite-text", summary="AI 改写笔记正文（多变体）")
+async def rewrite_text(
+    req: RewriteTextRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text 必填")
+    n = max(1, min(int(req.n_variants or 1), 3))
+
+    style = (req.style_hint or "").strip()
+    style_part = f"额外要求：{style}。" if style else ""
+    prompt = _DEFAULT_REWRITE_PROMPT.format(
+        style_hint=style_part,
+        content=text[:3000],   # cap 保护
+    )
+
+    import asyncio
+    temps = [0.7, 1.0, 1.3][:n]
+
+    async def _one(t: float) -> Optional[str]:
+        try:
+            out = await ai_client.call_text(
+                prompt=prompt,
+                user_id=int(current_user["id"]),
+                model_id=req.model_id,
+                feature="text_remix_rewrite",
+                temperature=t,
+                max_tokens=1500,
+            )
+            return out.strip() if out else None
+        except ai_client.AIModelNotConfigured as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.warning(f"[text_remix.rewrite] variant t={t} failed: {e}")
+            return None
+
+    try:
+        results = await asyncio.gather(*[_one(t) for t in temps])
+    except HTTPException:
+        raise
+    variants = [r for r in results if r]
+    if not variants:
+        raise HTTPException(status_code=502, detail="AI 改写全部失败，请稍后重试或换模型")
+    return {"variants": variants}
+
+
 # ── 生成：背景图 + 文字 → 新图 ────────────────────────────────────────────
 
 

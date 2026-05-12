@@ -16,7 +16,7 @@ import { Button } from "@nextui-org/button";
 import { Input } from "@nextui-org/input";
 import { Chip } from "@nextui-org/chip";
 import { Spinner } from "@nextui-org/spinner";
-import { Wand2, Link2, Image as ImageIcon, Upload, Trash2, Check, AlertCircle, Download, ZoomIn } from "lucide-react";
+import { Wand2, Link2, Image as ImageIcon, Upload, Trash2, Check, AlertCircle, Download, ZoomIn, ChevronDown, ChevronRight, FileText, Sparkles, Copy } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
 import { IMAGE_API, proxyUrl } from "@/components/product-image/utils";
@@ -94,6 +94,15 @@ export default function TextRemixPage() {
   const [post, setPost] = useState<FetchedPost | null>(null);
   // 多选：用户可勾多张源图，OCR 时合并文字
   const [sourceImgIdxs, setSourceImgIdxs] = useState<number[]>([0]);
+  // OCR 结果区折叠（提取后默认折叠，避免占屏）
+  const [ocrPanelExpanded, setOcrPanelExpanded] = useState(true);
+
+  // ── 笔记正文 + AI 改写 ───────────────────────────────────────────────
+  const [noteText, setNoteText] = useState("");          // 用户可编辑的正文（拉作品后用 desc 初始化）
+  const [noteCardExpanded, setNoteCardExpanded] = useState(true);
+  const [noteRewriting, setNoteRewriting] = useState(false);
+  const [noteRewriteVariants, setNoteRewriteVariants] = useState<string[]>([]);
+  const [noteRewriteHint, setNoteRewriteHint] = useState("");
 
   const handleFetch = async () => {
     const u = postUrl.trim();
@@ -111,7 +120,7 @@ export default function TextRemixPage() {
         toastErr(data.error || data.detail || "拉取失败");
         return;
       }
-      setPost({
+      const fetched = {
         images: data.images || [],
         image_urls: data.image_urls || data.images || [],
         title: data.title || "",
@@ -120,10 +129,105 @@ export default function TextRemixPage() {
         platform_label: data.platform_label || "",
         post_id: data.post_id || "",
         post_url: data.post_url || u,
-      });
+      };
+      setPost(fetched);
       setSourceImgIdxs([0]);
+      // 笔记正文初始化：标题 + 正文（用户可编辑/改写）
+      const composed = [fetched.title, fetched.desc].filter(Boolean).join("\n\n");
+      setNoteText(composed);
+      setNoteRewriteVariants([]);
     } catch (e: any) { toastErr(`加载失败：${e?.message || e}`); }
     finally { setFetching(false); }
+  };
+
+  // ── 一键提取：拉作品 → 全选源图 → 自动 OCR 所有 ────────────────────────
+  const handleOneClickExtract = async () => {
+    const u = postUrl.trim();
+    if (!u) { toastErr("请输入作品链接"); return; }
+    setFetching(true);
+    setPost(null);
+    setExtractedText("");
+    setOcrTexts({});
+    setOcrStatus({});
+    setOcrErrors({});
+    try {
+      const r = await fetch(IMAGE_API("/fetch-post-cover"), {
+        method: "POST", headers, body: JSON.stringify({ url: u }),
+      });
+      const data = await r.json();
+      if (!r.ok || data.error) {
+        toastErr(data.error || data.detail || "拉取失败"); return;
+      }
+      const fetched = {
+        images: data.images || [],
+        image_urls: data.image_urls || data.images || [],
+        title: data.title || "", desc: data.desc || "",
+        platform: data.platform || "", platform_label: data.platform_label || "",
+        post_id: data.post_id || "", post_url: data.post_url || u,
+      };
+      setPost(fetched);
+      const composed = [fetched.title, fetched.desc].filter(Boolean).join("\n\n");
+      setNoteText(composed);
+      setNoteRewriteVariants([]);
+      // 默认勾选全部源图
+      const allIdxs = fetched.images.map((_, i) => i);
+      setSourceImgIdxs(allIdxs);
+      // 提取完后正文 + OCR 都默认折叠（用户按需展开）
+      setNoteCardExpanded(false);
+      // 立刻并发 OCR 所有图（绕过 state 还没更新的 sourceImgIdxs，直接用 allIdxs）
+      setOcring(true);
+      try {
+        await Promise.allSettled(allIdxs.map(async (idx) => {
+          const imgUrl = fetched.image_urls[idx] || fetched.images[idx];
+          if (!imgUrl) return;
+          setOcrStatus((s) => ({ ...s, [idx]: "running" }));
+          try {
+            const r2 = await fetch(IMAGE_API("/text-remix/extract-text"), {
+              method: "POST", headers,
+              body: JSON.stringify({ image_url: imgUrl, model_id: ocrModelId }),
+            });
+            const d = await r2.json();
+            if (!r2.ok) {
+              setOcrStatus((s) => ({ ...s, [idx]: "error" }));
+              setOcrErrors((s) => ({ ...s, [idx]: d.detail || "未知错误" })); return;
+            }
+            setOcrTexts((s) => ({ ...s, [idx]: (d.text || "").trim() }));
+            setOcrStatus((s) => ({ ...s, [idx]: "done" }));
+          } catch (e: any) {
+            setOcrStatus((s) => ({ ...s, [idx]: "error" }));
+            setOcrErrors((s) => ({ ...s, [idx]: e?.message || String(e) }));
+          }
+        }));
+        toastOk(`一键提取完成：${allIdxs.length} 张图 OCR 已并发跑完`);
+        // OCR 跑完默认折叠展开方便预览，但用户可点收起
+        setOcrPanelExpanded(true);
+      } finally { setOcring(false); }
+    } catch (e: any) { toastErr(`一键提取失败：${e?.message || e}`); }
+    finally { setFetching(false); }
+  };
+
+  // AI 改写正文
+  const handleRewriteNote = async () => {
+    const t = noteText.trim();
+    if (!t) { toastErr("正文为空，无可改写"); return; }
+    setNoteRewriting(true);
+    setNoteRewriteVariants([]);
+    try {
+      const r = await fetch(IMAGE_API("/text-remix/rewrite-text"), {
+        method: "POST", headers,
+        body: JSON.stringify({
+          text: t,
+          model_id: ocrModelId,   // 复用 OCR 选的文本/视觉模型（实际用文本能力）
+          style_hint: noteRewriteHint,
+          n_variants: 3,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) { toastErr(`改写失败：${d.detail || "未知错误"}`); return; }
+      setNoteRewriteVariants(d.variants || []);
+      toastOk(`生成 ${(d.variants || []).length} 个改写版本`);
+    } catch (e: any) { toastErr(`改写失败：${e?.message || e}`); }
+    finally { setNoteRewriting(false); }
   };
 
   // ── 步骤 2：OCR ───────────────────────────────────────────────────────
@@ -298,6 +402,9 @@ export default function TextRemixPage() {
   const [tasks, setTasks] = useState<TextRemixTask[]>([]);
   // 同步飞书状态：taskId+setIdx → "syncing"|"done"|"error"
   const [syncStatus, setSyncStatus] = useState<Record<string, string>>({});
+  // 当前活动任务里勾选的 set idx 集合（用于"批量同步飞书"）
+  const [selectedSetIdxs, setSelectedSetIdxs] = useState<number[]>([]);
+  const [batchSyncing, setBatchSyncing] = useState(false);
 
   // ── localStorage 缓存：刷新页面后状态不丢 ─────────────────────────────
   const _firstLoad = useRef(true);
@@ -475,6 +582,35 @@ export default function TextRemixPage() {
     }
   };
 
+  // 套切换 / 全选 / 反选
+  const toggleSetSelected = (setIdx: number) => {
+    setSelectedSetIdxs((prev) => prev.includes(setIdx)
+      ? prev.filter((x) => x !== setIdx)
+      : [...prev, setIdx].sort((a, b) => a - b));
+  };
+  const selectAllReadySets = (task: TextRemixTask) => {
+    const ready = task.items.filter((s) => s.items.some((c) => c.image_url)).map((s) => s.idx);
+    setSelectedSetIdxs(ready);
+  };
+
+  // 批量同步选中的多套到飞书（串行，避免飞书 rate limit + sync-bitable 内部加锁竞争）
+  const batchSyncSelectedToFeishu = async (task: TextRemixTask) => {
+    if (selectedSetIdxs.length === 0) { toastErr("请先勾选要同步的套"); return; }
+    setBatchSyncing(true);
+    let ok = 0, fail = 0;
+    try {
+      for (const sidx of selectedSetIdxs) {
+        try {
+          await syncSetToFeishu(task, sidx);
+          ok += 1;
+        } catch {
+          fail += 1;
+        }
+      }
+      toastOk(`批量同步完成：成功 ${ok}，失败 ${fail}`);
+    } finally { setBatchSyncing(false); }
+  };
+
   // 把一套结果同步到飞书：复用 /history/sync-bitable（按 image_gen_history.id）
   // 后端按 (batch_id, set_idx) 自动聚合一行；text-remix worker 用 batch_id=text_remix:{tid}
   const syncSetToFeishu = async (task: TextRemixTask, setIdx: number) => {
@@ -538,27 +674,127 @@ export default function TextRemixPage() {
           </div>
         </CardHeader>
         <CardBody className="space-y-2">
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <Input value={postUrl} onValueChange={setPostUrl}
               placeholder="粘贴小红书 / 抖音作品链接"
-              size="sm" className="flex-1" />
-            <Button color="primary" size="sm" startContent={<Link2 size={14} />}
-              isLoading={fetching} onPress={handleFetch}>拉取</Button>
+              size="sm" className="flex-1 min-w-[260px]" />
+            <Button color="default" variant="flat" size="sm" startContent={<Link2 size={14} />}
+              isLoading={fetching && !ocring} onPress={handleFetch}>仅拉取</Button>
+            <Button color="primary" size="sm" startContent={<Sparkles size={14} />}
+              isLoading={fetching || ocring} onPress={handleOneClickExtract}>
+              一键提取（拉取 + 全图 OCR）
+            </Button>
           </div>
+          <p className="text-[11px] text-default-400">
+            一键提取：自动选中所有图片并并发 OCR，省去逐张点击。
+          </p>
         </CardBody>
       </Card>
 
-      {/* 步骤 2：选图 + OCR */}
+      {/* 步骤 2：笔记原文（图文笔记的文章） */}
+      {post && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between w-full gap-3 flex-wrap">
+              <button type="button"
+                onClick={() => setNoteCardExpanded((v) => !v)}
+                className="flex items-center gap-2 hover:opacity-80">
+                {noteCardExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                <FileText size={16} />
+                <span className="font-medium">② 笔记原文</span>
+                <Chip size="sm" variant="flat">
+                  {noteText ? `${noteText.length} 字` : "空"}
+                </Chip>
+                {noteRewriteVariants.length > 0 && (
+                  <Chip size="sm" color="success" variant="flat">{noteRewriteVariants.length} 个改写</Chip>
+                )}
+              </button>
+              {noteCardExpanded && (
+                <div className="flex items-end gap-2">
+                  <Input size="sm" labelPlacement="outside" label="改写额外提示（可选）"
+                    placeholder="如：更口语化 / 加 emoji / 分点"
+                    value={noteRewriteHint} onValueChange={setNoteRewriteHint}
+                    className="min-w-[220px]" />
+                  <Button color="secondary" size="sm" isLoading={noteRewriting}
+                    startContent={<Sparkles size={14} />}
+                    isDisabled={!noteText.trim() || noteRewriting}
+                    onPress={handleRewriteNote}>
+                    AI 改写（3 个版本）
+                  </Button>
+                </div>
+              )}
+            </div>
+          </CardHeader>
+          {noteCardExpanded && (
+            <CardBody className="space-y-3">
+              <div>
+                <p className="text-xs text-default-500 mb-1">原文（可编辑，作为改写输入）</p>
+                <textarea
+                  className="w-full border border-divider rounded-md p-2 text-sm bg-background min-h-[100px]"
+                  placeholder="拉取后自动填充。可手动编辑后再改写。"
+                  value={noteText}
+                  onChange={(e) => setNoteText(e.target.value)}
+                />
+              </div>
+              {noteRewriteVariants.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-xs text-default-700 font-medium">改写结果</p>
+                  {noteRewriteVariants.map((v, i) => (
+                    <div key={i} className="rounded-md border border-default-200 p-2 bg-content1">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[11px] text-default-500">版本 {i + 1}</span>
+                        <div className="flex gap-1">
+                          <Button size="sm" variant="light" startContent={<Copy size={12} />}
+                            onPress={() => {
+                              navigator.clipboard.writeText(v).then(
+                                () => toastOk("已复制到剪贴板"),
+                                () => toastErr("复制失败"),
+                              );
+                            }}>复制</Button>
+                          <Button size="sm" variant="flat" color="primary"
+                            onPress={() => { setNoteText(v); toastOk(`已采用版本 ${i + 1}`); }}>
+                            采用
+                          </Button>
+                        </div>
+                      </div>
+                      <p className="text-xs whitespace-pre-wrap text-default-700">{v}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p className="text-[11px] text-default-400">
+                提示：改写出的文案可"复制"或"采用"覆盖原文，或手动粘贴到下面任一图片的文字框作为生图素材。
+              </p>
+            </CardBody>
+          )}
+        </Card>
+      )}
+
+      {/* 步骤 3：选图 + OCR */}
       {post && (
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between w-full gap-3 flex-wrap">
               <div className="flex items-center gap-2">
                 <ImageIcon size={16} />
-                <span className="font-medium">② 选源图，提取文字</span>
+                <span className="font-medium">③ 选源图，提取文字</span>
                 <Chip size="sm" variant="flat">{post.images.length} 张</Chip>
+                <Chip size="sm" variant="flat" color="primary">已选 {sourceImgIdxs.length}</Chip>
               </div>
-              <div className="flex items-end gap-2">
+              <div className="flex items-end gap-2 flex-wrap">
+                <Button size="sm" variant="flat"
+                  onPress={() => setSourceImgIdxs(post.images.map((_, i) => i))}
+                  isDisabled={sourceImgIdxs.length === post.images.length}>
+                  全选
+                </Button>
+                <Button size="sm" variant="flat"
+                  onPress={() => {
+                    const all = post.images.map((_, i) => i);
+                    const next = all.filter((i) => !sourceImgIdxs.includes(i));
+                    setSourceImgIdxs(next.length ? next : [0]);
+                  }}>反选</Button>
+                <Button size="sm" variant="light"
+                  onPress={() => setSourceImgIdxs([0])}>清空（保留 1）</Button>
                 <ModelSelector
                   usage="text"
                   value={ocrModelId}
@@ -612,10 +848,21 @@ export default function TextRemixPage() {
             {/* OCR 结果：每张选中图独立一行（小预览 + 文字框 + 状态 + 重试） */}
             {sourceImgIdxs.length > 0 && (
               <div className="space-y-2">
-                <p className="text-xs text-default-700">
-                  每张源图独立提取，可单独编辑/重试；生成时按每张文字配每张背景产出。
-                </p>
-                {sourceImgIdxs.map((idx) => {
+                <button type="button"
+                  onClick={() => setOcrPanelExpanded((v) => !v)}
+                  className="flex items-center gap-1.5 text-xs text-default-700 hover:opacity-80">
+                  {ocrPanelExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  <span>
+                    OCR 结果（{sourceImgIdxs.filter((i) => (ocrTexts[i] || "").trim()).length} / {sourceImgIdxs.length} 已提取）
+                  </span>
+                  <span className="text-default-400">— 点击{ocrPanelExpanded ? "折叠" : "展开"}</span>
+                </button>
+                {ocrPanelExpanded && (
+                  <p className="text-xs text-default-500">
+                    每张源图独立提取，可单独编辑/重试；生成时按每张文字配每张背景产出。
+                  </p>
+                )}
+                {ocrPanelExpanded && sourceImgIdxs.map((idx) => {
                   const u = post.images[idx];
                   const txt = ocrTexts[idx] || "";
                   const st = ocrStatus[idx] || "idle";
@@ -677,7 +924,7 @@ export default function TextRemixPage() {
           <div className="flex items-center justify-between w-full">
             <div className="flex items-center gap-2">
               <ImageIcon size={16} />
-              <span className="font-medium">③ 选择 / 上传背景图</span>
+              <span className="font-medium">④ 选择 / 上传背景图</span>
               <Chip size="sm" variant="flat">{backgrounds.length}</Chip>
             </div>
             {/* 显式 ref 触发 file picker：避免 label+hidden input 在某些浏览器/扩展下不响应 */}
@@ -786,7 +1033,7 @@ export default function TextRemixPage() {
         <CardHeader>
           <div className="flex items-center gap-2">
             <Wand2 size={16} />
-            <span className="font-medium">④ 生成</span>
+            <span className="font-medium">⑤ 生成</span>
           </div>
         </CardHeader>
         <CardBody className="space-y-3">
@@ -902,7 +1149,7 @@ export default function TextRemixPage() {
                   </>
                 )}
                 <Button size="sm" variant="light"
-                  onPress={() => { setActiveTaskId(null); setActiveTask(null); }}>
+                  onPress={() => { setActiveTaskId(null); setActiveTask(null); setSelectedSetIdxs([]); }}>
                   收起
                 </Button>
               </div>
@@ -913,6 +1160,27 @@ export default function TextRemixPage() {
               <p className="text-xs text-danger p-2 rounded bg-danger/5">
                 <AlertCircle size={12} className="inline mr-1" />{activeTask.error}
               </p>
+            )}
+            {/* 飞书批量同步工具栏 */}
+            {activeTask.items.length > 0 && (
+              <div className="flex items-center justify-between gap-2 flex-wrap p-2 rounded-md bg-default-50 border border-default-200">
+                <div className="flex items-center gap-2 text-xs text-default-600">
+                  <span>已勾选 <b className="text-primary">{selectedSetIdxs.length}</b> 套</span>
+                  <Button size="sm" variant="flat"
+                    onPress={() => selectAllReadySets(activeTask)}>
+                    全选有图的
+                  </Button>
+                  <Button size="sm" variant="light"
+                    onPress={() => setSelectedSetIdxs([])}
+                    isDisabled={selectedSetIdxs.length === 0}>清空</Button>
+                </div>
+                <Button size="sm" color="primary"
+                  isLoading={batchSyncing}
+                  isDisabled={selectedSetIdxs.length === 0 || batchSyncing}
+                  onPress={() => batchSyncSelectedToFeishu(activeTask)}>
+                  批量同步到飞书（{selectedSetIdxs.length} 套）
+                </Button>
+              </div>
             )}
             {activeTask.items.length === 0 && (
               <div className="flex items-center justify-center py-8 text-default-500 text-sm">
@@ -929,6 +1197,12 @@ export default function TextRemixPage() {
                 <div key={set.idx} className="space-y-2 p-3 rounded-md border border-default-200">
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <div className="flex items-center gap-2">
+                      <input type="checkbox"
+                        checked={selectedSetIdxs.includes(set.idx)}
+                        disabled={okCount === 0}
+                        onChange={() => toggleSetSelected(set.idx)}
+                        title={okCount === 0 ? "本套还没有图，无法选中" : "勾选用于批量同步飞书"}
+                        className="cursor-pointer disabled:cursor-not-allowed" />
                       <span className="font-medium text-sm">第 {set.idx} 套</span>
                       <span className="text-default-400 text-xs">
                         {okCount}/{totalCount} 张
