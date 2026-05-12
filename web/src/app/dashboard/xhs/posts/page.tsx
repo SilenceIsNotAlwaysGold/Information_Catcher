@@ -24,6 +24,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 import { MonitorGroupsButton } from "@/components/MonitorGroupsButton";
 import { MonitorPaceButton } from "@/components/MonitorPaceButton";
+import { ImportCreatorButton } from "@/components/platform/ImportCreatorButton";
 import { MoveGroupButton } from "@/components/MoveGroupButton";
 import {
   Dropdown, DropdownTrigger, DropdownMenu, DropdownItem,
@@ -423,6 +424,7 @@ export default function XhsPostsPage() {
           )}
           <MonitorGroupsButton token={token} platform="xhs" />
           <MonitorPaceButton />
+          <ImportCreatorButton platform="xhs" onImported={() => mutatePosts()} />
           <Button size="sm" color="primary" startContent={<Plus size={16} />} onPress={onOpen}>
             添加小红书帖子
           </Button>
