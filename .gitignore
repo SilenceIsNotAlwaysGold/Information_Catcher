@@ -254,3 +254,7 @@ certs/
 .deploy.env
 scripts/pg_migrate/out/
 scripts/pg_migrate/_tmp_*/
+
+# Claude Code 运行时文件（锁、调度状态等不入库）
+.claude/scheduled_tasks.lock
+.claude/scheduled_tasks/
