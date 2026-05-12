@@ -11,15 +11,17 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
-from .platforms._ua_pool import random_desktop_ua, DESKTOP_UAS
+from .platforms._ua_pool import random_desktop_ua, random_mobile_ua, DESKTOP_UAS
 
 # 默认 UA：保留单一值给老调用，新代码用 _request_headers() 拿随机 UA
 _UA = DESKTOP_UAS[0]
 
 
-def _request_headers() -> dict:
+def _request_headers(mobile: bool = False) -> dict:
+    """匿名抓取请求头。mobile=True 走 iPhone UA + /discovery/item 路径，
+    XHS 对桌面 UA 收紧后这是更稳的回退方案。"""
     return {
-        "User-Agent": random_desktop_ua(),
+        "User-Agent": random_mobile_ua() if mobile else random_desktop_ua(),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9",
         "Referer": "https://www.xiaohongshu.com/",
@@ -53,14 +55,20 @@ def _parse_count(value) -> int:
 
 
 def _extract_from_html(note_id: str, html: str) -> Optional[Dict]:
-    if "noteDetailMap" not in html:
-        # Login wall, captcha, or "笔记不存在" page — no detail map at all.
+    """从 XHS 页面 HTML 抽 note 元数据。兼容桌面和移动端两种页面结构：
+      - 桌面 /explore/{id}: state.note.note_detail_map[note_id].note
+      - 移动 /discovery/item/{id}: state.note_data.data.note_data
+    """
+    # noteDetailMap (桌面 camelCase) 或 noteData (移动 camelCase) 都接受
+    has_desktop = "noteDetailMap" in html
+    has_mobile  = "noteData" in html
+    if not has_desktop and not has_mobile:
         if "登录" in html and "扫码" in html:
             logger.warning(f"[fetcher] {note_id}: response is the login wall (need cookie)")
         elif "笔记不存在" in html or "已删除" in html or "无法查看" in html:
             logger.warning(f"[fetcher] {note_id}: note appears to be deleted or private")
         else:
-            logger.warning(f"[fetcher] {note_id}: noteDetailMap missing, HTML preview: {html[:200]!r}")
+            logger.warning(f"[fetcher] {note_id}: noteDetailMap/noteData missing, HTML preview: {html[:200]!r}")
         return None
     matches = re.findall(r"window\.__INITIAL_STATE__=(\{.*?\})</script>", html, re.DOTALL)
     if not matches:
@@ -69,7 +77,19 @@ def _extract_from_html(note_id: str, html: str) -> Optional[Dict]:
     try:
         state_raw = matches[0].replace("undefined", '""')
         state = humps.decamelize(json.loads(state_raw))
-        note = state["note"]["note_detail_map"][note_id]["note"]
+        note = None
+        # 桌面路径
+        nm = (state.get("note") or {}).get("note_detail_map") or {}
+        if note_id in nm:
+            note = nm[note_id].get("note")
+        # 移动路径（mobile UA + /discovery/item）
+        if note is None:
+            nd = ((state.get("note_data") or {}).get("data") or {}).get("note_data")
+            if isinstance(nd, dict) and nd.get("note_id") == note_id:
+                note = nd
+        if note is None:
+            logger.warning(f"[fetcher] {note_id}: note not found in state (desktop={has_desktop} mobile={has_mobile})")
+            return None
     except (KeyError, json.JSONDecodeError, IndexError) as e:
         logger.warning(f"[fetcher] {note_id}: state parse failed ({type(e).__name__}: {e})")
         return None
@@ -253,66 +273,89 @@ async def fetch_note_metrics(
     `account` takes precedence: when supplied, its cookie / user_agent / proxy_url
     are applied. `cookie` kept for backward compat when no account record exists.
     """
-    url = (
-        f"https://www.xiaohongshu.com/explore/{note_id}"
-        f"?xsec_token={xsec_token}&xsec_source={xsec_source}"
-    )
-    headers = _request_headers()
     proxy: Optional[str] = None
-
+    cookie_for_request: Optional[str] = None
+    custom_ua: Optional[str] = None
     if account:
         acc_cookie = account.get("cookie") or cookie
         if acc_cookie:
-            headers["Cookie"] = acc_cookie
+            cookie_for_request = acc_cookie
         ua = (account.get("user_agent") or "").strip()
         if ua:
-            headers["User-Agent"] = ua
+            custom_ua = ua
         # effective_proxy_url：socks5+鉴权会被转成本地 http://127.0.0.1:port
         from . import proxy_forwarder
         eff = proxy_forwarder.effective_proxy_url(account)
         if eff:
             proxy = eff
     elif cookie:
-        headers["Cookie"] = cookie
+        cookie_for_request = cookie
 
     await asyncio.sleep(random.uniform(1.0, 2.5))
 
-    try:
-        client_kwargs: Dict[str, Any] = {"timeout": 20}
+    async def _try(use_mobile: bool) -> tuple:
+        """单次尝试。use_mobile=True 走 mobile UA + /discovery/item 路径。"""
+        if use_mobile:
+            url = (
+                f"https://www.xiaohongshu.com/discovery/item/{note_id}"
+                f"?xsec_token={xsec_token}&xsec_source={xsec_source}"
+            )
+        else:
+            url = (
+                f"https://www.xiaohongshu.com/explore/{note_id}"
+                f"?xsec_token={xsec_token}&xsec_source={xsec_source}"
+            )
+        headers = _request_headers(mobile=use_mobile)
+        if cookie_for_request:
+            headers["Cookie"] = cookie_for_request
+        if custom_ua:
+            headers["User-Agent"] = custom_ua
+
+        client_kwargs: Dict[str, Any] = {"timeout": 20, "follow_redirects": True}
         if proxy:
             client_kwargs["proxy"] = proxy
         async with httpx.AsyncClient(**client_kwargs) as client:
             resp = await client.get(url, headers=headers)
-            if resp.status_code in (301, 302, 303, 307, 308):
-                location = resp.headers.get("location", "")
-                if "/login" in location:
-                    logger.warning(f"[fetcher] {note_id}: 302 → login wall (XHS gated)")
-                    return None, "login_required"
-                # /404 或 URL 包含 errorCode= 说明笔记不存在/已删除/私密/平台屏蔽
-                # XHS 常见错误码：-510001 = 内容不存在；其它 -5* 段都属于不可访问
-                if "/404" in location or "errorCode=" in location:
-                    logger.warning(f"[fetcher] {note_id}: 302 → 404 page (note deleted/private/blocked)")
-                    return None, "deleted"
-                logger.warning(f"[fetcher] {note_id}: unexpected {resp.status_code} → {location[:80]}")
-                return None, "error"
+            final_url = str(resp.url)
+            # 跟到登录墙
+            if "/login" in final_url:
+                return None, "login_required"
+            # 跟到 404 页（XHS 把不可访问的笔记重定向到 /404?errorCode=...）
+            if "/404" in final_url or "errorCode=" in final_url:
+                return None, "deleted"
             if resp.status_code == 404:
-                logger.warning(f"[fetcher] {note_id}: HTTP 404 (note deleted)")
                 return None, "deleted"
             if resp.status_code != 200:
-                logger.warning(
-                    f"[fetcher] {note_id}: HTTP {resp.status_code} "
-                    f"(final url: {resp.url})"
-                )
-                return None, "error"
+                return None, ("error", resp.status_code, final_url)
             metrics = _extract_from_html(note_id, resp.text)
             if metrics is None:
-                # _extract_from_html already logged the cause; map to a status
                 if "登录" in resp.text and "扫码" in resp.text:
                     return None, "login_required"
                 if "笔记不存在" in resp.text or "已删除" in resp.text:
                     return None, "deleted"
                 return None, "error"
             return metrics, "ok"
+
+    try:
+        # 第一次：桌面（保持原有 monitor 流程行为，桌面成功率仍占多数）
+        metrics, status = await _try(use_mobile=False)
+        # 桌面被风控判 deleted 的 → 用 mobile UA + /discovery/item 再试一次救场。
+        # XHS 对桌面 UA 偶尔强制返 errorCode=-510001，但 mobile UA 同 token 能拿到。
+        if metrics is None and status == "deleted":
+            logger.info(f"[fetcher] {note_id}: desktop deleted, retry mobile")
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            metrics2, status2 = await _try(use_mobile=True)
+            if metrics2 is not None:
+                logger.info(f"[fetcher] {note_id}: mobile fallback succeeded")
+                return metrics2, "ok"
+            # mobile 也判 deleted → 真删了
+            status = status2 if status2 != "error" else "deleted"
+        if isinstance(status, tuple):
+            logger.warning(f"[fetcher] {note_id}: HTTP {status[1]} (final url: {status[2]})")
+            return None, "error"
+        if metrics is None:
+            logger.warning(f"[fetcher] {note_id}: status={status}")
+        return metrics, status
     except Exception as e:
         logger.warning(f"[fetcher] {note_id}: request failed ({type(e).__name__}: {e})")
         return None, "error"
