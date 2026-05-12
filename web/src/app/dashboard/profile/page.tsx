@@ -15,7 +15,7 @@ import { FeishuBindingCard } from "@/components/FeishuBindingCard";
 import { PlanUsageCard } from "@/components/PlanUsageCard";
 import { FeishuPushToggle } from "@/components/FeishuPushToggle";
 import { AiPreferencesCard } from "@/components/AiPreferencesCard";
-import { MyAiModelsCard } from "@/components/MyAiModelsCard";
+// v2: 自带 AI 渠道下线（AI 全走平台统一渠道，按点数计费）—— MyAiModelsCard 已移除
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -464,8 +464,7 @@ export default function MonitorSettingsPage() {
         </CardBody>
       </Card>
 
-      {/* 用户自带的 OpenAI 兼容模型（出现在所有 ModelSelector 下拉里） */}
-      <MyAiModelsCard token={token} />
+      {/* v2: 自带 AI 渠道已下线 —— AI 全走平台统一渠道，按点数计费 */}
 
       {/* P15: AI 模型偏好（用户级） */}
       <AiPreferencesCard token={token} />

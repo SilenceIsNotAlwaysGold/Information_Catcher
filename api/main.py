@@ -106,6 +106,25 @@ app.include_router(admin_ai_router, prefix="/api")
 init_user_db()
 
 
+# ── 计费：余额不足 → 402，前端可据此弹"去充值" ─────────────────────────────
+from fastapi import Request as _Request
+from fastapi.responses import JSONResponse as _JSONResponse
+from .services.billing_service import InsufficientCredits as _InsufficientCredits
+
+
+@app.exception_handler(_InsufficientCredits)
+async def _insufficient_credits_handler(request: _Request, exc: _InsufficientCredits):
+    return _JSONResponse(
+        status_code=402,
+        content={
+            "detail": str(exc),
+            "code": "insufficient_credits",
+            "balance": float(exc.balance),
+            "needed": float(exc.needed),
+        },
+    )
+
+
 @app.get("/")
 async def serve_frontend():
     """Return frontend page or API info"""

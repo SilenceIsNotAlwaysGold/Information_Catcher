@@ -134,22 +134,23 @@ async def _resolve_model(
         db.row_factory = aiosqlite.Row
 
         # 1. 显式传 model_row_id —— 但必须 published（或 admin 调用未做限制）
+        #    v2：只接受 owner_user_id IS NULL 的平台模型（私有渠道已下线）
         async def _load(mid: int) -> Optional[aiosqlite.Row]:
             async with db.execute(
                 "SELECT m.*, p.base_url AS p_base_url, p.api_key AS p_api_key, p.enabled AS p_enabled "
                 "FROM ai_models m JOIN ai_providers p ON m.provider_id=p.id "
-                "WHERE m.id=? AND p.enabled=1",
+                "WHERE m.id=? AND p.enabled=1 AND m.owner_user_id IS NULL",
                 (mid,),
             ) as cur:
                 return await cur.fetchone()
 
-        # 用户私有模型的归属判断（不需要 published，但要 enabled）
-        def _is_owned_by(row, uid) -> bool:
+        # v2：用户私有渠道已下线 —— owner_user_id != NULL 的模型一律不选用，
+        # 强制所有用户走 admin 上架的平台模型（owner_user_id IS NULL）。
+        def _is_private(row) -> bool:
             try:
-                ow = row["owner_user_id"]
-            except (KeyError, IndexError):
-                ow = None
-            return ow is not None and uid is not None and int(ow) == int(uid)
+                return row["owner_user_id"] is not None
+            except (KeyError, IndexError, TypeError):
+                return False
 
         # 取用户（用于白名单 + 偏好）
         u = None
@@ -160,9 +161,9 @@ async def _resolve_model(
         row = None
         if model_row_id is not None:
             candidate = await _load(int(model_row_id))
-            # 自己拥有的模型直接放行（不走白名单 / published 检查）
-            if candidate is not None and _is_owned_by(candidate, user_id):
-                row = candidate
+            if candidate is not None and _is_private(candidate):
+                # 指向了私有模型（旧数据）→ 当作没选，fallback 到平台默认
+                logger.info(f"[ai_client] model {model_row_id} is a retired private model, fallback to platform default")
             elif u and not is_model_allowed_for_user(u, int(model_row_id), usage_type):
                 logger.info(
                     f"[ai_client] user {user_id} not allowed to use model {model_row_id}, fallback to default"
@@ -178,23 +179,23 @@ async def _resolve_model(
             if pref and is_model_allowed_for_user(u, int(pref), usage_type):
                 row = await _load(int(pref))
 
-        # 3. 系统默认
+        # 3. 系统默认（仅平台模型 owner_user_id IS NULL）
         if row is None:
             async with db.execute(
                 "SELECT m.*, p.base_url AS p_base_url, p.api_key AS p_api_key, p.enabled AS p_enabled "
                 "FROM ai_models m JOIN ai_providers p ON m.provider_id=p.id "
-                "WHERE m.usage_type=? AND m.is_default=1 AND p.enabled=1 "
+                "WHERE m.usage_type=? AND m.is_default=1 AND p.enabled=1 AND m.owner_user_id IS NULL "
                 "ORDER BY m.sort_order, m.id LIMIT 1",
                 (usage_type,),
             ) as cur:
                 row = await cur.fetchone()
 
-        # 4. 还兜底不到 → 取该 usage_type 任一可用模型
+        # 4. 还兜底不到 → 取该 usage_type 任一可用平台模型
         if row is None:
             async with db.execute(
                 "SELECT m.*, p.base_url AS p_base_url, p.api_key AS p_api_key, p.enabled AS p_enabled "
                 "FROM ai_models m JOIN ai_providers p ON m.provider_id=p.id "
-                "WHERE m.usage_type=? AND p.enabled=1 "
+                "WHERE m.usage_type=? AND p.enabled=1 AND m.owner_user_id IS NULL "
                 "ORDER BY m.sort_order, m.id LIMIT 1",
                 (usage_type,),
             ) as cur:
@@ -675,41 +676,30 @@ async def log_usage(
 async def list_user_visible_models(
     usage_type: str, user: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """返回某 usage_type 下所有可见模型：admin 共享 published + 用户自己私有的。
+    """返回某 usage_type 下用户可见的平台模型。
 
-    admin 共享：m.owner_user_id IS NULL AND m.published=1 AND p.enabled=1，再按白名单过滤
-    用户私有：m.owner_user_id = current_user.id AND p.enabled=1（不受 published / 白名单影响）
+    v2：只返回 admin 上架的平台模型（owner_user_id IS NULL AND published=1 AND p.enabled=1），
+    再按用户白名单过滤（admin 看全部）。私有渠道已下线，不再返回。
+    带上 price_per_call / feature_pricing 让前端能标单价。
     """
-    uid = int(user.get("id")) if user and user.get("id") is not None else None
     async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        # 共享 + 私有 一次查
         sql = (
             "SELECT m.id, m.model_id, m.display_name, m.usage_type, m.is_default, m.extra_config, "
-            "       m.owner_user_id, "
+            "       m.supports_vision, m.price_per_call, m.feature_pricing, "
             "       p.name AS provider_name "
             "FROM ai_models m JOIN ai_providers p ON m.provider_id=p.id "
-            "WHERE m.usage_type=? AND p.enabled=1 "
-            "  AND (m.published=1 OR m.owner_user_id IS NOT NULL) "
-            "ORDER BY (m.owner_user_id IS NULL) DESC, m.sort_order, m.id"
+            "WHERE m.usage_type=? AND p.enabled=1 AND m.published=1 AND m.owner_user_id IS NULL "
+            "ORDER BY m.sort_order, m.id"
         )
         async with db.execute(sql, (usage_type,)) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
-    out: List[Dict[str, Any]] = []
     is_admin = bool(user) and (user.get("role") or "").lower() == "admin"
     allowed = _parse_allowed_models(user, usage_type) if user and not is_admin else None
+    out: List[Dict[str, Any]] = []
     for r in rows:
-        ow = r.get("owner_user_id")
-        if ow is None:
-            # 共享模型：admin 永远看；普通用户按白名单
-            if is_admin or not user:
-                out.append(r)
-            elif allowed is None or r["id"] in allowed:
-                out.append(r)
-        else:
-            # 私有：只属于自己（admin 也看不到别人的）
-            if uid is not None and int(ow) == uid:
-                out.append(r)
+        if is_admin or not user or allowed is None or r["id"] in allowed:
+            out.append(r)
     return out
 
 
