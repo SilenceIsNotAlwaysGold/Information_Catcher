@@ -20,8 +20,10 @@ import base64
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiosqlite
 import httpx
@@ -30,6 +32,50 @@ from . import monitor_db
 from . import db as _db
 
 logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────
+# 计费接入（v2 SaaS）—— 所有 AI 调用走平台 key，按模型 × feature 扣点数
+# ──────────────────────────────────────────────────────────────
+
+async def _bill_charge(
+    user_id: Optional[int], model: "_ResolvedModel", feature: str,
+    *, task_ref: Optional[str] = None, units: int = 1,
+) -> Tuple[Decimal, str]:
+    """AI 调用前扣费。返回 (实扣点数, 流水幂等键)。
+
+    - user_id=None（系统后台调用）→ 不扣，返回 (0, "")
+    - 余额不足 → raise billing_service.InsufficientCredits（调用方应据此返回 402，不发起请求）
+    """
+    if user_id is None:
+        return Decimal("0"), ""
+    from . import billing_service as _bill   # lazy，防顶层循环 import
+    cost = await _bill.compute_cost(model.model_row_id, feature)
+    if units and units > 1:
+        cost = (cost * units)
+    if cost <= 0:
+        return Decimal("0"), ""
+    ref = task_ref or f"{feature or 'ai'}:{model.model_row_id}:{uuid.uuid4().hex}"
+    await _bill.deduct(
+        int(user_id), cost=cost, model_id=model.model_row_id, feature=feature, task_ref=ref,
+    )
+    return cost, ref
+
+
+async def _bill_refund(
+    user_id: Optional[int], model: "_ResolvedModel", feature: str,
+    ref: str, cost: Decimal,
+) -> None:
+    """AI 调用失败后退款。失败不抛（退款失败只记日志，不能把原始错误盖掉）。"""
+    if user_id is None or not ref or cost <= 0:
+        return
+    from . import billing_service as _bill
+    try:
+        await _bill.refund(
+            int(user_id), cost=cost, model_id=model.model_row_id, feature=feature, task_ref=ref,
+        )
+    except Exception as e:
+        logger.warning(f"[ai_client] refund failed user={user_id} ref={ref} cost={cost}: {e}")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -248,6 +294,8 @@ async def call_text(
     model = await _resolve_model(
         usage_type="text", model_row_id=model_id, user_id=user_id,
     )
+    # 计费：调用前扣点数（余额不足在这里 raise InsufficientCredits，不会发起请求）
+    _cost, _ref = await _bill_charge(user_id, model, feature)
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -284,6 +332,7 @@ async def call_text(
             )
             return text_out
         except Exception as e:
+            await _bill_refund(user_id, model, feature, _ref, _cost)
             await _log_usage(
                 user_id=user_id, model=model, feature=feature,
                 latency_ms=int((time.perf_counter() - t0) * 1000),
@@ -324,6 +373,8 @@ async def call_vision_ocr(
             f"请在 admin → AI 模型管理 把它的「支持视觉」打开，"
             f"或在「OCR 模型」下拉里换一个视觉模型（GPT-4o / Claude 3.5 / Gemini / Qwen-VL 等）。"
         )
+    # 计费：预检通过后才扣（余额不足 raise InsufficientCredits）
+    _cost, _ref = await _bill_charge(user_id, model, feature)
     # OpenAI 兼容的多模态格式：messages[0].content = [{type:"text"},{type:"image_url"}]
     messages = [
         {
@@ -400,6 +451,7 @@ async def call_vision_ocr(
             )
             return text_out
         except Exception as e:
+            await _bill_refund(user_id, model, feature, _ref, _cost)
             await _log_usage(
                 user_id=user_id, model=model, feature=feature,
                 latency_ms=int((time.perf_counter() - t0) * 1000),
@@ -462,12 +514,15 @@ async def call_image(
     model = await _resolve_model(
         usage_type="image", model_row_id=model_id, user_id=user_id,
     )
+    n_req = max(1, min(int(n), 4))
+    # 计费：预扣 n 张的钱（余额不足 raise）；调用后按实际成功数退差
+    _cost, _ref = await _bill_charge(user_id, model, feature, units=n_req)
     # size 优先级：显式参数 > 模型 extra_config.size > 默认
     final_size = size or model.extra_config.get("size") or "1024x1024"
     payload: Dict[str, Any] = {
         "model": model.model_id,
         "prompt": prompt,
-        "n": max(1, min(int(n), 4)),
+        "n": n_req,
         "size": final_size,
         "response_format": "b64_json",
     }
@@ -499,13 +554,27 @@ async def call_image(
                             b64s.append(base64.b64encode(r2.content).decode())
                     except Exception as e:
                         logger.warning(f"[ai_client] fetch image url fallback failed: {e}")
+            # 部分失败退差：预扣 n_req 张，实际成功 len(b64s) 张
+            got = len(b64s)
+            if user_id is not None and _cost > 0 and got < n_req:
+                per = _cost / n_req
+                back = (per * (n_req - got))
+                from . import billing_service as _bill
+                try:
+                    await _bill.refund(
+                        int(user_id), cost=back, model_id=model.model_row_id,
+                        feature=feature, task_ref=f"{_ref}:partial",
+                    )
+                except Exception as e:
+                    logger.warning(f"[ai_client] partial refund failed ref={_ref}: {e}")
             await _log_usage(
                 user_id=user_id, model=model, feature=feature,
-                image_count=len(b64s),
+                image_count=got,
                 latency_ms=int((time.perf_counter() - t0) * 1000),
             )
             return b64s
         except Exception as e:
+            await _bill_refund(user_id, model, feature, _ref, _cost)  # 整单退
             await _log_usage(
                 user_id=user_id, model=model, feature=feature,
                 latency_ms=int((time.perf_counter() - t0) * 1000),
