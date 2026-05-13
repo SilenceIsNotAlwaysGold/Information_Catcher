@@ -80,6 +80,7 @@ const baseNavItems: NavItem[] = [
   { key: "tools-image",      href: "/dashboard/tools/product-image",   icon: <ImageIcon size={16} />, label: "商品图（自创）", module: "tools" },
   { key: "tools-remix",      href: "/dashboard/tools/product-remix",   icon: <Wand2 size={16} />,     label: "整体仿写",       module: "tools" },
   { key: "tools-text-remix", href: "/dashboard/tools/text-remix",      icon: <Wand2 size={16} />,     label: "文案换背景",       module: "tools" },
+  { key: "tools-comic",      href: "/dashboard/tools/comic-style",     icon: <Wand2 size={16} />,     label: "漫画风",         module: "tools" },
   { key: "tools-extension",  href: "/dashboard/extension",             icon: <Puzzle size={16} />,    label: "我的浏览器扩展", module: "tools" },
 
   { key: "settings",    href: "/dashboard/profile",               icon: <Settings size={20} />,  label: "个人设置", module: "common" },

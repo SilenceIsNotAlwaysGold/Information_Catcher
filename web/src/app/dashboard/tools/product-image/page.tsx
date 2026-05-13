@@ -520,6 +520,17 @@ export default function ProductImagePage() {
               label="图像模型"
             />
 
+            {/* 图生图入口提示：让用户看到右侧 / 下方还有"上传参考图"卡片 */}
+            <div className={`text-xs px-3 py-2 rounded-md border ${
+              refImageB64
+                ? "bg-secondary/10 border-secondary/30 text-secondary-700"
+                : "bg-default-50 border-default-200 text-default-600"
+            }`}>
+              {refImageB64
+                ? `✅ 已上传参考图，将走图生图（/images/edits）`
+                : `💡 想做「图生图」？右侧（大屏）/ 下方（窄屏）有「参考图（可选）」卡片，上传后自动切换图生图模式`}
+            </div>
+
             <Button
               color="primary"
               size="lg"

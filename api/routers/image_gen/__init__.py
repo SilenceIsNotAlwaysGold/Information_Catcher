@@ -22,7 +22,7 @@ from fastapi.responses import Response
 from ..auth import get_current_user
 from ...services import monitor_db, image_upload_worker, storage
 from ._common import DEFAULT_SIZE, SaveImageConfigRequest, SyncImageBitableRequest
-from . import product, remix, text_remix
+from . import product, remix, text_remix, comic_style
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ router = APIRouter(prefix="/monitor/image", tags=["ImageGen"])
 router.include_router(product.router)
 router.include_router(remix.router)
 router.include_router(text_remix.router)
+router.include_router(comic_style.router)
 
 
 # ── 公共端点 ────────────────────────────────────────────────────────────────
