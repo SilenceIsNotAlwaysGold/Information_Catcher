@@ -645,6 +645,64 @@ CREATE TABLE IF NOT EXISTS comic_panels (
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_comic_panels_project ON comic_panels(project_id, seq);
+
+-- ── AI 旅游攻略（v2 板块 2）─────────────────────────────────────────────────
+-- 用户输入目的地 + 天数 + 偏好 → 一次 LLM 调用拿到完整行程 JSON 落库。
+-- plan_json 字段存 LLM 返回的结构化行程（按天分组，每天景点/餐厅/交通/预算）。
+CREATE TABLE IF NOT EXISTS travel_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT DEFAULT '',
+    dest_city TEXT NOT NULL,
+    days INTEGER DEFAULT 3,
+    budget TEXT DEFAULT '',          -- 自由文本："3000-5000 / 不限"
+    travel_style TEXT DEFAULT '',    -- "亲子 / 文艺 / 美食 / 户外"
+    extra_prefs TEXT DEFAULT '',     -- 其它要求（最多 1000 字）
+    plan_json TEXT DEFAULT '{}',     -- AI 输出的行程 JSON
+    text_model_id INTEGER,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_travel_plans_user ON travel_plans(user_id, created_at DESC);
+
+-- ── AI 小说（v2 板块 2）─────────────────────────────────────────────────────
+-- 精简版工作流：建项目（题材+premise）→ AI 生大纲 → 加角色卡 →
+-- AI 一章一章生（基于大纲 + 前面 N 章的 summary 保持连贯）。
+CREATE TABLE IF NOT EXISTS novel_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT DEFAULT '',
+    genre TEXT DEFAULT '',             -- xuanhuan/dushi/xuanyi/yanqing/wuxia/kehuan/lishi/...
+    premise TEXT DEFAULT '',           -- 核心设定 / 一句话故事
+    outline TEXT DEFAULT '',           -- 大纲全文（AI 生 + 用户编辑）
+    style_hint TEXT DEFAULT '',        -- 文风："古风简洁 / 网文白话 / 文学化"
+    status TEXT DEFAULT 'planning',    -- planning(写大纲) | writing(写章节) | done
+    text_model_id INTEGER,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_novel_projects_user ON novel_projects(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS novel_characters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    role TEXT DEFAULT '',              -- 主角 / 配角 / 反派
+    profile TEXT DEFAULT '',           -- 性格 + 背景 + 外貌 + 关键关系（喂模型）
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_novel_chars_project ON novel_characters(project_id);
+
+CREATE TABLE IF NOT EXISTS novel_chapters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    title TEXT DEFAULT '',
+    content TEXT DEFAULT '',
+    summary TEXT DEFAULT '',           -- AI 写完后自动总结一段（喂下一章用，保持连贯）
+    char_count INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_novel_chapters_project ON novel_chapters(project_id, seq);
 """
 
 
