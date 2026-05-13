@@ -11,6 +11,7 @@ import { PlatformSubNav } from "@/components/platform";
 import {
   PlatformPostsView, type PostRow,
 } from "@/components/platform/PlatformPostsView";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { mutatePosts } from "@/lib/useApi";
 import { toastErr } from "@/lib/toast";
 
@@ -103,6 +104,7 @@ export default function DouyinPostsPage() {
   return (
     <div className="p-6 space-y-4">
       <PlatformSubNav platform="douyin" current="posts" />
+      <ErrorBoundary label="抖音帖子页">
       <PlatformPostsView
         platform="douyin"
         addLabel="添加抖音视频"
@@ -123,6 +125,7 @@ export default function DouyinPostsPage() {
         renderTitleExtras={renderTitleExtras}
         renderRowActions={renderRowActions}
       />
+      </ErrorBoundary>
     </div>
   );
 }

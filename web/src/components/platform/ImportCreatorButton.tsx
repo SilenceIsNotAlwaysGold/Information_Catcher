@@ -127,7 +127,7 @@ export function ImportCreatorButton({ platform, onImported }: Props) {
                 }}
                 className="flex-1">
                 {groups.map((g) => (
-                  <SelectItem key={String(g.id)} value={String(g.id)}>{g.name}</SelectItem>
+                  <SelectItem key={String(g.id)}>{g.name}</SelectItem>
                 ))}
               </Select>
               <Input label="数量上限（可选）" labelPlacement="outside" size="sm"
