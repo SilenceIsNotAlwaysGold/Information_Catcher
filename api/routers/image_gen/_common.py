@@ -125,10 +125,24 @@ async def call_edits(
             "status": resp.status_code,
         }
 
+    # 上游返回 HTML（多半是 base_url 配错指向了网站首页而不是 API 根路径）
+    body_text = resp.text or ""
+    ct = (resp.headers.get("content-type") or "").lower()
+    if ("<!doctype html" in body_text[:200].lower()
+            or "<html" in body_text[:200].lower()
+            or "text/html" in ct):
+        return None, {
+            "error": (
+                f"图像 API 返回的是 HTML 而不是 JSON —— 几乎可以确定 base_url 配错了。"
+                f"实际请求 URL：{edit_url} ；请检查 admin → AI 配置 里这个 provider 的"
+                f" base_url（正确格式应是 https://xxx/v1 或 https://xxx/api/v1，结尾要有 API 路径段）。"
+            ),
+            "status": 502,
+        }
     try:
         data = resp.json()
     except Exception:
-        return None, {"error": f"上游返回非 JSON 响应：{resp.text[:200]}", "status": 502}
+        return None, {"error": f"上游返回非 JSON 响应：{body_text[:200]}", "status": 502}
 
     images = normalize_image_items(data)
     if not images:
