@@ -19,7 +19,7 @@ import { Spinner } from "@nextui-org/spinner";
 import { Wand2, Link2, Image as ImageIcon, Upload, Trash2, Check, AlertCircle, Download, ZoomIn, ChevronDown, ChevronRight, FileText, Sparkles, Copy } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
-import { IMAGE_API, proxyUrl } from "@/components/product-image/utils";
+import { IMAGE_API, proxyUrl, SIZE_OPTIONS } from "@/components/product-image/utils";
 import { ImagePreviewModal } from "@/components/product-image/ImagePreviewModal";
 import { ModelSelector } from "@/components/ModelSelector";
 import { BitablePushToggle } from "@/components/BitablePushToggle";
@@ -392,7 +392,8 @@ export default function TextRemixPage() {
   };
 
   // ── 步骤 4：生成（异步任务，对标 整体仿写） ─────────────────────────────
-  const [count, setCount] = useState(1);
+  const [count, setCount] = useState(3);          // 默认一次生成 3 套
+  const [genSize, setGenSize] = useState("");     // 自定义图片尺寸；空 = 用模型默认
   const [styleHint, setStyleHint] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
@@ -421,6 +422,7 @@ export default function TextRemixPage() {
       if (typeof d.ocrModelId === "number") setOcrModelId(d.ocrModelId);
       if (typeof d.styleHint === "string") setStyleHint(d.styleHint);
       if (typeof d.count === "number") setCount(d.count);
+      if (typeof d.genSize === "string") setGenSize(d.genSize);
       if (Array.isArray(d.selectedBgIds)) setSelectedBgIds(d.selectedBgIds);
       if (typeof d.imageModelId === "number") setImageModelId(d.imageModelId);
     } catch {}
@@ -430,10 +432,10 @@ export default function TextRemixPage() {
     if (_firstLoad.current) { _firstLoad.current = false; return; }
     try {
       localStorage.setItem(PERSIST_KEY, JSON.stringify({
-        postUrl, ocrTexts, sourceImgIdxs, ocrModelId, styleHint, count, selectedBgIds, imageModelId,
+        postUrl, ocrTexts, sourceImgIdxs, ocrModelId, styleHint, count, genSize, selectedBgIds, imageModelId,
       }));
     } catch {}
-  }, [postUrl, ocrTexts, sourceImgIdxs, ocrModelId, styleHint, count, selectedBgIds, PERSIST_KEY]);
+  }, [postUrl, ocrTexts, sourceImgIdxs, ocrModelId, styleHint, count, genSize, selectedBgIds, PERSIST_KEY]);
 
   // 提交异步任务：POST /text-remix-tasks → 拿 task_id → 轮询
   const handleSubmit = async () => {
@@ -453,6 +455,7 @@ export default function TextRemixPage() {
           })),
           background_ids: selectedBgIds,
           count,
+          size: genSize || undefined,
           style_hint: styleHint.trim(),
           image_model_id: imageModelId,
         }),
@@ -1078,6 +1081,18 @@ export default function TextRemixPage() {
               label="图像生成模型"
               className="min-w-[220px]"
             />
+            <div className="min-w-[200px]">
+              <p className="text-xs text-default-500 mb-1">图片尺寸（留空 = 模型默认）</p>
+              <select
+                className="border border-divider rounded-md px-2 h-9 text-sm bg-background w-full"
+                value={genSize}
+                onChange={(e) => setGenSize(e.target.value)}>
+                <option value="">使用模型默认尺寸</option>
+                {SIZE_OPTIONS.map((s) => (
+                  <option key={s.key} value={s.key}>{s.label}</option>
+                ))}
+              </select>
+            </div>
             <div className="flex-1 min-w-[200px]">
               <Input size="sm" label="风格提示（可选）" labelPlacement="outside"
                 placeholder="如：小红书风 / 简约清新 / 高级感"
@@ -1229,10 +1244,11 @@ export default function TextRemixPage() {
                       </Button>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                  {/* 一行展示一套：所有图横向排列，超出可横向滚动 */}
+                  <div className="flex gap-2 overflow-x-auto pb-1">
                     {set.items.map((cell, ci) => (
                       <div key={ci}
-                        className="aspect-square rounded-md overflow-hidden bg-default-100 relative group">
+                        className="shrink-0 w-32 sm:w-36 md:w-40 aspect-square rounded-md overflow-hidden bg-default-100 relative group">
                         {cell.image_url ? (
                           <>
                             {/* eslint-disable-next-line @next/next/no-img-element */}
