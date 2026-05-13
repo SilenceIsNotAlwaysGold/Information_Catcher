@@ -125,3 +125,34 @@ async def get(path: str, *, params: Optional[dict] = None, token: Optional[str] 
               use_tenant: bool = True, timeout: float = 15.0) -> Dict[str, Any]:
     return await _request("GET", path, token=token, use_tenant=use_tenant,
                           params=params, timeout=timeout)
+
+
+async def post_multipart(
+    path: str, *,
+    data: Dict[str, Any],
+    files: Dict[str, Any],
+    token: Optional[str] = None,
+    use_tenant: bool = True,
+    timeout: float = 60.0,
+) -> Dict[str, Any]:
+    """multipart/form-data POST（用于素材上传 /drive/v1/medias/upload_all）。
+
+    files: {"file": (filename, bytes, content_type)}；data: 其它表单字段。
+    """
+    if token is None and use_tenant:
+        token = await get_tenant_token()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    url = f"{FEISHU_API}{path}"
+    async with httpx.AsyncClient(timeout=timeout) as cli:
+        resp = await cli.post(url, headers=headers, data=data, files=files)
+        try:
+            d = resp.json()
+        except Exception:
+            raise FeishuApiError(resp.status_code, f"飞书返回非 JSON：{resp.text[:200]}", None)
+    code = d.get("code", -1)
+    if code != 0:
+        if code in (99991663, 99991664, 99991665):
+            global _tenant_token_cache
+            _tenant_token_cache = ("", 0.0)
+        raise FeishuApiError(code, d.get("msg") or f"HTTP {resp.status_code}", d)
+    return d

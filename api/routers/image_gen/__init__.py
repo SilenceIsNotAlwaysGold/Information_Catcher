@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import List
 from urllib.parse import urlparse
@@ -218,14 +219,15 @@ async def sync_history_to_bitable(
     if (req.target_table_id or "").strip():
         table_id = req.target_table_id.strip()
 
-    # 字段类型：1=多行文本 2=数字 15=超链接
+    # 字段类型：1=多行文本 2=数字 15=超链接 17=附件
+    # 「作品图片」用附件字段——直接把图片文件本体上传到飞书素材库（之前用 URL 字段
+    # 放七牛/clouddn 链接，飞书点击会被安全拦截「不让打开」）。
+    # 旧的「图片1-9」URL 字段不再使用（已存在的表保留不动，新表不建）。
     expected_fields = [
         ("套号", 2),
         ("张数", 2),
         ("标题", 1), ("正文", 1),
-        ("图片1", 15), ("图片2", 15), ("图片3", 15),
-        ("图片4", 15), ("图片5", 15), ("图片6", 15),
-        ("图片7", 15), ("图片8", 15), ("图片9", 15),
+        ("作品图片", 17),
         ("Prompt", 1), ("尺寸", 1), ("模型", 1),
         ("来源链接", 15), ("来源标题", 1),
         ("生成时间", 1),
@@ -265,30 +267,51 @@ async def sync_history_to_bitable(
     for gkey, items in groups.items():
         items.sort(key=lambda x: (x.get("in_set_idx") or 0))
 
+    # 写飞书的顺序按 set_idx 升序——保证飞书表里的行顺序跟平台展示一致
+    sorted_groups = sorted(
+        groups.items(), key=lambda kv: (int(kv[1][0].get("set_idx") or 0), kv[0]),
+    )
+
     results: List[dict] = list(skip_results)
-    for gkey, items in groups.items():
+    for gkey, items in sorted_groups:
         first = items[0]
         src_url = (first.get("source_post_url") or "").strip()
-        # 飞书 URL 字段（type=15）不接受空字符串，会报 URLFieldConvFail。
-        # 空槽位直接不传 key（飞书会留空白单元）。
-        image_cols = {}
-        for i in range(9):
-            if i < len(items):
-                u = (items[i].get("qiniu_url") or "").strip()
-                if u:
-                    image_cols[f"图片{i+1}"] = {"link": u, "text": u}
+
+        # 把这一套的所有图下载下来，上传到飞书素材库，拿 file_token → 附件字段。
+        # 并发上传（单张超时 60s）；个别失败不影响其它。
+        urls = [(it.get("qiniu_url") or it.get("local_url") or "").strip() for it in items]
+        urls = [u for u in urls if u]
+        file_tokens: List[dict] = []
+        if urls:
+            async def _upload_one(u: str):
+                try:
+                    content = await feishu_bitable_v2.download_url_bytes(u)
+                    fname = (u.split("/")[-1].split("?")[0] or "image.png")
+                    if "." not in fname:
+                        fname += ".png"
+                    tok = await feishu_bitable_v2.upload_media_to_bitable(
+                        app_token, file_name=fname, content=content,
+                    )
+                    return tok
+                except Exception as e:
+                    logger.warning(f"[sync-bitable] upload {u[:80]} failed: {e}")
+                    return None
+            toks = await asyncio.gather(*[_upload_one(u) for u in urls])
+            file_tokens = [{"file_token": t} for t in toks if t]
+
         fields_payload = {
             "套号": first.get("set_idx", 1),
             "张数": len(items),
             "标题": first.get("generated_title", ""),
             "正文": first.get("generated_body", ""),
-            **image_cols,
             "Prompt": first.get("prompt", ""),
             "尺寸": first.get("size", ""),
             "模型": first.get("model", ""),
             "来源标题": first.get("source_post_title", ""),
             "生成时间": first.get("created_at", ""),
         }
+        if file_tokens:
+            fields_payload["作品图片"] = file_tokens
         if src_url:
             fields_payload["来源链接"] = {"link": src_url, "text": src_url}
         ids = [it["id"] for it in items]

@@ -15,7 +15,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from .client import FeishuApiError, get, post
+import httpx
+from .client import FeishuApiError, get, post, post_multipart
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,48 @@ async def add_record(
         json={"fields": fields},
     )
     return (data.get("data") or {}).get("record") or {}
+
+
+async def upload_media_to_bitable(
+    app_token: str, *, file_name: str, content: bytes,
+) -> str:
+    """把图片文件上传到飞书多维表格的素材库，返回 file_token（写入附件字段用）。
+
+    parent_type=bitable_image, parent_node=app_token。
+    文档：https://open.feishu.cn/document/server-docs/docs/drive-v1/media/upload_all
+    """
+    if not content:
+        raise FeishuApiError(-1, "上传内容为空", None)
+    d = await post_multipart(
+        "/drive/v1/medias/upload_all",
+        data={
+            "file_name": file_name,
+            "parent_type": "bitable_image",
+            "parent_node": app_token,
+            "size": str(len(content)),
+        },
+        files={"file": (file_name, content, "application/octet-stream")},
+        timeout=60.0,
+    )
+    token = (d.get("data") or {}).get("file_token") or ""
+    if not token:
+        raise FeishuApiError(-1, f"上传素材失败（无 file_token）：{d}", d)
+    return token
+
+
+async def download_url_bytes(url: str, *, referer: str = "", timeout: float = 20.0) -> bytes:
+    """下载一个图片 URL 的字节（带 Referer 绕 CDN 防盗链）。"""
+    headers = {}
+    if referer:
+        headers["Referer"] = referer
+    elif "xhscdn" in url or "xiaohongshu" in url:
+        headers["Referer"] = "https://www.xiaohongshu.com/"
+    elif "douyin" in url or "byteimg" in url or "bytecdn" in url:
+        headers["Referer"] = "https://www.douyin.com/"
+    async with httpx.AsyncClient(timeout=timeout) as cli:
+        r = await cli.get(url, headers=headers)
+        r.raise_for_status()
+        return r.content
 
 
 async def list_field_names(app_token: str, table_id: str) -> List[str]:
