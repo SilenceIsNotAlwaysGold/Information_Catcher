@@ -26,8 +26,8 @@ export function ReferenceImageUploader({
       toastErr("请上传图片文件（PNG / JPG / WEBP）");
       return;
     }
-    if (file.size > 10 * 1024 * 1024) {
-      toastErr("图片不能超过 10 MB");
+    if (file.size > 50 * 1024 * 1024) {
+      toastErr("图片不能超过 50 MB");
       return;
     }
     const reader = new FileReader();
@@ -103,7 +103,7 @@ export function ReferenceImageUploader({
               点击或拖拽图片到这里
             </p>
             <p className="text-xs text-default-400 mt-1">
-              PNG / JPG / WEBP，最大 10 MB
+              PNG / JPG / WEBP，最大 50 MB（支持 4K）
             </p>
           </div>
         )}

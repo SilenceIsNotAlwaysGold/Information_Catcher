@@ -156,8 +156,8 @@ async def comic_style_generate(
         img_bytes = base64.b64decode(raw)
     except Exception as e:
         raise HTTPException(400, f"图片解码失败：{e}")
-    if len(img_bytes) > 10 * 1024 * 1024:
-        raise HTTPException(400, "图片超过 10MB")
+    if len(img_bytes) > 50 * 1024 * 1024:
+        raise HTTPException(400, "图片超过 50MB")
 
     # 3. 配额（按生成张数预扣）
     n = max(1, min(int(req.count or 1), 4))

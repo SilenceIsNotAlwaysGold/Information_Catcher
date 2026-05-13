@@ -324,7 +324,7 @@ export default function TextRemixPage() {
 
   const handleUploadBg = async (file: File) => {
     if (!file) return;
-    if (file.size > 10 * 1024 * 1024) { toastErr("文件超过 10MB"); return; }
+    if (file.size > 50 * 1024 * 1024) { toastErr("文件超过 50MB"); return; }
     const name = window.prompt("命名这张背景图（可选）：", file.name) || file.name;
     const fd = new FormData();
     fd.append("file", file);

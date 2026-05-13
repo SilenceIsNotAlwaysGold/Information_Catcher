@@ -88,7 +88,7 @@ export default function ComicStylePage() {
 
   const handleFile = async (f: File) => {
     if (!f.type.startsWith("image/")) { toastErr("请选图片"); return; }
-    if (f.size > 10 * 1024 * 1024) { toastErr("超过 10MB"); return; }
+    if (f.size > 50 * 1024 * 1024) { toastErr("文件超过 50MB"); return; }
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result as string;
@@ -247,7 +247,7 @@ export default function ComicStylePage() {
               <p className="text-sm text-default-600">
                 {dragOver ? "松开鼠标完成上传" : "点击或拖拽图片到这里"}
               </p>
-              <p className="text-xs text-default-400 mt-1">PNG / JPG / WEBP，最大 10 MB</p>
+              <p className="text-xs text-default-400 mt-1">PNG / JPG / WEBP，最大 50 MB（支持 4K）</p>
             </div>
           )}
         </CardBody>

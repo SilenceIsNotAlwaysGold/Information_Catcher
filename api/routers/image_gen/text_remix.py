@@ -49,8 +49,8 @@ async def upload_background(
     if not file:
         raise HTTPException(status_code=400, detail="未提供文件")
     raw = await file.read()
-    if not raw or len(raw) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="文件为空或超过 10MB")
+    if not raw or len(raw) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件为空或超过 50MB")
     ct = (file.content_type or "image/png").lower()
     if not ct.startswith("image/"):
         raise HTTPException(status_code=400, detail="只接受图片文件")
