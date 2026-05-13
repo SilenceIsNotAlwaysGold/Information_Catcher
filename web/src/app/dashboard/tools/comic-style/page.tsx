@@ -145,13 +145,21 @@ export default function ComicStylePage() {
     } catch (e: any) { toastErr(`下载失败：${e?.message || e}`); }
   };
 
-  // 下载单张：把 b64 转成 blob 触发浏览器下载
-  const downloadOne = (b64: string, idx: number) => {
+  // 下载单张：兼容 b64 / url 两种源
+  const downloadOne = async (it: GenItem, idx: number) => {
     try {
-      const byteChars = atob(b64);
-      const bytes = new Uint8Array(byteChars.length);
-      for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
-      const blob = new Blob([bytes], { type: "image/png" });
+      let blob: Blob;
+      if (it.b64) {
+        const byteChars = atob(it.b64);
+        const bytes = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+        blob = new Blob([bytes], { type: "image/png" });
+      } else if (it.url) {
+        const r = await fetch(proxyUrl(it.url));
+        blob = await r.blob();
+      } else {
+        toastErr("这张图没数据，无法下载"); return;
+      }
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -165,10 +173,14 @@ export default function ComicStylePage() {
   const downloadAll = async () => {
     if (items.length === 0) return;
     for (let i = 0; i < items.length; i++) {
-      downloadOne(items[i].b64, i);
+      await downloadOne(items[i], i);
       await new Promise((r) => setTimeout(r, 300));
     }
   };
+
+  // 给一个 GenItem 算出可显示的 src（base64 内联 或 七牛 URL 通过 proxy）
+  const itemSrc = (it: GenItem): string =>
+    it.b64 ? `data:image/png;base64,${it.b64}` : (it.url ? proxyUrl(it.url) : "");
 
   return (
     <div className="p-6 space-y-5 max-w-5xl">
@@ -348,17 +360,24 @@ export default function ComicStylePage() {
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {items.map((it, i) => {
-                  const src = `data:image/png;base64,${it.b64}`;
+                  const src = itemSrc(it);
                   return (
                     <div key={i} className="space-y-2">
-                      <div className="aspect-square rounded-md overflow-hidden bg-default-100 cursor-pointer"
-                        onClick={() => setPreviewSrc(src)}>
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={src} alt={`comic-${i + 1}`} className="w-full h-full object-cover" />
+                      <div className="aspect-square rounded-md overflow-hidden bg-default-100 cursor-pointer flex items-center justify-center"
+                        onClick={() => src && setPreviewSrc(src)}>
+                        {src ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={src} alt={`comic-${i + 1}`}
+                            referrerPolicy="no-referrer"
+                            className="w-full h-full object-cover" />
+                        ) : (
+                          <span className="text-xs text-default-400">图片加载失败</span>
+                        )}
                       </div>
                       <Button size="sm" variant="flat" className="w-full"
                         startContent={<Download size={13} />}
-                        onPress={() => downloadOne(it.b64, i)}>
+                        isDisabled={!src}
+                        onPress={() => downloadOne(it, i)}>
                         下载第 {i + 1} 张
                       </Button>
                     </div>
