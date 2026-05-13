@@ -19,7 +19,9 @@ from pathlib import Path
 
 # JWT配置
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24小时
+# 30 天：运营工具，登录态太短（24h）用户天天掉线很烦；非高安全场景，体验优先。
+# 需要强制某用户下线时可走 token_revoked_at（get_current_user 里有校验）。
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30  # 30 天
 
 # 数据库路径
 DB_PATH = Path(__file__).parent.parent.parent / "database" / "users.db"
