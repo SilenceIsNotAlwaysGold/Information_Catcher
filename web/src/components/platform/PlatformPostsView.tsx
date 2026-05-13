@@ -98,7 +98,11 @@ export function PlatformPostsView({
 
   const { data: me } = useMe();
   const isAdmin = me?.role === "admin";
-  const { posts: rawPosts, isLoading } = usePosts();
+  // me 还在加载时不渲染 Table —— admin 列条件渲染会让 isAdmin 从 false 变 true
+  // 时列数变化，触发 NextUI Table "Cell count must match column count" 硬错。
+  const meLoaded = me !== undefined;
+  const { posts: rawPosts, isLoading: postsLoading } = usePosts();
+  const isLoading = postsLoading || !meLoaded;
   const posts = (rawPosts as PostRow[]).filter((p) => {
     // 排除博主追新的帖子（有 creator_id），它们在「博主追新」板块单独展示
     if ((p as any).creator_id != null) return false;
