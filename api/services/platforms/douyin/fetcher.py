@@ -17,7 +17,7 @@ import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
@@ -88,6 +88,16 @@ def _extract_aweme_id_from_url(url: str) -> Optional[str]:
     # 抖音内部视频笔记和图文笔记共用 aweme_id 体系，详情接口通用
     if "douyin.com" in host and len(parts) >= 2 and parts[0] in ("video", "note"):
         return parts[1]
+    # www.douyin.com/user/{user_id 或 self}?modal_id={aweme_id} —— 网页"主页 + 弹层视频"
+    # 用户在抖音首页直接点开视频弹层时复制的就是这种 URL
+    if "douyin.com" in host and parts and parts[0] == "user":
+        try:
+            qs = parse_qs(p.query)
+            mid = (qs.get("modal_id") or [""])[0].strip()
+            if mid and mid.isdigit():
+                return mid
+        except Exception:
+            pass
     # iesdouyin.com/share/video/{id}/ 或 iesdouyin.com/share/note/{id}/
     if "iesdouyin.com" in host and len(parts) >= 3 and parts[0] == "share" and parts[1] in ("video", "note"):
         return parts[2]
