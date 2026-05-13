@@ -283,7 +283,7 @@ async def call_text(
     feature: str = "",
     temperature: float = 0.8,
     max_tokens: int = 2000,
-    timeout: float = 60.0,
+    timeout: float = 120.0,
     system_prompt: Optional[str] = None,
     extra_payload: Optional[Dict[str, Any]] = None,
 ) -> str:
