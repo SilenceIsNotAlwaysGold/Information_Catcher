@@ -141,6 +141,41 @@ async def health_check():
     }
 
 
+@app.get("/extension.zip")
+async def download_extension_zip():
+    """打包 extension/ 目录为 zip 供用户下载安装。
+
+    动态打包——永远返回服务端 extension/ 目录的最新内容（deploy_extension 同步过去）。
+    解压后得到 extension/ 文件夹，在 chrome://extensions「加载已解压的扩展程序」选它。
+    """
+    import io
+    import zipfile
+    from pathlib import Path
+    from fastapi.responses import Response
+
+    ext_dir = Path(__file__).parent.parent / "extension"
+    if not ext_dir.is_dir():
+        return Response("extension/ 目录不存在", status_code=404)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in ext_dir.rglob("*"):
+            if f.is_file() and "/.git" not in str(f) and not f.name.startswith("."):
+                z.write(f, f"extension/{f.relative_to(ext_dir)}")
+    data = buf.getvalue()
+    # 版本号塞到文件名里方便用户辨认
+    ver = ""
+    try:
+        import json as _json
+        ver = _json.loads((ext_dir / "manifest.json").read_text()).get("version", "")
+    except Exception:
+        pass
+    fname = f"trendpulse-helper-{ver}.zip" if ver else "trendpulse-helper.zip"
+    return Response(
+        data, media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @app.get("/api/env/check")
 async def check_environment():
     """Check if LittleCrawler environment is configured correctly"""

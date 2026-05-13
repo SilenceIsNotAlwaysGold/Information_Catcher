@@ -135,10 +135,12 @@ deploy_extension() {
     return 0
   fi
   $SSH "mkdir -p ${TARGET_PATH}/extension" || true
-  sshpass -p "$PASSWORD" rsync -avz --no-perms --no-times --omit-dir-times \
+  sshpass -p "$PASSWORD" rsync -avz --no-perms --no-times --omit-dir-times --delete \
     -e "ssh ${SSH_OPTS[*]}" \
     extension/ "${USER}@${HOST}:${TARGET_PATH}/extension/" | tail -6
-  echo "✓ 扩展同步完成（服务端 /api/extension/version 会读 extension/manifest.json）"
+  local ver
+  ver="$(grep '"version"' extension/manifest.json | sed -E 's/.*"version": *"([^"]+)".*/\1/')"
+  echo "✓ 扩展同步完成（v${ver}）— /api/extension/version 提示升级；/extension.zip 下载安装包"
 }
 
 restart_service() {
