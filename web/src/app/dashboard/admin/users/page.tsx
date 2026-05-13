@@ -16,6 +16,7 @@ import {
 import { useAuth } from "@/contexts/AuthContext";
 import { useMe } from "@/lib/useApi";
 import { toastErr, toastOk } from "@/lib/toast";
+import { AdminBillingPanel } from "@/components/AdminBillingPanel";
 
 const PLANS = ["trial", "free", "pro", "team", "enterprise"];
 const ROLES = ["user", "admin"];
@@ -290,10 +291,13 @@ export default function AdminUsersPage() {
         <div className="flex-1">
           <h1 className="text-2xl font-bold">用户管理</h1>
           <p className="text-sm text-default-500 mt-1">
-            查看 / 编辑 / 禁用 / 删除用户；调整套餐和配额；强制下线和重置密码。
+            查看 / 编辑 / 禁用 / 删除用户；调整套餐和配额；AI 点数充值；强制下线和重置密码。
           </p>
         </div>
       </div>
+
+      {/* v2: AI 点数管理（充值 / 赠送 / 调整 / 流水 / 对账）*/}
+      <AdminBillingPanel />
 
       <Card>
         <CardBody className="space-y-3">
