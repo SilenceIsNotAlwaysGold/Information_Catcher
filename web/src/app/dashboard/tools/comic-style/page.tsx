@@ -48,6 +48,7 @@ export default function ComicStylePage() {
   const [imgB64, setImgB64] = useState("");           // 纯 base64 不带前缀
   const [imgPreview, setImgPreview] = useState("");   // data:image/... 用于 <img>
   const [imgName, setImgName] = useState("");
+  const [dragOver, setDragOver] = useState(false);    // 拖拽时高亮上传框
 
   // 预设
   const [presets, setPresets] = useState<Preset[]>([]);
@@ -226,10 +227,26 @@ export default function ComicStylePage() {
               </button>
             </div>
           ) : (
-            <div onClick={() => fileRef.current?.click()}
-              className="border-2 border-dashed border-divider rounded-lg p-8 text-center cursor-pointer hover:border-primary/40">
+            <div
+              onClick={() => fileRef.current?.click()}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragOver(false);
+                const f = e.dataTransfer.files?.[0];
+                if (f) handleFile(f);
+              }}
+              className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
+                dragOver
+                  ? "border-primary bg-primary/5"
+                  : "border-divider hover:border-primary/40"
+              }`}
+            >
               <Upload size={28} className="mx-auto text-default-400 mb-2" />
-              <p className="text-sm text-default-600">点击或拖拽图片到这里</p>
+              <p className="text-sm text-default-600">
+                {dragOver ? "松开鼠标完成上传" : "点击或拖拽图片到这里"}
+              </p>
               <p className="text-xs text-default-400 mt-1">PNG / JPG / WEBP，最大 10 MB</p>
             </div>
           )}
