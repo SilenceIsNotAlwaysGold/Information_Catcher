@@ -7,6 +7,7 @@ import {
   ShieldCheck, Music2, Newspaper, ChevronDown, ChevronRight,
   FileText, Users, Moon, Sun, X, Sparkles, Link2, SlidersHorizontal,
   Image as ImageIcon, Wand2, Ticket, History as HistoryIcon, Puzzle, Wrench,
+  BookOpen,
 } from "lucide-react";
 import { Button } from "@nextui-org/button";
 import { Tooltip } from "@nextui-org/tooltip";
@@ -80,6 +81,7 @@ const baseNavItems: NavItem[] = [
   { key: "tools-image",      href: "/dashboard/tools/product-image",   icon: <ImageIcon size={16} />, label: "商品图（自创）", module: "tools" },
   { key: "tools-remix",      href: "/dashboard/tools/product-remix",   icon: <Wand2 size={16} />,     label: "整体仿写",       module: "tools" },
   { key: "tools-text-remix", href: "/dashboard/tools/text-remix",      icon: <Wand2 size={16} />,     label: "文案换背景",       module: "tools" },
+  { key: "tools-comic",      href: "/dashboard/studio/comic",          icon: <BookOpen size={16} />, label: "AI 漫画",          module: "tools" },
   { key: "tools-extension",  href: "/dashboard/extension",             icon: <Puzzle size={16} />,    label: "我的浏览器扩展", module: "tools" },
 
   { key: "settings",    href: "/dashboard/profile",               icon: <Settings size={20} />,  label: "个人设置", module: "common" },

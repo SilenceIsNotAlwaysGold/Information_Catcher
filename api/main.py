@@ -33,6 +33,7 @@ from .routers import (
 )
 from .routers.admin_ai import router as admin_ai_router
 from .routers.billing import router as billing_router, admin_router as billing_admin_router
+from .routers.studio import router as studio_router
 from .services.auth_service import init_user_db
 from .services import monitor_db
 from .services import scheduler as monitor_scheduler
@@ -104,6 +105,7 @@ app.include_router(creator_stats_router, prefix="/api")
 app.include_router(admin_ai_router, prefix="/api")
 app.include_router(billing_router, prefix="/api")
 app.include_router(billing_admin_router, prefix="/api")
+app.include_router(studio_router, prefix="/api")
 
 # 初始化用户数据库（创建默认admin账号）
 init_user_db()

@@ -592,6 +592,59 @@ CREATE TABLE IF NOT EXISTS credit_ledger (
 CREATE INDEX IF NOT EXISTS idx_credit_ledger_user ON credit_ledger(user_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_task_ref
     ON credit_ledger(task_ref) WHERE kind='deduct' AND task_ref != '';
+
+-- ── AI 工坊 / AI 漫画（v2 板块 2）─────────────────────────────────────────
+-- 一个 comic_project = 一部漫画。流程：对话引导写故事 → 定稿梗概 → 配角色卡 →
+-- AI 拆分镜（生成 panels）→ 逐格生图。AI 调用走 ai_client，按 feature 扣点。
+CREATE TABLE IF NOT EXISTS comic_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT DEFAULT '',
+    synopsis TEXT DEFAULT '',          -- 故事梗概（对话引导后定稿）
+    style_hint TEXT DEFAULT '',        -- 画风："日系少女 / 美式卡通 / 水墨 ..."
+    status TEXT DEFAULT 'drafting',    -- drafting(写故事) | scripting(拆分镜) | drawing(生图) | done
+    text_model_id INTEGER,             -- 写故事/拆分镜用的文本模型（NULL = 平台默认）
+    image_model_id INTEGER,            -- 生格子用的图像模型（NULL = 平台默认）
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_comic_projects_user ON comic_projects(user_id, created_at DESC);
+
+-- 故事引导对话（用户 ↔ AI）
+CREATE TABLE IF NOT EXISTS comic_story_turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    role TEXT NOT NULL,                -- user | assistant
+    content TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_comic_turns_project ON comic_story_turns(project_id, id);
+
+-- 角色卡：固定外貌描述，让生图时人物形象保持一致
+CREATE TABLE IF NOT EXISTS comic_characters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    appearance TEXT DEFAULT '',        -- 外貌描述（拼进每格 prompt）
+    ref_image_url TEXT DEFAULT '',     -- 可选定妆照（用户上传 / AI 先生成）
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_comic_chars_project ON comic_characters(project_id);
+
+-- 分镜格子
+CREATE TABLE IF NOT EXISTS comic_panels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    seq INTEGER NOT NULL,              -- 第几格（1-based）
+    script_text TEXT DEFAULT '',       -- 分镜脚本：场景 + 动作 + 对白
+    char_names TEXT DEFAULT '[]',      -- JSON：这格出现的角色名（拼 prompt 时带其 appearance）
+    image_prompt TEXT DEFAULT '',      -- 实际喂生图模型的 prompt（生成时填）
+    image_url TEXT DEFAULT '',
+    gen_status TEXT DEFAULT 'pending', -- pending | generating | done | error
+    gen_error TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_comic_panels_project ON comic_panels(project_id, seq);
 """
 
 
