@@ -703,6 +703,59 @@ CREATE TABLE IF NOT EXISTS novel_chapters (
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_novel_chapters_project ON novel_chapters(project_id, seq);
+
+-- ── 实用工具箱：服务监控（v2 板块 3）─────────────────────────────────────────
+-- 用户可登记一组要监控的 URL（HTTP/TCP），定期探活；失败时推飞书群（复用 bitable_chat_id）。
+CREATE TABLE IF NOT EXISTS service_monitors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,                 -- 完整 URL（含 http/https）
+    method TEXT DEFAULT 'GET',         -- GET / HEAD / POST
+    expected_status INTEGER DEFAULT 200,  -- 预期 HTTP 状态码（其它即认为故障）
+    timeout_seconds INTEGER DEFAULT 15,
+    interval_seconds INTEGER DEFAULT 300, -- 探活间隔（默认 5 分钟）
+    enabled INTEGER DEFAULT 1,
+    last_check_at TEXT DEFAULT '',
+    last_status TEXT DEFAULT 'unknown',   -- ok | down | error | unknown
+    last_latency_ms INTEGER DEFAULT 0,
+    last_error TEXT DEFAULT '',
+    consecutive_fail INTEGER DEFAULT 0,    -- 连续失败次数（用于去抖告警）
+    notify_after_fails INTEGER DEFAULT 1,  -- 连续 N 次失败后才告警
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_svc_monitors_user ON service_monitors(user_id, enabled);
+
+CREATE TABLE IF NOT EXISTS service_monitor_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    monitor_id INTEGER NOT NULL,
+    status TEXT NOT NULL,              -- ok | down | error
+    http_status INTEGER DEFAULT 0,
+    latency_ms INTEGER DEFAULT 0,
+    error TEXT DEFAULT '',
+    checked_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_svc_checks_monitor ON service_monitor_checks(monitor_id, id DESC);
+
+-- ── 热点雷达（v2 板块 4）─────────────────────────────────────────────────
+-- 聚合各渠道热点：GitHub Trending / HN / 36氪 / 知乎热榜 / 微博热搜 ...
+-- 按 category 分类（code/tech/policy/entertainment/finance/...），最新优先展示。
+-- 用 (source, url) 复合唯一索引去重，重复刷新只更 score/fetched_at。
+CREATE TABLE IF NOT EXISTS hotnews_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,            -- 内部 source key：hn / github_trending / ...
+    source_label TEXT NOT NULL,      -- 展示名：Hacker News / GitHub Trending / ...
+    category TEXT NOT NULL,          -- code / tech / policy / entertainment / finance
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    summary TEXT DEFAULT '',
+    score INTEGER DEFAULT 0,         -- 源给的热度分（HN points / GH stars / 评论数 ...）
+    score_label TEXT DEFAULT '',     -- "12.3k stars" / "245 points" 文本
+    published_at TEXT DEFAULT '',    -- 源给的时间（可空）
+    fetched_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hotnews_unique ON hotnews_items(source, url);
+CREATE INDEX IF NOT EXISTS idx_hotnews_category ON hotnews_items(category, fetched_at DESC);
 """
 
 

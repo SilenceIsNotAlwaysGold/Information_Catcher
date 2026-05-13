@@ -84,6 +84,8 @@ const baseNavItems: NavItem[] = [
   { key: "tools-comic",      href: "/dashboard/studio/comic",          icon: <BookOpen size={16} />, label: "AI 漫画",          module: "tools" },
   { key: "tools-novel",      href: "/dashboard/studio/novel",          icon: <FileText size={16} />, label: "AI 小说",          module: "tools" },
   { key: "tools-travel",     href: "/dashboard/studio/travel",         icon: <Sparkles size={16} />, label: "AI 旅游攻略",     module: "tools" },
+  { key: "tools-uptime",     href: "/dashboard/toolbox/uptime",        icon: <Wrench size={16} />,    label: "服务监控",          module: "tools" },
+  { key: "tools-hotnews",    href: "/dashboard/hotnews",               icon: <Newspaper size={16} />, label: "热点雷达",          module: "tools" },
   { key: "tools-extension",  href: "/dashboard/extension",             icon: <Puzzle size={16} />,    label: "我的浏览器扩展", module: "tools" },
 
   { key: "settings",    href: "/dashboard/profile",               icon: <Settings size={20} />,  label: "个人设置", module: "common" },
