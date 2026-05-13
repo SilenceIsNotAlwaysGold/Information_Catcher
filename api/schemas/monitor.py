@@ -194,6 +194,7 @@ class UpdateSettingsRequest(BaseModel):
     trending_push_enabled: Optional[bool] = None
     creator_push_enabled: Optional[bool] = None
     bitable_push_enabled: Optional[bool] = None
+    daily_push_enabled: Optional[bool] = None
     trending_account_ids: Optional[str] = None
     comments_fetch_enabled: Optional[bool] = None
     newrank_api_key: Optional[str] = None

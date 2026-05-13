@@ -144,6 +144,8 @@ def init_user_db():
     _ensure_column(cursor, "users", "creator_chat_id",       "TEXT DEFAULT ''")
     _ensure_column(cursor, "users", "bitable_push_enabled",  "INTEGER DEFAULT 0")
     _ensure_column(cursor, "users", "bitable_chat_id",       "TEXT DEFAULT ''")
+    _ensure_column(cursor, "users", "daily_push_enabled",    "INTEGER DEFAULT 0")
+    _ensure_column(cursor, "users", "daily_chat_id",         "TEXT DEFAULT ''")
 
     # 飞书 OAuth 自动绑定（每个用户独立的群 + 多维表格）
     # access_token 约 2h 过期，refresh_token 约 30 天；30 天内静默 refresh，超期需重新 OAuth
@@ -412,6 +414,8 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "       COALESCE(creator_chat_id,'')      AS creator_chat_id, "
         "       COALESCE(bitable_push_enabled,0)  AS bitable_push_enabled, "
         "       COALESCE(bitable_chat_id,'')      AS bitable_chat_id, "
+        "       COALESCE(daily_push_enabled,0)    AS daily_push_enabled, "
+        "       COALESCE(daily_chat_id,'')        AS daily_chat_id, "
         "       COALESCE(feishu_open_id,'')                   AS feishu_open_id, "
         "       COALESCE(feishu_user_access_token,'')         AS feishu_user_access_token, "
         "       COALESCE(feishu_refresh_token,'')             AS feishu_refresh_token, "
@@ -476,6 +480,8 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         "creator_chat_id":       row["creator_chat_id"] or "",
         "bitable_push_enabled":  bool(row["bitable_push_enabled"]),
         "bitable_chat_id":       row["bitable_chat_id"] or "",
+        "daily_push_enabled":    bool(row["daily_push_enabled"]),
+        "daily_chat_id":         row["daily_chat_id"] or "",
         "feishu_open_id":                   row["feishu_open_id"] or "",
         "feishu_user_access_token":         row["feishu_user_access_token"] or "",
         "feishu_refresh_token":             row["feishu_refresh_token"] or "",
@@ -840,10 +846,12 @@ _FEISHU_FIELDS = {
     "trending_chat_id",
     "creator_chat_id",
     "bitable_chat_id",
+    "daily_chat_id",
     # per-feature 推送开关（用户在 settings 里改）
     "trending_push_enabled",
     "creator_push_enabled",
     "bitable_push_enabled",
+    "daily_push_enabled",
 }
 
 

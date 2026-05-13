@@ -294,11 +294,13 @@ _FEATURE_LABELS = {
     "trending": "热门内容",
     "creator":  "博主追新",
     "bitable":  "消息同步",
+    "daily":    "每日日报",
 }
 _FEATURE_INTROS = {
     "trending": "热门内容速递（关键词命中爆款）会推送到这里。",
     "creator":  "博主新发帖（订阅的博主有新作品）会推送到这里。",
     "bitable":  "飞书表格写入完成的通知会推送到这里。",
+    "daily":    "每天定时的监控数据日报（今日增量 + 涨幅排行 + 汇总）会推送到这里。",
 }
 _PLATFORM_LABELS = {"xhs": "小红书", "douyin": "抖音", "mp": "公众号"}
 # 哪些 feature 按平台分群

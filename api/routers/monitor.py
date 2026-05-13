@@ -1176,9 +1176,11 @@ async def get_settings(
     base["trending_push_enabled"] = "1" if me.get("trending_push_enabled") else "0"
     base["creator_push_enabled"]  = "1" if me.get("creator_push_enabled")  else "0"
     base["bitable_push_enabled"]  = "1" if me.get("bitable_push_enabled")  else "0"
+    base["daily_push_enabled"]    = "1" if me.get("daily_push_enabled")    else "0"
     base["trending_chat_id"] = me.get("trending_chat_id", "") or ""
     base["creator_chat_id"]  = me.get("creator_chat_id",  "") or ""
     base["bitable_chat_id"]  = me.get("bitable_chat_id",  "") or ""
+    base["daily_chat_id"]    = me.get("daily_chat_id",    "") or ""
     return base
 
 
@@ -1222,7 +1224,7 @@ async def update_settings(
 
     # per-feature 飞书推送开关：直接通过 update_user_feishu 写入（_FEISHU_FIELDS 已含）
     push_updates = {}
-    for key in ("trending_push_enabled", "creator_push_enabled", "bitable_push_enabled"):
+    for key in ("trending_push_enabled", "creator_push_enabled", "bitable_push_enabled", "daily_push_enabled"):
         v = getattr(req, key, None)
         if v is not None:
             push_updates[key] = 1 if v else 0

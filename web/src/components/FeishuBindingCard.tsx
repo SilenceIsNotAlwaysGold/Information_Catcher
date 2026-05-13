@@ -11,6 +11,7 @@
  * 飞书告警走应用机器人（chat_id），不再支持 webhook 兜底。
  */
 import { useEffect, useMemo, useState, useCallback } from "react";
+import { DailyReportPushToggle } from "@/components/DailyReportPushToggle";
 import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
 import { Chip } from "@nextui-org/chip";
@@ -275,6 +276,9 @@ export function FeishuBindingCard() {
               <Field label="image_table_id" value={status.image_table_id || "—"} mono />
               <Field label="trending_table_id" value={status.trending_table_id || "—"} mono />
             </div>
+
+            {/* 每日日报推送开关 */}
+            <DailyReportPushToggle />
 
             {/* 邀请团队加入企业（已绑定状态下显示，让 owner 把邀请码 / 二维码分享给同事） */}
             {status.invite_url && (

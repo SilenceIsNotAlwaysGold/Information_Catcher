@@ -135,6 +135,11 @@ async def notify_trending(
 
 # ── Daily report ─────────────────────────────────────────────────────────────
 
+def _fmt_delta(n: int) -> str:
+    """+123 / -5 / 0；正数加 + 号。"""
+    return f"+{n}" if n > 0 else (str(n) if n != 0 else "0")
+
+
 async def notify_daily_report(
     wecom_url: str,
     feishu_url: str,
@@ -142,23 +147,68 @@ async def notify_daily_report(
     group_name: str = "",
     prefix: str = "",
     feishu_chat_id: str = "",
+    summary: Optional[Dict] = None,
 ) -> None:
-    if not rows:
+    """每日日报：今日增量 + 涨幅排行 + 汇总。
+
+    rows 每项（已由 scheduler 算好 24h delta，并按 liked_delta 降序排）：
+      { title, note_id, xsec_token, platform,
+        liked_now, collected_now, comment_now,
+        liked_delta, collected_delta, comment_delta, is_new }
+    summary（可选）：
+      { posts_total, new_today, liked_delta, collected_delta, comment_delta }
+    """
+    if not rows and not (summary and summary.get("new_today")):
         return
+    n_total = (summary or {}).get("posts_total", len(rows))
     title_label = (
-        f"每日数据日报｜{group_name}（共 {len(rows)} 条）"
-        if group_name else f"每日数据日报（共 {len(rows)} 条）"
+        f"每日数据日报｜{group_name}（{n_total} 条监控）"
+        if group_name else f"每日数据日报（{n_total} 条监控）"
     )
-    header = f"{prefix}**{title_label}**\n" if prefix else f"**{title_label}**\n"
-    lines = [header]
-    for i, r in enumerate(rows[:20], 1):
-        title = (r.get("title") or r.get("note_id", ""))[:30]
-        liked = r.get("liked_count", 0)
-        collected = r.get("collected_count", 0)
-        comment = r.get("comment_count", 0)
-        lines.append(f"{i}. **{title}**  点赞 {liked} | 收藏 {collected} | 评论 {comment}")
-    if len(rows) > 20:
-        lines.append(f"\n（仅展示前 20 条，共 {len(rows)} 条）")
+    lines = []
+    if prefix:
+        lines.append(prefix.rstrip())
+    lines.append(f"**{title_label}**")
+    lines.append("")
+
+    # 汇总行
+    if summary:
+        s = summary
+        lines.append(
+            f"📊 **今日合计**：点赞 {_fmt_delta(s.get('liked_delta', 0))} ｜ "
+            f"收藏 {_fmt_delta(s.get('collected_delta', 0))} ｜ "
+            f"评论 {_fmt_delta(s.get('comment_delta', 0))}"
+            + (f" ｜ 新增监控 {s['new_today']} 条" if s.get("new_today") else "")
+        )
+        lines.append("")
+
+    # 涨幅排行（按 liked_delta 降序，取前 15；只列有正增量的）
+    ranked = [r for r in rows if (r.get("liked_delta", 0) or 0) > 0][:15]
+    if ranked:
+        lines.append("🔥 **涨幅 TOP**（按点赞增量）")
+        for i, r in enumerate(ranked, 1):
+            title = (r.get("title") or r.get("note_id", ""))[:28]
+            ld, cd, md = r.get("liked_delta", 0), r.get("collected_delta", 0), r.get("comment_delta", 0)
+            ln = r.get("liked_now", 0)
+            link = _note_link(r.get("note_id", ""), r.get("xsec_token", "")) if r.get("note_id") else ""
+            head = f"[{title}]({link})" if link else title
+            lines.append(
+                f"{i}. {head}  点赞 **{_fmt_delta(ld)}**（{ln}）"
+                f" ｜ 收藏 {_fmt_delta(cd)} ｜ 评论 {_fmt_delta(md)}"
+            )
+    else:
+        lines.append("（今日所有监控帖子都没有点赞增长）")
+
+    # 今日新增的监控帖（如果有）
+    new_rows = [r for r in rows if r.get("is_new")]
+    if new_rows:
+        lines.append("")
+        lines.append(f"🆕 **今日新增监控**（{len(new_rows)} 条）")
+        for r in new_rows[:8]:
+            title = (r.get("title") or r.get("note_id", ""))[:28]
+            link = _note_link(r.get("note_id", ""), r.get("xsec_token", "")) if r.get("note_id") else ""
+            lines.append(f"· {f'[{title}]({link})' if link else title}")
+
     content = "\n".join(lines)
     await _push(wecom_url, feishu_url, title_label, content, template="blue",
                 feishu_chat_id=feishu_chat_id)

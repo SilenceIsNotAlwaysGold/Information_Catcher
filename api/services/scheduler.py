@@ -806,11 +806,18 @@ async def run_ext_task_retry():
 
 
 async def run_daily_report():
-    """Daily report job：按 user × group 拆分推送（多租户隔离）。
+    """Daily report job：今日增量 + 涨幅排行 + 汇总，按 user × group 拆分推送。
 
-    每个 (user, group) 单独一份日报：
-      - webhook 优先级：group 自己配的 > 该用户在 users 表的 webhook
-      - 都没配就跳过
+    每个 (user, group) 一份：
+      - 对每条监控帖算 24h 内 delta（当前 snapshot vs 24h 前 snapshot）
+      - 按点赞增量降序排，给出涨幅 TOP
+      - 汇总今日合计增量 + 新增监控帖数
+    推送目标优先级：
+      1. 「每日日报」专属群（用户开了 daily_push_enabled，lazy 建群）
+      2. group 显式配的 webhook（admin 覆盖）
+      3. 用户老的 feishu_chat_id
+      4. group / user 的 wecom / feishu webhook
+      都没有就跳过。
     """
     settings = await db.get_all_settings()
     if settings.get("daily_report_enabled", "1") != "1":
@@ -819,6 +826,9 @@ async def run_daily_report():
     all_posts = await db.get_posts()
     if not all_posts:
         return
+
+    from datetime import datetime
+    today_prefix = datetime.now().strftime("%Y-%m-%d")
 
     # 按 (user_id, group_id) 分桶
     by_uid_gid: dict = {}
@@ -829,38 +839,79 @@ async def run_daily_report():
     groups = await db.list_groups()
     group_map = {g["id"]: g for g in groups}
     from . import auth_service
+    from .feishu import provisioning as _prov
     user_cache: dict = {}
 
     sent = 0
     skipped = 0
     for (uid, gid), posts in by_uid_gid.items():
         group = group_map.get(gid) if gid else None
-        # 用户自己的 webhook
         if uid is not None and uid not in user_cache:
             user_cache[uid] = auth_service.get_user_by_id(uid) or {}
         u = user_cache.get(uid) or {}
+
         wecom = (group.get("wecom_webhook_url") if group else "") or u.get("wecom_webhook_url", "")
-        feishu = (group.get("feishu_webhook_url") if group else "") or u.get("feishu_webhook_url", "")
-        # group 显式配 webhook 时跳过 chat_id（admin 意图覆盖）
-        chat = "" if (group and group.get("feishu_webhook_url")) else (u.get("feishu_chat_id", "") or "")
-        if not wecom and not feishu and not chat:
+        feishu_wh = (group.get("feishu_webhook_url") if group else "") or u.get("feishu_webhook_url", "")
+        chat = ""
+        if u.get("daily_push_enabled") and (u.get("feishu_open_id") or ""):
+            try:
+                chat = await _prov.ensure_feature_chat(u, "daily") or ""
+            except Exception as e:
+                logger.warning(f"[daily_report] ensure daily chat failed uid={uid}: {e}")
+        # 没开/没建出来 → 回退老 feishu_chat_id（除非 group 显式配了 webhook）
+        if not chat and not (group and group.get("feishu_webhook_url")):
+            chat = u.get("feishu_chat_id", "") or ""
+        if not wecom and not feishu_wh and not chat:
             skipped += 1
             continue
 
+        # 算每条 post 的 24h delta + is_new
+        rows = []
+        s_liked = s_coll = s_comm = 0
+        new_today = 0
+        for p in posts:
+            nid = p.get("note_id")
+            cur = await db.get_latest_snapshot(nid) or {}
+            prev = await db.get_snapshot_at_or_before(nid, 24)
+            ln = int(cur.get("liked_count") or 0)
+            cn = int(cur.get("collected_count") or 0)
+            mn = int(cur.get("comment_count") or 0)
+            is_new = bool((p.get("created_at") or "").startswith(today_prefix))
+            if is_new:
+                new_today += 1
+            if prev is None:
+                # 没有 24h 前 snapshot（新帖 / 刚开始监控）→ 不算增量，避免污染排行/汇总
+                ld = cd = md = 0
+            else:
+                ld = ln - int(prev.get("liked_count") or 0)
+                cd = cn - int(prev.get("collected_count") or 0)
+                md = mn - int(prev.get("comment_count") or 0)
+            s_liked += ld
+            s_coll += cd
+            s_comm += md
+            rows.append({
+                "title": p.get("title") or "", "note_id": nid,
+                "xsec_token": p.get("xsec_token", ""), "platform": p.get("platform", "xhs"),
+                "liked_now": ln, "collected_now": cn, "comment_now": mn,
+                "liked_delta": ld, "collected_delta": cd, "comment_delta": md,
+                "is_new": is_new,
+            })
+        rows.sort(key=lambda r: (r["liked_delta"], r["collected_delta"], r["comment_delta"]), reverse=True)
+        summary = {
+            "posts_total": len(posts), "new_today": new_today,
+            "liked_delta": s_liked, "collected_delta": s_coll, "comment_delta": s_comm,
+        }
         prefix = (group.get("message_prefix") if group else "") or ""
         group_name = (group.get("name") if group else "未分组")
 
         await notifier.notify_daily_report(
-            wecom_url=wecom,
-            feishu_url=feishu,
-            rows=posts,
-            group_name=group_name,
-            prefix=prefix,
-            feishu_chat_id=chat,
+            wecom_url=wecom, feishu_url=feishu_wh, rows=rows,
+            group_name=group_name, prefix=prefix, feishu_chat_id=chat,
+            summary=summary,
         )
         sent += 1
 
-    logger.info(f"[daily_report] 共发送 {sent} 份日报（按 user × group 拆分），跳过 {skipped} 桶（无 webhook）")
+    logger.info(f"[daily_report] 发送 {sent} 份（今日增量+排行+汇总），跳过 {skipped} 桶（无推送目标）")
 
 
 def _is_usable(acc: dict) -> bool:
