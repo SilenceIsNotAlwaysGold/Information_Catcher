@@ -1306,6 +1306,24 @@ async def start_scheduler():
         CronTrigger(hour=9, minute=0, timezone="Asia/Shanghai"),
         id="creator_dashboard", replace_existing=True, max_instances=1,
     )
+    # v2: 服务监控 — 每分钟扫一遍 enabled 监控，到 interval 就探活
+    try:
+        from ..routers.toolbox import uptime as _uptime
+        scheduler.add_job(
+            _uptime.run_all_due_checks, "interval", minutes=1,
+            id="uptime_scan", replace_existing=True, max_instances=1,
+        )
+    except Exception as e:
+        logger.warning(f"[scheduler] uptime cron 注册失败: {e}")
+    # v2: 热点雷达 — 每 30 分钟刷新一次所有内置源
+    try:
+        from . import hotnews_fetcher as _hn
+        scheduler.add_job(
+            _hn.refresh_all, "interval", minutes=30,
+            id="hotnews_refresh_all", replace_existing=True, max_instances=1,
+        )
+    except Exception as e:
+        logger.warning(f"[scheduler] hotnews cron 注册失败: {e}")
     scheduler.start()
     logger.info(f"[scheduler] started — interval={interval}min, report={report_time}")
 
