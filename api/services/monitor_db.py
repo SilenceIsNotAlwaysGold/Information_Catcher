@@ -1717,24 +1717,36 @@ async def add_creator(
     user_id: int, platform: str, creator_url: str,
     creator_name: str = "", creator_id: str = "",
 ) -> int:
-    """添加订阅博主。重复 (user, platform, url) 直接 IGNORE 不报错。"""
+    """添加订阅博主。重复 (user, platform, url) 复活 is_active=1（不抛错）。
+
+    注意：delete_creator 是软删（is_active=0），重新订阅同 URL 时如果只 INSERT OR
+    IGNORE 不复活，list_creators 看不到这条（has is_active=1 过滤），但 add_creator
+    返回的 id 又是那条软删的——立即调 /creators/{id}/check 会 404。
+    """
+    url = creator_url.strip()
     async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT OR IGNORE INTO monitor_creators "
             "(user_id, platform, creator_url, creator_name, creator_id, is_active) "
             "VALUES (?,?,?,?,?,1)",
-            (user_id, platform, creator_url.strip(), creator_name, creator_id),
+            (user_id, platform, url, creator_name, creator_id),
         )
-        await db.commit()
         if cur.lastrowid:
+            await db.commit()
             return cur.lastrowid
-        # 重复 → 取已存在的 id
+        # 重复 → 拿到原 id，并把 is_active 复活回 1（之前可能被软删了）
         cur = await db.execute(
             "SELECT id FROM monitor_creators WHERE user_id=? AND platform=? AND creator_url=?",
-            (user_id, platform, creator_url.strip()),
+            (user_id, platform, url),
         )
         row = await cur.fetchone()
-        return row[0] if row else 0
+        cid = row[0] if row else 0
+        if cid:
+            await db.execute(
+                "UPDATE monitor_creators SET is_active=1 WHERE id=?", (cid,),
+            )
+        await db.commit()
+        return cid
 
 
 async def list_creators(user_id: Optional[int] = None) -> List[Dict]:
