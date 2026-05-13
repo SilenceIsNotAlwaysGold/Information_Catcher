@@ -142,6 +142,9 @@ export type AiModelOption = {
   provider_name: string;
   is_default: number;
   extra_config: Record<string, any>;
+  supports_vision?: number;
+  price_per_call?: number;
+  feature_pricing?: Record<string, number>;
 };
 export type AiModelsResp = {
   models: AiModelOption[];

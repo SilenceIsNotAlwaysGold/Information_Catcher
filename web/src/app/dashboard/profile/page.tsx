@@ -15,6 +15,7 @@ import { FeishuBindingCard } from "@/components/FeishuBindingCard";
 import { PlanUsageCard } from "@/components/PlanUsageCard";
 import { FeishuPushToggle } from "@/components/FeishuPushToggle";
 import { AiPreferencesCard } from "@/components/AiPreferencesCard";
+import { BillingCard } from "@/components/BillingCard";
 // v2: 自带 AI 渠道下线（AI 全走平台统一渠道，按点数计费）—— MyAiModelsCard 已移除
 
 const API = (path: string) => `/api/monitor${path}`;
@@ -464,7 +465,8 @@ export default function MonitorSettingsPage() {
         </CardBody>
       </Card>
 
-      {/* v2: 自带 AI 渠道已下线 —— AI 全走平台统一渠道，按点数计费 */}
+      {/* v2: AI 点数余额（所有 AI 功能按点数计费，走平台统一渠道）*/}
+      <BillingCard />
 
       {/* P15: AI 模型偏好（用户级） */}
       <AiPreferencesCard token={token} />

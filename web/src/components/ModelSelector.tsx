@@ -40,9 +40,24 @@ export function ModelSelector({ usage, value, onChange, label, className }: Prop
           const tags: string[] = [];
           if (m.id === preferred) tags.push("★ 我的偏好");
           if (m.is_default) tags.push("系统默认");
+          // 单价标注：基础价 + 该 usage 常用 feature 的价（若配了）
+          const price = typeof m.price_per_call === "number" ? m.price_per_call : undefined;
+          const fp = m.feature_pricing || {};
+          const featPrice =
+            usage === "image"
+              ? (fp.image ?? fp.product_image ?? undefined)
+              : (fp.ocr ?? fp.text_rewrite ?? undefined);
+          let priceStr = "";
+          if (price !== undefined) {
+            priceStr = ` — ${price.toFixed(2)}点/次`;
+            if (featPrice !== undefined && featPrice !== price) {
+              priceStr += `（部分功能 ${Number(featPrice).toFixed(2)}点）`;
+            }
+          }
           return (
             <option key={m.id} value={m.id}>
               {m.display_name} · {m.provider_name}
+              {priceStr}
               {tags.length ? `  [${tags.join(" / ")}]` : ""}
             </option>
           );

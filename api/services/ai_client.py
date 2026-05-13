@@ -698,8 +698,18 @@ async def list_user_visible_models(
     allowed = _parse_allowed_models(user, usage_type) if user and not is_admin else None
     out: List[Dict[str, Any]] = []
     for r in rows:
-        if is_admin or not user or allowed is None or r["id"] in allowed:
-            out.append(r)
+        if not (is_admin or not user or allowed is None or r["id"] in allowed):
+            continue
+        # 解析 JSON 字段供前端直接用
+        try:
+            r["feature_pricing"] = json.loads(r.get("feature_pricing") or "{}")
+        except Exception:
+            r["feature_pricing"] = {}
+        try:
+            r["price_per_call"] = float(r.get("price_per_call") or 1)
+        except Exception:
+            r["price_per_call"] = 1.0
+        out.append(r)
     return out
 
 
