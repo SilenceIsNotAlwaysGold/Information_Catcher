@@ -233,7 +233,14 @@ async def import_posts_from_creator(
     skipped = 0
     sample_titles = []
     prof = res.get("profile") or {}
-    author_name = prof.get("creator_name") or ""
+    author_name = (prof.get("creator_name") or "").strip()
+    # 兜底：扩展偶尔把博主名抓成当前登录用户（__INITIAL_STATE__ 结构差异）。
+    # 用 URL 里的 user_id 算个稳定标识，避免写一个错的名字。
+    import re as _re
+    _m = _re.search(r"/user/profile/([0-9a-fA-F]+)", url)
+    url_uid = _m.group(1) if _m else ""
+    if not author_name and url_uid:
+        author_name = f"小红书用户 {url_uid[-8:]}"
     for p in posts:
         pid = (p.get("post_id") or "").strip()
         if not pid:

@@ -768,7 +768,11 @@ function extractXhsCreatorFromSsr(state) {
     if (it && it.type) interMap[String(it.type).toLowerCase()] = it.count;
   }
   out.profile = {
-    creator_name: basic.nickname || state.nickname || "",
+    // 只用 userPageData.basicInfo.nickname —— 那是页面博主本身。
+    // 删掉 `|| state.nickname` 兜底：__INITIAL_STATE__.user 里如果没 basicInfo，
+    // state.nickname 往往是【当前登录用户】的昵称，会把博主名抓成"我自己"。
+    // 拿不到就留空，让 background.js 的 DOM 兜底（og:title「XXX 的小红书」）接管。
+    creator_name: basic.nickname || "",
     avatar_url: basic.imageb || basic.images?.[0] || basic.avatar || state.imageb || "",
     followers_count: parseCount(interMap.fans || basic.fans),
     following_count: parseCount(interMap.follows || basic.follows),
