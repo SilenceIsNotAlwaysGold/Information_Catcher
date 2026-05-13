@@ -9,9 +9,10 @@
 """
 from fastapi import APIRouter
 
-from . import comic, travel, novel
+from . import comic, travel, novel, ppt
 
 router = APIRouter()
 router.include_router(comic.router)
 router.include_router(travel.router)
 router.include_router(novel.router)
+router.include_router(ppt.router)

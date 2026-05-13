@@ -44,6 +44,7 @@ DEFAULT_FEATURE_PRICE: Dict[str, str] = {
     "novel_chapter": "1.0",     # AI 小说：生成一章
     "novel_outline": "0.5",     # AI 小说：生成大纲/分卷
     "travel_plan": "0.5",       # AI 旅游攻略
+    "ppt_outline": "1.0",       # AI PPT：一次大纲（含 N 页内容，是个大调用）
 }
 
 

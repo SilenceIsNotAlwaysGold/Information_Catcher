@@ -756,6 +756,25 @@ CREATE TABLE IF NOT EXISTS hotnews_items (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_hotnews_unique ON hotnews_items(source, url);
 CREATE INDEX IF NOT EXISTS idx_hotnews_category ON hotnews_items(category, fetched_at DESC);
+
+-- ── AI PPT（v2 板块 2）─────────────────────────────────────────────────────
+-- 输入主题 + 目标页数 → AI 生成大纲 JSON（每页标题+要点）→ python-pptx 渲染 .pptx 文件。
+CREATE TABLE IF NOT EXISTS ppt_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT DEFAULT '',
+    topic TEXT NOT NULL,                  -- 用户输入的主题/简介
+    target_pages INTEGER DEFAULT 10,
+    style_hint TEXT DEFAULT '',           -- 风格："商务严肃 / 极简 / 活泼"
+    audience TEXT DEFAULT '',             -- 目标观众："产品评审会 / 学生 / 投资人"
+    plan_json TEXT DEFAULT '{}',          -- AI 大纲 JSON（pages: [{title, bullets}]）
+    pptx_url TEXT DEFAULT '',             -- 渲染后的 .pptx 下载链接（本地存储 / 七牛）
+    status TEXT DEFAULT 'planning',       -- planning(写大纲) | outlined(大纲就绪) | rendering | done
+    text_model_id INTEGER,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_ppt_projects_user ON ppt_projects(user_id, created_at DESC);
 """
 
 
