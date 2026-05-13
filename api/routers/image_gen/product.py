@@ -246,6 +246,11 @@ async def generate_image(
                     elif qerr:
                         logger.warning(f"[image_gen] qiniu sync upload failed: {qerr}")
 
+                # 兜底：上游只返 url 不返 b64 时（如 134.175.71.62/v1 这种），
+                # 直接把上游 url 当 qiniu_url 存进历史，让前端 HistoryGrid 能显示
+                if not local_url and not qiniu_url_sync and img.get("url"):
+                    qiniu_url_sync = img["url"]
+
                 if local_url and qiniu_ready:
                     upload_status = "pending"
                 elif qiniu_url_sync:

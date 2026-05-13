@@ -220,6 +220,9 @@ async def comic_style_generate(
                 img["url"] = qurl
             elif qerr:
                 logger.warning(f"[comic_style] qiniu sync upload failed: {qerr}")
+        # 上游只给 url 不给 b64（某些渠道，如 134.175.71.62/v1）→ 直接把 url 当 qiniu_url 存
+        if not local_url and not qiniu_url_sync and img.get("url"):
+            qiniu_url_sync = img["url"]
         if local_url and qiniu_ready:
             upload_status = "pending"
         elif qiniu_url_sync:
