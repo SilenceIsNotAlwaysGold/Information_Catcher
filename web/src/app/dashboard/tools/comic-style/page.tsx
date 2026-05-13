@@ -17,12 +17,22 @@ import { Chip } from "@nextui-org/chip";
 import { Wand2, Upload, X, Download, ImageIcon, Sparkles } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
-import { IMAGE_API, SIZE_OPTIONS } from "@/components/product-image/utils";
+import { IMAGE_API, SIZE_OPTIONS, proxyUrl } from "@/components/product-image/utils";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ImagePreviewModal } from "@/components/product-image/ImagePreviewModal";
 
 type Preset = { key: string; label: string; desc: string };
-type GenItem = { b64: string };
+type GenItem = { b64?: string; url?: string; id?: number };
+type HistoryItem = {
+  batch_id: string;
+  style_label: string;
+  custom_prompt: string;
+  size: string;
+  model: string;
+  created_at: string;
+  count: number;
+  images: { id: number; url: string }[];
+};
 
 const CUSTOM_KEY = "custom";
 
@@ -54,11 +64,24 @@ export default function ComicStylePage() {
   const [items, setItems] = useState<GenItem[]>([]);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
 
+  // 历史
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const loadHistory = async () => {
+    try {
+      const r = await fetch(IMAGE_API("/comic-style/history?limit=20"), { headers });
+      if (r.ok) {
+        const d = await r.json();
+        setHistory(d.history || []);
+      }
+    } catch {}
+  };
+
   useEffect(() => {
     fetch(IMAGE_API("/comic-style/presets"), { headers })
       .then((r) => r.json())
       .then((d) => setPresets(d.presets || []))
       .catch(() => {});
+    loadHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -106,8 +129,20 @@ export default function ComicStylePage() {
       if (!r.ok) { toastErr(d.detail || d.error || `HTTP ${r.status}`); return; }
       setItems(d.images || []);
       toastOk(`已生成 ${d.count} 张`);
+      loadHistory();  // 刷新历史区
     } catch (e: any) { toastErr(`生成失败：${e?.message || e}`); }
     finally { setGenerating(false); }
+  };
+
+  const downloadByUrl = async (url: string, fname: string) => {
+    try {
+      const r = await fetch(proxyUrl(url));
+      const blob = await r.blob();
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = u; a.download = fname; a.click();
+      setTimeout(() => URL.revokeObjectURL(u), 1000);
+    } catch (e: any) { toastErr(`下载失败：${e?.message || e}`); }
   };
 
   // 下载单张：把 b64 转成 blob 触发浏览器下载
@@ -331,6 +366,68 @@ export default function ComicStylePage() {
                 })}
               </div>
             )}
+          </CardBody>
+        </Card>
+      )}
+
+      {/* 历史 */}
+      {history.length > 0 && (
+        <Card>
+          <CardHeader className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <ImageIcon size={16} />
+              <span className="font-medium">历史记录</span>
+              <Chip size="sm" variant="flat">{history.length} 套</Chip>
+            </div>
+            <Button size="sm" variant="light" onPress={loadHistory}>刷新</Button>
+          </CardHeader>
+          <CardBody className="space-y-3">
+            {history.map((h) => (
+              <div key={h.batch_id} className="border border-default-200 rounded-md p-2">
+                <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+                  <div className="flex items-center gap-2 text-xs">
+                    <Chip size="sm" variant="flat" color="secondary">{h.style_label}</Chip>
+                    <span className="text-default-500">{h.count} 张</span>
+                    <span className="text-default-400">{h.created_at?.slice(0, 16)}</span>
+                    {h.size && <span className="text-default-400">· {h.size}</span>}
+                  </div>
+                  <Button size="sm" variant="flat"
+                    startContent={<Download size={12} />}
+                    isDisabled={h.images.every((i) => !i.url)}
+                    onPress={async () => {
+                      for (let i = 0; i < h.images.length; i++) {
+                        const u = h.images[i].url;
+                        if (!u) continue;
+                        const ext = (u.split(".").pop()?.split("?")[0] || "png").slice(0, 5);
+                        await downloadByUrl(u, `comic-${h.batch_id.replace(":", "-")}-${i + 1}.${ext}`);
+                        await new Promise((r) => setTimeout(r, 300));
+                      }
+                    }}>
+                    下载本套
+                  </Button>
+                </div>
+                {h.custom_prompt && (
+                  <p className="text-[11px] text-default-500 mb-1 line-clamp-1">
+                    补充：{h.custom_prompt}
+                  </p>
+                )}
+                <div className="flex gap-2 overflow-x-auto">
+                  {h.images.map((it) => (
+                    <button key={it.id} type="button"
+                      className="shrink-0 w-24 h-24 rounded overflow-hidden bg-default-100"
+                      onClick={() => it.url && setPreviewSrc(it.url)}>
+                      {it.url ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={proxyUrl(it.url)} alt={`#${it.id}`}
+                          className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-[10px] text-default-400">无图</div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
           </CardBody>
         </Card>
       )}

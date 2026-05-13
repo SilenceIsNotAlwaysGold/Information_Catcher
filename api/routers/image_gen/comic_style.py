@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from typing import List, Optional
 
 import httpx
@@ -18,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..auth import get_current_user
-from ...services import ai_client, quota_service
+from ...services import ai_client, local_storage, monitor_db, qiniu_uploader, quota_service
 from ._common import DEFAULT_SIZE, call_edits
 
 logger = logging.getLogger(__name__)
@@ -193,10 +194,67 @@ async def comic_style_generate(
     if not images:
         raise HTTPException(502, "上游未返回图片")
 
-    # 6. 记 AI usage（计费统计；不入 image_gen_history）
+    # 6. 入历史（存储到本地 / 七牛 + 写 image_gen_history）
+    #    batch_id 用 comic_style:{ts} 让前端能筛出本工具的历史
+    user_id = int(current_user["id"])
+    local_ready = await local_storage.is_configured()
+    qiniu_ready = await qiniu_uploader.is_configured()
+    batch_id = f"comic_style:{int(time.time())}"
+    style_label = (COMIC_PRESETS.get(req.style) or {}).get("label", "自定义")
+    saved: List[dict] = []
+    for idx, img in enumerate(images):
+        b64 = img.get("b64") or ""
+        local_url = ""
+        qiniu_url_sync = ""
+        if local_ready and b64:
+            lurl, lerr = await local_storage.upload_b64(b64, user_id=user_id)
+            if lurl:
+                local_url = lurl
+                img["url"] = lurl
+            elif lerr:
+                logger.warning(f"[comic_style] local write failed: {lerr}")
+        if not local_url and qiniu_ready and b64:
+            qurl, qerr = await qiniu_uploader.upload_b64(b64, user_id=user_id)
+            if qurl:
+                qiniu_url_sync = qurl
+                img["url"] = qurl
+            elif qerr:
+                logger.warning(f"[comic_style] qiniu sync upload failed: {qerr}")
+        if local_url and qiniu_ready:
+            upload_status = "pending"
+        elif qiniu_url_sync:
+            upload_status = "uploaded"
+        elif local_url:
+            upload_status = "skipped"
+        else:
+            upload_status = "failed"
+        try:
+            rid = await monitor_db.add_image_history(
+                user_id=user_id,
+                prompt=prompt[:1000],
+                size=size,
+                model=model,
+                set_idx=1,
+                in_set_idx=idx + 1,
+                local_url=local_url,
+                qiniu_url=qiniu_url_sync or local_url,
+                upload_status=upload_status,
+                generated_title=style_label,   # 用风格名作为标题方便历史区分
+                generated_body=req.custom_prompt or "",
+                batch_id=batch_id,
+                source_post_url="",
+                source_post_title="",
+                used_reference=True,            # 漫画风永远基于参考图
+            )
+            saved.append({"id": rid, **img})
+        except Exception as e:
+            logger.warning(f"[comic_style] add_image_history failed: {e}")
+            saved.append(img)
+
+    # 7. 记 AI usage（计费统计）
     try:
         await ai_client.log_usage(
-            user_id=int(current_user["id"]),
+            user_id=user_id,
             model_row_id=model_row_id,
             model_id_str=model,
             usage_type="image",
@@ -210,6 +268,48 @@ async def comic_style_generate(
     return {
         "ok": True,
         "style": req.style,
+        "style_label": style_label,
         "count": len(images),
-        "images": images,  # [{b64: "..."}, ...]
+        "batch_id": batch_id,
+        "images": saved,  # [{id, b64, url?}, ...]
     }
+
+
+@router.get("/comic-style/history", summary="漫画风历史记录（最近 50 套）")
+async def comic_style_history(
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """列出当前用户的漫画风生成历史（按 batch_id 以 comic_style: 开头筛）。
+    每条 batch 聚合成一行，含张数 + 风格 + 时间 + 缩略图列表。"""
+    user_id = int(current_user["id"])
+    rows = await monitor_db.list_image_history(user_id=user_id, limit=max(limit * 4, 100))
+    # 按 batch_id 分组
+    groups: dict = {}
+    for r in rows:
+        bid = (r.get("batch_id") or "")
+        if not bid.startswith("comic_style:"):
+            continue
+        groups.setdefault(bid, []).append(r)
+    out = []
+    for bid, items in groups.items():
+        items.sort(key=lambda x: (x.get("in_set_idx") or 0))
+        first = items[0]
+        out.append({
+            "batch_id": bid,
+            "style_label": first.get("generated_title") or "",
+            "custom_prompt": first.get("generated_body") or "",
+            "size": first.get("size") or "",
+            "model": first.get("model") or "",
+            "created_at": first.get("created_at") or "",
+            "count": len(items),
+            "images": [
+                {
+                    "id": it.get("id"),
+                    "url": it.get("qiniu_url") or it.get("local_url") or "",
+                }
+                for it in items
+            ],
+        })
+    out.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return {"history": out[:limit]}
