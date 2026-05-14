@@ -825,6 +825,9 @@ async def check_creator(
     # 入库 + 计真正"新"的帖子
     # add_post 返回 (id, is_new)，is_new=True 表示该 note_id 在本 user×platform
     # 下从未入库过 → 这才是真正的新增，对其推送 / 累计 unread。
+    # 首次同步：last_post_id 空，所有历史作品都会被 is_new=True 命中，但它们不是真"新发"
+    # → is_first_sync=True 时只入库不推送（避免博主有 30 篇历史→刷屏告警）
+    is_first_sync = not last_post_id
     new_posts_data = []
     newest = last_post_id
     for p in posts:
@@ -861,7 +864,12 @@ async def check_creator(
         creator_desc=prof.get("desc", ""),
     )
     await db.mark_creator_status(creator_id, "ok")
-    if new_count:
+    if new_count and is_first_sync:
+        # 首次同步：历史作品入库但不推送（避免 N 篇历史一次性刷屏）
+        logger.info(
+            f"[creator] {creator_id} 首次同步 {new_count} 篇历史作品，已入库不推送"
+        )
+    if new_count and not is_first_sync:
         await db.add_creator_unread(creator_id, new_count)
         # 与 scheduler.run_creator_check 一致：有新帖 → per-feature 推送 + lazy 建群
         push_on = int(creator.get("push_enabled") if creator.get("push_enabled") is not None else 1)

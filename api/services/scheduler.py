@@ -671,6 +671,7 @@ async def run_creator_check():
 
         posts = res.get("posts") or []
         last_post_id = creator.get("last_post_id") or ""
+        is_first_sync = not last_post_id  # 首次同步：历史作品入库但不推送
 
         # 抓回 0 帖：如果之前已经抓到过，可能是用户没在该浏览器登录该平台
         if not posts and last_post_id:
@@ -724,7 +725,12 @@ async def run_creator_check():
         )
         await db.cursor_mark_done("creator", ck, cursor=newest or "")
         await db.mark_creator_status(creator["id"], "ok")
-        if added:
+        if added and is_first_sync:
+            logger.info(
+                f"[creator_check] {creator.get('creator_name') or creator['creator_url']} "
+                f"首次同步 {added} 篇历史作品，已入库不推送"
+            )
+        if added and not is_first_sync:
             await db.add_creator_unread(creator["id"], added)
             logger.info(
                 f"[creator_check] {creator.get('creator_name') or creator['creator_url']} +{added} 新帖"
