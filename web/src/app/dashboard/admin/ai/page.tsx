@@ -61,6 +61,7 @@ type Model = {
   sort_order: number;
   note: string;
   max_concurrent?: number;  // P15.8
+  supports_vision?: number; // 1 = 支持图片输入（OCR / 看图）
 };
 
 const usageLabel = (u: string) => (u === "image" ? "图像" : "文本");
@@ -352,6 +353,18 @@ function ModelsCard({
   const [extraJson, setExtraJson] = useState("{}");
   const [note, setNote] = useState("");
   const [maxConcurrent, setMaxConcurrent] = useState<number>(0);  // P15.8
+  const [supportsVision, setSupportsVision] = useState(false);    // OCR 用途必须开
+
+  // 智能默认：model_id 含已知视觉关键词时自动勾上「支持视觉」
+  // 已知支持 vision 的模型族（OpenAI / Anthropic / Google / 阿里 / 各家 5.4+ 多模态）
+  const VISION_KEYWORDS = [
+    "4o", "4.1", "5.4", "5.5", "5.6",
+    "vision", "vl-", "qwen-vl", "qwen2-vl",
+    "claude-3", "claude-haiku-4", "claude-sonnet-4", "claude-opus-4",
+    "gemini", "haiku", "sonnet", "opus",
+  ];
+  const guessVision = (m: string) =>
+    VISION_KEYWORDS.some((kw) => m.toLowerCase().includes(kw));
 
   const filtered = models.filter((m) => m.usage_type === usageType);
 
@@ -363,6 +376,7 @@ function ModelsCard({
     setExtraJson(usageType === "image" ? `{"size":"1024x1024"}` : "{}");
     setNote("");
     setMaxConcurrent(2);  // 新模型默认并发 2，避免不小心 0=不限被打爆
+    setSupportsVision(false);
     editor.onOpen();
   };
   const openEdit = (m: Model) => {
@@ -375,7 +389,14 @@ function ModelsCard({
     setExtraJson(m.extra_config || "{}");
     setNote(m.note || "");
     setMaxConcurrent(Number(m.max_concurrent || 0));
+    setSupportsVision(!!(m as any).supports_vision);
     editor.onOpen();
+  };
+
+  // model_id 改变时，新增模式下自动勾上「支持视觉」（只在新增、用户没手动改过时）
+  const onModelIdChange = (v: string) => {
+    setModelId(v);
+    if (!editing && guessVision(v) && !supportsVision) setSupportsVision(true);
   };
 
   const save = async () => {
@@ -398,6 +419,7 @@ function ModelsCard({
       extra_config: extra,
       note,
       max_concurrent: Math.max(0, Number(maxConcurrent || 0)),
+      supports_vision: supportsVision,
     };
     if (!editing) {
       const r = await fetch(API(`/admin/ai/models`), {
@@ -479,7 +501,12 @@ function ModelsCard({
                 <TableRow key={m.id}>
                   <TableCell>
                     <div className="flex flex-col">
-                      <span className="font-medium">{m.display_name}</span>
+                      <div className="flex items-center gap-1">
+                        <span className="font-medium">{m.display_name}</span>
+                        {(m as any).supports_vision ? (
+                          <Chip size="sm" color="primary" variant="flat" className="h-4 text-[10px] px-1">视觉</Chip>
+                        ) : null}
+                      </div>
                       {m.note && <span className="text-xs text-default-400">{m.note}</span>}
                     </div>
                   </TableCell>
@@ -555,7 +582,7 @@ function ModelsCard({
             </div>
             <Input label="API model_id（调用时传给 API）" labelPlacement="outside"
               placeholder={usageType === "image" ? "gpt-image-1 / dall-e-3 / flux-pro" : "gpt-4o-mini / deepseek-chat"}
-              value={modelId} onValueChange={setModelId} />
+              value={modelId} onValueChange={onModelIdChange} />
             <Input label="显示名（用户看到的）" labelPlacement="outside"
               placeholder={usageType === "image" ? "DALL·E 3 · 高清" : "GPT-4o Mini · 经济"}
               value={displayName} onValueChange={setDisplayName} />
@@ -567,6 +594,20 @@ function ModelsCard({
               <span className="text-sm">设为该 usage_type 的默认（未选择时用它）</span>
               <Switch isSelected={isDefault} onValueChange={setIsDefault} size="sm" />
             </div>
+            {usageType === "text" && (
+              <div className="flex items-start justify-between gap-3 p-2 rounded-md bg-default-50 border border-default-200">
+                <div className="flex-1">
+                  <div className="text-sm">支持视觉（OCR / 看图）</div>
+                  <div className="text-[11px] text-default-500 mt-0.5">
+                    打开后该模型会出现在「文案换背景」OCR 下拉里。GPT-4o / 5.4 / Claude Haiku-4 / Gemini / Qwen-VL 系列请勾上。
+                    {!editing && guessVision(modelId) && (
+                      <span className="ml-1 text-primary">✓ 检测到视觉模型，已自动勾选</span>
+                    )}
+                  </div>
+                </div>
+                <Switch isSelected={supportsVision} onValueChange={setSupportsVision} size="sm" />
+              </div>
+            )}
             <Input
               type="number" min={0} max={1000}
               label="并发上限"

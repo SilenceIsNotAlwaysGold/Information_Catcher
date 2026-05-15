@@ -144,6 +144,7 @@ class ModelIn(BaseModel):
     sort_order: int = 0
     note: str = ""
     max_concurrent: int = 0   # P15.8: 0 = 不限
+    supports_vision: bool = False   # 是否支持图片输入（OCR / 看图理解）
 
 
 class ModelUpdate(BaseModel):
@@ -159,6 +160,7 @@ class ModelUpdate(BaseModel):
     sort_order: Optional[int] = None
     note: Optional[str] = None
     max_concurrent: Optional[int] = None
+    supports_vision: Optional[bool] = None
 
 
 @router.get("/admin/ai/models", summary="模型列表（按 usage_type 可选过滤）")
@@ -211,14 +213,15 @@ async def create_model(body: ModelIn, current_user: dict = Depends(get_current_u
             cur = await db.execute(
                 "INSERT INTO ai_models "
                 "(provider_id, model_id, display_name, usage_type, published, is_default, "
-                " extra_config, sort_order, note, max_concurrent) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                " extra_config, sort_order, note, max_concurrent, supports_vision) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     body.provider_id, body.model_id, body.display_name, body.usage_type,
                     1 if body.published else 0, 1 if body.is_default else 0,
                     json.dumps(body.extra_config or {}, ensure_ascii=False),
                     int(body.sort_order or 0), body.note or "",
                     max(0, int(body.max_concurrent or 0)),
+                    1 if body.supports_vision else 0,
                 ),
             )
         except Exception as e:
@@ -257,6 +260,8 @@ async def update_model(
     if body.note is not None: fields.append("note=?"); values.append(body.note)
     if body.max_concurrent is not None:
         fields.append("max_concurrent=?"); values.append(max(0, int(body.max_concurrent)))
+    if body.supports_vision is not None:
+        fields.append("supports_vision=?"); values.append(1 if body.supports_vision else 0)
     if not fields:
         return {"ok": True, "changed": 0}
     values.append(mid)
