@@ -1102,6 +1102,16 @@ async def _migrate(db):
         )
     except Exception as e:
         logger.warning(f"[_migrate] idx_trending_note_user: {e}")
+    # ai_models 防重复：(provider_id, model_id) 在 published=1 时强制唯一。
+    # 用 partial UNIQUE INDEX：下架的旧记录可以保留多条历史，上架的不能重复。
+    # admin UI 重复添加时会触发 IntegrityError，由 admin_ai create/update 友好捕获。
+    try:
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_models_provider_model_pub "
+            "ON ai_models(provider_id, model_id) WHERE published=1"
+        )
+    except Exception as e:
+        logger.warning(f"[_migrate] idx_ai_models_provider_model_pub: {e}")
 
 
 async def _seed_default_groups(db):

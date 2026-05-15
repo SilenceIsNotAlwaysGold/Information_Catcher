@@ -191,6 +191,12 @@ async def _enforce_single_default(db, model_id: int, usage_type: str):
     )
 
 
+def _is_unique_violation(e: Exception) -> bool:
+    """跨 sqlite3.IntegrityError / asyncpg.UniqueViolationError 识别"""
+    s = str(e).lower()
+    return ("unique" in s or "duplicate" in s) and ("constraint" in s or "violation" in s or "key" in s)
+
+
 @router.post("/admin/ai/models", summary="新增模型")
 async def create_model(body: ModelIn, current_user: dict = Depends(get_current_user)):
     _require_admin(current_user)
@@ -201,19 +207,31 @@ async def create_model(body: ModelIn, current_user: dict = Depends(get_current_u
         ) as c:
             if not await c.fetchone():
                 raise HTTPException(status_code=400, detail="provider_id 不存在")
-        cur = await db.execute(
-            "INSERT INTO ai_models "
-            "(provider_id, model_id, display_name, usage_type, published, is_default, "
-            " extra_config, sort_order, note, max_concurrent) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (
-                body.provider_id, body.model_id, body.display_name, body.usage_type,
-                1 if body.published else 0, 1 if body.is_default else 0,
-                json.dumps(body.extra_config or {}, ensure_ascii=False),
-                int(body.sort_order or 0), body.note or "",
-                max(0, int(body.max_concurrent or 0)),
-            ),
-        )
+        try:
+            cur = await db.execute(
+                "INSERT INTO ai_models "
+                "(provider_id, model_id, display_name, usage_type, published, is_default, "
+                " extra_config, sort_order, note, max_concurrent) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    body.provider_id, body.model_id, body.display_name, body.usage_type,
+                    1 if body.published else 0, 1 if body.is_default else 0,
+                    json.dumps(body.extra_config or {}, ensure_ascii=False),
+                    int(body.sort_order or 0), body.note or "",
+                    max(0, int(body.max_concurrent or 0)),
+                ),
+            )
+        except Exception as e:
+            if _is_unique_violation(e):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"该 provider 下已存在已上架的同名模型 model_id={body.model_id!r}，"
+                        f"请先把旧的下架（published=0），或直接编辑那条；"
+                        f"避免下拉里出现重名让用户选错。"
+                    ),
+                )
+            raise
         new_id = cur.lastrowid
         if body.is_default:
             await _enforce_single_default(db, new_id, body.usage_type)
@@ -243,7 +261,18 @@ async def update_model(
         return {"ok": True, "changed": 0}
     values.append(mid)
     async with _db.connect(monitor_db.DB_PATH) as db:
-        await db.execute(f"UPDATE ai_models SET {', '.join(fields)} WHERE id=?", values)
+        try:
+            await db.execute(f"UPDATE ai_models SET {', '.join(fields)} WHERE id=?", values)
+        except Exception as e:
+            if _is_unique_violation(e):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "改完后该 provider 下会出现两条已上架的同名模型 "
+                        f"model_id={body.model_id!r}，请先把旧的下架。"
+                    ),
+                )
+            raise
         if body.is_default:
             # 解析 usage_type：要么用 body 传的，要么读已有
             ut = body.usage_type
