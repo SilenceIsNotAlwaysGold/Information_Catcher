@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useMe } from "@/lib/useApi";
 import { toastOk, toastErr } from "@/lib/toast";
+import { PageHeader, BetaBadge } from "@/components/ui";
 
 import {
   IMAGE_API, SIZE_OPTIONS, proxyUrl,
@@ -245,28 +246,14 @@ export default function ProductImagePage() {
     it.b64 ? `data:image/png;base64,${it.b64}` : proxyUrl(it.url || "");
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6 p-4 md:p-6">
-      {/* 标题 */}
-      <div className="flex items-start gap-3">
-        <div className="rounded-xl bg-primary/10 text-primary p-3">
-          <Wand2 size={24} />
-        </div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold text-foreground flex items-center gap-2">
-            商品图（自创）
-            <Chip size="sm" variant="flat" color="secondary">Beta</Chip>
-          </h1>
-          <p className="text-sm text-default-500 mt-1">
-            填商品信息 → AI 生成 Prompt → 选 1-4 张数量直接生图。可选上传参考图。
-          </p>
-        </div>
-        <div className="flex items-center gap-3 self-center">
-          <a href="/dashboard/tools/product-remix"
-            className="text-sm text-primary hover:underline">整体仿写 →</a>
-          <a href="/dashboard/tools/text-remix"
-            className="text-sm text-primary hover:underline">文案换背景 →</a>
-        </div>
-      </div>
+    <div className="max-w-page mx-auto space-y-6 p-4 md:p-6">
+      <PageHeader
+        section="studio"
+        icon={Wand2}
+        title="AI 生图"
+        badge={<BetaBadge />}
+        hint="填商品 / 场景信息 → AI 生成 prompt → 一次出 1-4 张。可上传参考图（结构 / 风格保留）。"
+      />
 
       <ConfigStatusBar
         cfg={cfg}

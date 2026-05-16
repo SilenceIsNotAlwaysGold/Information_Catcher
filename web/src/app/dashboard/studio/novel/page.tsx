@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
+import { PageHeader, BetaBadge } from "@/components/ui";
 
 const API = (p: string) => `/api/studio/novel${p}`;
 
@@ -219,19 +220,14 @@ export default function NovelStudioPage() {
   };
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
-      <div className="flex items-start gap-3">
-        <div className="rounded-lg bg-primary/10 text-primary p-3"><ScrollText size={24} /></div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            AI 小说工坊 <Chip size="sm" variant="flat" color="primary">Beta</Chip>
-          </h1>
-          <p className="text-sm text-default-500 mt-1">
-            题材 + premise → AI 生大纲 → 加角色 → 一章一章生（基于大纲 + 前章摘要保持连贯）。
-            扣 <b>novel_outline</b>（大纲/总结）和 <b>novel_chapter</b>（一章正文）点。
-          </p>
-        </div>
-      </div>
+    <div className="p-6 space-y-6 max-w-page mx-auto">
+      <PageHeader
+        section="studio"
+        icon={ScrollText}
+        title="AI 小说工坊"
+        badge={<BetaBadge />}
+        hint="题材 + premise → AI 生大纲 → 加角色 → 一章一章生（基于大纲 + 前章摘要保持连贯）。扣 novel_outline / novel_chapter 点。"
+      />
 
       {/* 新建项目 */}
       <Card>

@@ -14,6 +14,7 @@ import { Tabs, Tab } from "@nextui-org/tabs";
 import { Newspaper, RefreshCw, ExternalLink, Flame } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
+import { PageHeader } from "@/components/ui";
 
 const API = (p: string) => `/api/hotnews${p}`;
 
@@ -88,19 +89,14 @@ export default function HotNewsPage() {
   }, [items]);
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
-      <div className="flex items-start gap-3">
-        <div className="rounded-lg bg-danger/10 text-danger p-3"><Flame size={24} /></div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            热点雷达 <Chip size="sm" variant="flat" color="danger">骨架</Chip>
-          </h1>
-          <p className="text-sm text-default-500 mt-1">
-            聚合各渠道热点：先接 Hacker News + GitHub Trending；后续可加 36氪/知乎热榜/微博/V2EX。
-            <b className="text-default-700">不耗 AI 点数。</b>
-          </p>
-        </div>
-      </div>
+    <div className="p-6 space-y-6 max-w-page mx-auto">
+      <PageHeader
+        section="hotnews"
+        icon={Flame}
+        title="热点雷达"
+        hint="聚合 9 个源：HN / GitHub Trending / V2EX / 微博 / B 站 / 知乎 / Solidot / 百度 / 少数派 / IT 之家。不耗 AI 点数。"
+      />
+
 
       <Tabs selectedKey={category}
         onSelectionChange={(k) => setCategory(String(k))}

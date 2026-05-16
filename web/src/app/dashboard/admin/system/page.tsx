@@ -20,6 +20,7 @@ import { Save, Settings, AlertCircle } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useMe } from "@/lib/useApi";
 import { useAdminSettings } from "@/lib/useAdminSettings";
+import { PageHeader } from "@/components/ui";
 
 const METRIC_DEFS = [
   { key: "likes",    label: "点赞量告警", desc: "单次检测点赞增量超过阈值时推送", unit: "次" },
@@ -114,16 +115,12 @@ export default function AdminSystemPage() {
     setThresholds((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
 
   return (
-    <div className="p-6 max-w-3xl mx-auto space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-          <Settings size={22} />
-          通用系统配置
-        </h1>
-        <p className="text-sm text-default-500 mt-1">
-          检测频率、全局阈值、存储后端、第三方数据源。所有用户共享。
-        </p>
-      </div>
+    <div className="p-6 max-w-page mx-auto space-y-6">
+      <PageHeader
+        icon={Settings}
+        title="通用系统配置"
+        hint="检测频率、全局阈值、存储后端、第三方数据源。所有用户共享。"
+      />
 
       <Card>
         <CardHeader className="font-semibold">检测频率 & 日报</CardHeader>

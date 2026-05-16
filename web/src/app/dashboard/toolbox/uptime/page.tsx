@@ -16,6 +16,7 @@ import { Switch } from "@nextui-org/switch";
 import { Activity, Plus, Trash2, Play, RefreshCw } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
+import { PageHeader, BetaBadge } from "@/components/ui";
 
 const API = (p: string) => `/api/toolbox/uptime${p}`;
 
@@ -130,19 +131,14 @@ export default function UptimePage() {
   };
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
-      <div className="flex items-start gap-3">
-        <div className="rounded-lg bg-warning/10 text-warning p-3"><Activity size={24} /></div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            服务监控 <Chip size="sm" variant="flat" color="warning">Beta</Chip>
-          </h1>
-          <p className="text-sm text-default-500 mt-1">
-            登记 URL → 立即探活 / 看历史。连续失败达阈值会推飞书群（复用同步通知群）。
-            <b className="text-default-700">不耗 AI 点数。</b>
-          </p>
-        </div>
-      </div>
+    <div className="p-6 space-y-6 max-w-page mx-auto">
+      <PageHeader
+        section="toolbox"
+        icon={Activity}
+        title="服务监控"
+        badge={<BetaBadge />}
+        hint="登记 URL → 立即探活 / 看历史。连续失败达阈值会推飞书群。不耗 AI 点数。"
+      />
 
       {/* 新建 */}
       <Card>

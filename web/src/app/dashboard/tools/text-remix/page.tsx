@@ -19,6 +19,7 @@ import { Spinner } from "@nextui-org/spinner";
 import { Wand2, Link2, Image as ImageIcon, Upload, Trash2, Check, AlertCircle, Download, ZoomIn, ChevronDown, ChevronRight, FileText, Sparkles, Copy } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
+import { PageHeader } from "@/components/ui";
 import { IMAGE_API, proxyUrl } from "@/components/product-image/utils";
 import { ImagePreviewModal } from "@/components/product-image/ImagePreviewModal";
 import { ModelSelector } from "@/components/ModelSelector";
@@ -649,22 +650,14 @@ export default function TextRemixPage() {
   };
 
   return (
-    <div className="p-6 space-y-5 max-w-5xl">
-      {/* 头 */}
-      <div className="flex items-start gap-3">
-        <div className="w-10 h-10 rounded-lg bg-secondary/10 text-secondary flex items-center justify-center">
-          <Wand2 size={24} />
-        </div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            文案换背景
-            <Chip size="sm" variant="flat" color="secondary">MVP</Chip>
-          </h1>
-          <p className="text-sm text-default-500 mt-1">
-            扒原作品图里的文字（OCR） + 用户上传/选择背景图 → AI 把文字按背景风格重绘出新图。
-          </p>
-        </div>
-      </div>
+    <div className="p-6 space-y-6 max-w-page mx-auto">
+      <PageHeader
+        section="remix"
+        icon={Wand2}
+        title="文案换背景"
+        badge={<Chip size="sm" variant="flat" color="secondary">MVP</Chip>}
+        hint="扒原作品图里的文字（OCR） + 用户上传/选择背景图 → AI 把文字按背景风格重绘出新图。"
+      />
 
       {/* 步骤 1：链接 */}
       <Card>

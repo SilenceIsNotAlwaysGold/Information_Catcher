@@ -15,6 +15,7 @@ import { Card, CardBody, CardHeader } from "@nextui-org/card";
 import { Input } from "@nextui-org/input";
 import { Button } from "@nextui-org/button";
 import { Save, LinkIcon, AlertCircle } from "lucide-react";
+import { PageHeader } from "@/components/ui";
 import { useAuth } from "@/contexts/AuthContext";
 import { useMe } from "@/lib/useApi";
 import { useAdminSettings } from "@/lib/useAdminSettings";
@@ -69,16 +70,12 @@ export default function AdminFeishuPage() {
     }, "飞书应用配置已保存");
 
   return (
-    <div className="p-6 max-w-3xl mx-auto space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-          <LinkIcon size={22} className="text-primary" />
-          飞书应用 & OAuth
-        </h1>
-        <p className="text-sm text-default-500 mt-1">
-          企业自建应用凭据。配置完后用户在「个人设置」可一键扫码绑定，系统自动建群 + 多维表格。
-        </p>
-      </div>
+    <div className="p-6 max-w-page mx-auto space-y-6">
+      <PageHeader
+        icon={LinkIcon}
+        title="飞书应用 & OAuth"
+        hint="企业自建应用凭据。配置完后用户在「个人设置」可一键扫码绑定，系统自动建群 + 多维表格。"
+      />
 
       <Card>
         <CardHeader className="font-semibold">应用凭据</CardHeader>

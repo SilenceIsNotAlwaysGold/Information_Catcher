@@ -7,7 +7,8 @@ import { Input } from "@nextui-org/input";
 import { Switch } from "@nextui-org/switch";
 import { Divider } from "@nextui-org/divider";
 import { Tabs, Tab } from "@nextui-org/tabs";
-import { Save } from "lucide-react";
+import { Save, Settings } from "lucide-react";
+import { PageHeader } from "@/components/ui";
 import { useAuth } from "@/contexts/AuthContext";
 import { PromptTemplatesCard } from "@/components/PromptTemplatesCard";
 import { MonitorGroupsCard } from "@/components/MonitorGroupsCard";
@@ -483,8 +484,12 @@ export default function MonitorSettingsPage() {
   // ── 系统配置 tab（仅管理员）：AI、检测间隔、账号管理、商品图 API ──────────
 
   return (
-    <div className="p-6 space-y-6 max-w-2xl">
-      <h1 className="text-2xl font-bold">监控设置</h1>
+    <div className="p-6 space-y-6 max-w-page mx-auto">
+      <PageHeader
+        icon={Settings}
+        title="个人中心"
+        hint="账户、监控阈值、AI 模型偏好、通知 webhook 等设置。"
+      />
 
       <Tabs aria-label="settings sections" selectedKey={activeTab} onSelectionChange={(k) => setActiveTab(String(k))}>
         <Tab key="global" title="全局">

@@ -25,6 +25,7 @@ import {
 import { useAuth } from "@/contexts/AuthContext";
 import { ModelSelector } from "@/components/ModelSelector";
 import { toastOk, toastErr } from "@/lib/toast";
+import { PageHeader, BetaBadge } from "@/components/ui";
 
 const API = (p: string) => `/api/studio/comic${p}`;
 
@@ -248,23 +249,14 @@ export default function ComicStudioPage() {
   };
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
-      {/* 头 */}
-      <div className="flex items-start gap-3">
-        <div className="rounded-lg bg-secondary/10 text-secondary p-3">
-          <BookOpen size={24} />
-        </div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            AI 漫画工坊
-            <Chip size="sm" variant="flat" color="secondary">Beta</Chip>
-          </h1>
-          <p className="text-sm text-default-500 mt-1">
-            对话引导 AI 写故事 → AI 拆分镜 → 配角色卡 → 逐格生图。
-            按 <b>comic_story</b>（写故事 / 拆分镜）和 <b>comic_panel</b>（生一格图）扣点。
-          </p>
-        </div>
-      </div>
+    <div className="p-6 space-y-6 max-w-page mx-auto">
+      <PageHeader
+        section="studio"
+        icon={BookOpen}
+        title="AI 漫画工坊"
+        badge={<BetaBadge />}
+        hint="对话引导 AI 写故事 → 拆分镜 → 配角色卡 → 逐格生图。按 comic_story / comic_panel 扣点。"
+      />
 
       {/* 项目列表 + 新建 */}
       <Card>

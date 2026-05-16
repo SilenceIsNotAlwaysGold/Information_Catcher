@@ -12,6 +12,7 @@ import { Spinner } from "@nextui-org/spinner";
 import { Select, SelectItem } from "@nextui-org/select";
 import { Puzzle, CheckCircle2, XCircle, Search, Download } from "lucide-react";
 import toast from "react-hot-toast";
+import { PageHeader } from "@/components/ui";
 import { useApi } from "@/lib/useApi";
 
 type ExtStatus = {
@@ -109,13 +110,19 @@ export default function ExtensionPage() {
   );
 
   return (
-    <div className="space-y-4 max-w-4xl">
+    <div className="p-6 space-y-6 max-w-page mx-auto">
+      <PageHeader
+        section="toolbox"
+        icon={Puzzle}
+        title="浏览器扩展"
+        hint="TrendPulse Helper —— 从浏览器抓帖子、博主主页、热门关键词。"
+      />
       {/* 顶部状态卡片 */}
       <Card>
         <CardHeader className="flex justify-between items-center pb-2">
           <div className="flex items-center gap-2">
             <Puzzle className="text-primary" size={20} />
-            <span className="font-semibold">浏览器扩展（TrendPulse Helper）</span>
+            <span className="font-semibold">扩展运行状态</span>
           </div>
           {online > 0 ? (
             <Chip color="success" startContent={<CheckCircle2 size={14} />} variant="flat">

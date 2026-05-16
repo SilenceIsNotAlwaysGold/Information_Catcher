@@ -12,7 +12,9 @@ import { Button } from "@nextui-org/button";
 import { Input, Textarea } from "@nextui-org/input";
 import { Chip } from "@nextui-org/chip";
 import { Spinner } from "@nextui-org/spinner";
-import { Presentation, Plus, Trash2, Sparkles, Download, RefreshCw, FileText, Upload, Wand2 } from "lucide-react";
+import { Select, SelectItem } from "@nextui-org/select";
+import { Presentation, Plus, Trash2, Sparkles, Download, RefreshCw, FileText, Upload, Wand2, Layers } from "lucide-react";
+import { PageHeader, SectionCard, EmptyState, BetaBadge } from "@/components/ui";
 import { useAuth } from "@/contexts/AuthContext";
 import { ModelSelector } from "@/components/ModelSelector";
 import { toastOk, toastErr } from "@/lib/toast";
@@ -23,6 +25,12 @@ type ProjectListItem = {
   id: number; title: string; topic: string; target_pages: number;
   style_hint: string; audience: string; status: string;
   pptx_url: string; created_at: string; updated_at: string;
+  template_id?: number | null;
+  image_source?: "none" | "pexels" | "ai";
+};
+type Template = {
+  id: number; name: string; size_bytes: number;
+  layout_summary: string; created_at: string;
 };
 type Page = { title: string; bullets: string[] };
 type Plan = { title?: string; pages?: Page[] };
@@ -52,8 +60,14 @@ export default function PptStudioPage() {
   const [style, setStyle] = useState("商务严肃");
   const [audience, setAudience] = useState("");
   const [textModelId, setTextModelId] = useState<number | null>(null);
+  const [templateId, setTemplateId] = useState<number | null>(null);   // v2.1 风格模板
+  const [imageSource, setImageSource] = useState<"none"|"pexels"|"ai">("none"); // v2.1 配图来源（C 阶段启用）
   const [creating, setCreating] = useState(false);
   const [rendering, setRendering] = useState(false);
+
+  // v2.1: 模板管理
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [uploadingTpl, setUploadingTpl] = useState(false);
   // 上传 .pptx
   const [uploading, setUploading] = useState(false);
   // AI 修改指令
@@ -66,6 +80,13 @@ export default function PptStudioPage() {
     if (r.ok) { const d = await r.json(); setList(d.projects || []); }
   }, [token, headers]);
   useEffect(() => { loadList(); }, [loadList]);
+
+  const loadTemplates = useCallback(async () => {
+    if (!token) return;
+    const r = await fetch(API("/templates"), { headers });
+    if (r.ok) { const d = await r.json(); setTemplates(d.templates || []); }
+  }, [token, headers]);
+  useEffect(() => { loadTemplates(); }, [loadTemplates]);
 
   const loadDetail = useCallback(async () => {
     if (!selectedId) { setDetail(null); return; }
@@ -83,6 +104,7 @@ export default function PptStudioPage() {
         body: JSON.stringify({
           title, topic, target_pages: pages,
           style_hint: style, audience, text_model_id: textModelId,
+          template_id: templateId, image_source: imageSource,
         }),
       });
       const d = await r.json();
@@ -101,6 +123,34 @@ export default function PptStudioPage() {
     if (r.ok) {
       if (selectedId === id) setSelectedId(null);
       await loadList();
+    }
+  };
+
+  // ── 上传 .pptx 作风格模板 ──────────────────────────────────
+  const handleUploadTemplate = async (f: File) => {
+    if (!f) return;
+    if (!f.name.toLowerCase().endsWith(".pptx")) { toastErr("仅支持 .pptx"); return; }
+    setUploadingTpl(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", f);
+      fd.append("name", f.name.replace(/\.pptx$/i, "").slice(0, 40));
+      const r = await fetch(API("/templates"), {
+        method: "POST", headers: { Authorization: `Bearer ${token}` }, body: fd,
+      });
+      const d = await r.json();
+      if (!r.ok) { toastErr(d.detail || "上传失败"); return; }
+      toastOk(`已上传模板：${d.name}（${d.summary}）`);
+      await loadTemplates();
+      setTemplateId(d.id);
+    } finally { setUploadingTpl(false); }
+  };
+  const handleDeleteTemplate = async (id: number) => {
+    if (!confirm("删除该模板？正在用它的 PPT 会自动解绑模板")) return;
+    const r = await fetch(API(`/templates/${id}`), { method: "DELETE", headers });
+    if (r.ok) {
+      if (templateId === id) setTemplateId(null);
+      await loadTemplates();
     }
   };
 
@@ -171,26 +221,18 @@ export default function PptStudioPage() {
   }, [detail?.pptx_url]);
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
-      <div className="flex items-start gap-3">
-        <div className="rounded-lg bg-secondary/10 text-secondary p-3"><Presentation size={24} /></div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            AI PPT <Chip size="sm" variant="flat" color="secondary">Beta</Chip>
-          </h1>
-          <p className="text-sm text-default-500 mt-1">
-            输入主题 → AI 生大纲（每页标题 + 3-5 要点）→ 一键渲染成 .pptx 下载。
-            扣 <b>ppt_outline</b> 点（一次大纲生成覆盖全套）。
-          </p>
-        </div>
-      </div>
+    <div className="p-6 space-y-6 max-w-page mx-auto">
+      <PageHeader
+        section="studio"
+        icon={Presentation}
+        title="AI PPT"
+        badge={<BetaBadge />}
+        hint="输入主题 → AI 生大纲（每页标题 + 3-5 要点）→ 一键渲染成 .pptx。一次大纲扣 ppt_outline 点。"
+      />
 
       {/* 新建 */}
-      <Card>
-        <CardHeader className="flex items-center gap-2">
-          <Plus size={16} /><span className="font-medium">新建 PPT</span>
-        </CardHeader>
-        <CardBody className="space-y-2">
+      <SectionCard icon={Plus} title="新建 PPT">
+        <div className="space-y-2">
           <div className="flex gap-2 flex-wrap items-end">
             <Input label="标题（可选）" size="sm" className="w-44"
               value={title} onValueChange={setTitle} placeholder="自动按主题命名" />
@@ -203,6 +245,32 @@ export default function PptStudioPage() {
               value={audience} onValueChange={setAudience} placeholder="如：投资人路演 / 学生科普" />
             <ModelSelector usage="text" value={textModelId} onChange={setTextModelId}
               label="文本模型" className="min-w-[220px]" />
+            <Select label="风格模板" labelPlacement="outside" size="sm"
+              className="min-w-[200px]"
+              selectedKeys={templateId ? [String(templateId)] : []}
+              onSelectionChange={(keys) => {
+                const v = Array.from(keys)[0];
+                setTemplateId(v ? Number(v) : null);
+              }}
+              placeholder="（默认风格）">
+              <SelectItem key="">默认风格（深蓝 / 白底）</SelectItem>
+              {(templates.map((t) => (
+                <SelectItem key={String(t.id)} description={t.layout_summary}>
+                  {t.name}
+                </SelectItem>
+              )) as any)}
+            </Select>
+            <Select label="配图来源" labelPlacement="outside" size="sm"
+              className="min-w-[180px]"
+              selectedKeys={[imageSource]}
+              onSelectionChange={(keys) => {
+                const v = Array.from(keys)[0] as any;
+                if (v) setImageSource(v);
+              }}>
+              <SelectItem key="none" description="占位卡片">无配图</SelectItem>
+              <SelectItem key="pexels" description="Pexels 免费图库 · 不耗点">Pexels 自动配图</SelectItem>
+              <SelectItem key="ai" description="按 image_query 生图 · 每图扣 image 点">AI 生图配图</SelectItem>
+            </Select>
           </div>
           <Textarea minRows={2} maxRows={4} size="sm"
             label="主题描述（500 字内）" labelPlacement="outside"
@@ -231,23 +299,71 @@ export default function PptStudioPage() {
               上传不扣点；AI 改造（在详情页"修改"扣 ppt_outline 点）
             </span>
           </div>
-        </CardBody>
-      </Card>
+        </div>
+      </SectionCard>
+
+      {/* 风格模板管理 */}
+      <SectionCard
+        icon={Layers}
+        title="我的风格模板"
+        badge={<Chip size="sm" variant="flat">{templates.length}</Chip>}
+        actions={
+          <label className="inline-flex items-center gap-1 cursor-pointer">
+            <Button as="span" size="sm" variant="flat" color="primary"
+              startContent={<Upload size={14} />}
+              isLoading={uploadingTpl}>
+              上传新模板
+            </Button>
+            <input type="file" accept=".pptx" className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0]; if (f) handleUploadTemplate(f);
+                e.currentTarget.value = "";
+              }} />
+          </label>
+        }
+      >
+        {templates.length === 0 ? (
+          <EmptyState
+            icon={Layers} compact
+            title="还没有风格模板"
+            hint="上传一份你喜欢风格的 .pptx（比如公司 VI 模板），之后新建 PPT 选它，输出就自带这个风格的母版 / 主题色 / 字体。"
+          />
+        ) : (
+            <div className="flex flex-wrap gap-2">
+              {templates.map((t) => {
+                const on = t.id === templateId;
+                return (
+                  <div key={t.id}
+                    className={`px-3 py-2 rounded-md border-2 cursor-pointer text-xs transition ${on ? "border-primary bg-primary/5" : "border-default-200 hover:border-default-400"}`}
+                    onClick={() => setTemplateId(on ? null : t.id)}>
+                    <div className="font-medium text-sm flex items-center gap-1">
+                      <Layers size={12} /> {t.name}
+                      {on && <Chip size="sm" variant="flat" color="primary">已选</Chip>}
+                    </div>
+                    <p className="text-default-500 mt-0.5">{t.layout_summary}</p>
+                    <button type="button" className="text-[11px] text-danger mt-1 hover:underline"
+                      onClick={(e) => { e.stopPropagation(); handleDeleteTemplate(t.id); }}>
+                      删除
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+      </SectionCard>
 
       {/* 列表 */}
-      <Card>
-        <CardHeader className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <FileText size={16} />
-            <span className="font-medium">我的 PPT</span>
-            <Chip size="sm" variant="flat">{list.length}</Chip>
-          </div>
+      <SectionCard
+        icon={FileText}
+        title="我的 PPT"
+        badge={<Chip size="sm" variant="flat">{list.length}</Chip>}
+        actions={
           <Button size="sm" variant="light" isIconOnly onPress={loadList}><RefreshCw size={14} /></Button>
-        </CardHeader>
-        <CardBody>
-          {list.length === 0 ? (
-            <p className="text-sm text-default-400">还没 PPT，上方填表生成第一份。</p>
-          ) : (
+        }
+      >
+        {list.length === 0 ? (
+          <EmptyState icon={FileText} compact title="还没 PPT" hint="上方填表生成第一份。" />
+        ) : (
             <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-3">
               {list.map((p) => {
                 const on = p.id === selectedId;
@@ -270,18 +386,19 @@ export default function PptStudioPage() {
               })}
             </div>
           )}
-        </CardBody>
-      </Card>
+      </SectionCard>
 
       {/* 详情 + 大纲 + 渲染 */}
       {detail && (
-        <Card>
-          <CardHeader className="flex items-center justify-between gap-2 flex-wrap">
-            <div>
-              <p className="font-bold text-lg">{detail.title || detail.plan?.title || "未命名"}</p>
-              <p className="text-xs text-default-500">{detail.topic}</p>
-            </div>
-            <div className="flex gap-2">
+        <SectionCard
+          title={
+            <span>
+              <span className="text-base">{detail.title || detail.plan?.title || "未命名"}</span>
+            </span>
+          }
+          hint={detail.topic}
+          actions={
+            <>
               <Button color="primary" size="sm" startContent={<Presentation size={14} />}
                 isLoading={rendering} onPress={handleRender}>
                 {detail.status === "done" ? "重新渲染" : "渲染 .pptx"}
@@ -293,9 +410,10 @@ export default function PptStudioPage() {
                   下载
                 </Button>
               )}
-            </div>
-          </CardHeader>
-          <CardBody className="space-y-3">
+            </>
+          }
+        >
+          <div className="space-y-3">
             {/* AI 修改大纲 */}
             <div className="rounded border border-default-200 p-3 bg-default-50/50">
               <p className="text-xs font-medium mb-2 flex items-center gap-1">
@@ -323,8 +441,8 @@ export default function PptStudioPage() {
             {(!detail.plan?.pages || detail.plan.pages.length === 0) && (
               <p className="text-sm text-default-400">大纲为空</p>
             )}
-          </CardBody>
-        </Card>
+          </div>
+        </SectionCard>
       )}
     </div>
   );

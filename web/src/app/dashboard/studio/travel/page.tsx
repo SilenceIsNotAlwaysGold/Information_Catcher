@@ -14,6 +14,7 @@ import { Map, Plus, Trash2, Sparkles, RefreshCw, FileText } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { ModelSelector } from "@/components/ModelSelector";
 import { toastOk, toastErr } from "@/lib/toast";
+import { PageHeader, BetaBadge } from "@/components/ui";
 
 const API = (p: string) => `/api/studio/travel${p}`;
 
@@ -104,19 +105,14 @@ export default function TravelStudioPage() {
   };
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
-      <div className="flex items-start gap-3">
-        <div className="rounded-lg bg-success/10 text-success p-3"><Map size={24} /></div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            AI 旅游攻略 <Chip size="sm" variant="flat" color="success">Beta</Chip>
-          </h1>
-          <p className="text-sm text-default-500 mt-1">
-            输入目的地 + 天数 + 偏好，AI 一次性给出完整行程（每天上/下/晚 + 餐饮 + 交通 + 预算 + 实用 tips）。
-            走平台模型，扣 <b>travel_plan</b> 点。
-          </p>
-        </div>
-      </div>
+    <div className="p-6 space-y-6 max-w-page mx-auto">
+      <PageHeader
+        section="studio"
+        icon={Map}
+        title="AI 旅游攻略"
+        badge={<BetaBadge />}
+        hint="输入目的地 + 天数 + 偏好，AI 一次性给出完整行程（每天上/下/晚 + 餐饮 + 交通 + 预算 + tips）。扣 travel_plan 点。"
+      />
 
       {/* 生成表单 */}
       <Card>
