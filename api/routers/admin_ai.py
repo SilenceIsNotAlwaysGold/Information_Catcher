@@ -440,212 +440,35 @@ async def set_preferences(
 
 
 # ──────────────────────────────────────────────────────────────
-# 用户私有 AI 模型：让用户自带 OpenAI 兼容模型
+# 用户私有 AI 模型 —— v2 已下线
+# AI 全部走平台统一渠道（站长维护的中转站），按模型 × feature 扣点数。
+# 用户不能再自带 key。GET 返回空列表（兼容旧前端）；写操作一律 410 Gone。
+# 已建的私有模型记录保留在库里但不再被 _resolve_model 选用（强制走平台模型）。
 # ──────────────────────────────────────────────────────────────
 
-
-class MyModelIn(BaseModel):
-    display_name: str = Field(..., min_length=1, max_length=80)
-    usage_type: str = Field(..., pattern="^(text|image)$")
-    base_url: str = Field(..., min_length=1)
-    api_key: str = Field(..., min_length=1)
-    model_id: str = Field(..., min_length=1, max_length=120)
-    extra_config: Dict[str, Any] = {}
-    max_concurrent: int = 2
+_GONE_MSG = "自带 AI 渠道功能已下线，请在「AI 模型」里选用平台提供的模型（按点数计费）"
 
 
-class MyModelUpdate(BaseModel):
-    display_name: Optional[str] = Field(None, max_length=80)
-    base_url: Optional[str] = None
-    # 编辑时不传 api_key → 保留原值（与 admin provider 编辑一致语义）
-    api_key: Optional[str] = None
-    model_id: Optional[str] = Field(None, max_length=120)
-    extra_config: Optional[Dict[str, Any]] = None
-    max_concurrent: Optional[int] = None
-
-
-@router.get("/ai/my-models", summary="我的私有 AI 模型")
+@router.get("/ai/my-models", summary="（已下线）我的私有 AI 模型")
 async def list_my_models(current_user: dict = Depends(get_current_user)):
-    uid = int(current_user["id"])
-    async with _db.connect(monitor_db.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT m.id, m.model_id, m.display_name, m.usage_type, "
-            "       m.extra_config, m.max_concurrent, m.created_at, "
-            "       p.id AS provider_id, p.name AS provider_name, "
-            "       p.base_url, p.api_key, p.enabled AS provider_enabled "
-            "FROM ai_models m JOIN ai_providers p ON m.provider_id=p.id "
-            "WHERE m.owner_user_id=? "
-            "ORDER BY m.id DESC",
-            (uid,),
-        ) as cur:
-            rows = [dict(r) for r in await cur.fetchall()]
-    for r in rows:
-        try:
-            r["extra_config"] = json.loads(r.get("extra_config") or "{}")
-        except Exception:
-            r["extra_config"] = {}
-        r["api_key_masked"] = _mask_key(r.get("api_key") or "")
-        r.pop("api_key", None)
-    return {"models": rows}
+    return {"models": [], "deprecated": True}
 
 
-@router.post("/ai/my-models", summary="新增私有 AI 模型（OpenAI 兼容）")
-async def create_my_model(
-    body: MyModelIn, current_user: dict = Depends(get_current_user),
-):
-    uid = int(current_user["id"])
-    extra_str = json.dumps(body.extra_config, ensure_ascii=False)
-    async with _db.connect(monitor_db.DB_PATH) as db:
-        # 一条用户私有模型对应一条专属 provider（自动建，名字跟模型走）
-        pcur = await db.execute(
-            "INSERT INTO ai_providers (name, base_url, api_key, enabled, owner_user_id) "
-            "VALUES (?, ?, ?, 1, ?)",
-            (body.display_name[:80], body.base_url.strip(), body.api_key.strip(), uid),
-        )
-        provider_id = pcur.lastrowid
-        mcur = await db.execute(
-            "INSERT INTO ai_models "
-            "(provider_id, model_id, display_name, usage_type, published, is_default, "
-            " extra_config, max_concurrent, owner_user_id) "
-            "VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?)",
-            (
-                provider_id, body.model_id.strip(), body.display_name[:80],
-                body.usage_type, extra_str, int(body.max_concurrent or 2), uid,
-            ),
-        )
-        await db.commit()
-        return {"ok": True, "id": mcur.lastrowid, "provider_id": provider_id}
+@router.post("/ai/my-models", summary="（已下线）")
+async def _create_my_model_gone(current_user: dict = Depends(get_current_user)):
+    raise HTTPException(status_code=410, detail=_GONE_MSG)
 
 
-@router.put("/ai/my-models/{mid}", summary="编辑私有 AI 模型")
-async def update_my_model(
-    mid: int, body: MyModelUpdate,
-    current_user: dict = Depends(get_current_user),
-):
-    uid = int(current_user["id"])
-    async with _db.connect(monitor_db.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM ai_models WHERE id=? AND owner_user_id=?", (mid, uid),
-        ) as cur:
-            row = await cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="模型不存在或无权访问")
-
-        # ai_models 更新
-        sets, vals = [], []
-        if body.display_name is not None:
-            sets.append("display_name=?"); vals.append(body.display_name[:80])
-        if body.model_id is not None:
-            sets.append("model_id=?"); vals.append(body.model_id.strip()[:120])
-        if body.extra_config is not None:
-            sets.append("extra_config=?")
-            vals.append(json.dumps(body.extra_config, ensure_ascii=False))
-        if body.max_concurrent is not None:
-            sets.append("max_concurrent=?"); vals.append(int(body.max_concurrent))
-        if sets:
-            vals.append(mid)
-            await db.execute(f"UPDATE ai_models SET {', '.join(sets)} WHERE id=?", vals)
-
-        # ai_providers 更新（base_url / api_key / 同步 name）
-        psets, pvals = [], []
-        if body.display_name is not None:
-            psets.append("name=?"); pvals.append(body.display_name[:80])
-        if body.base_url is not None:
-            psets.append("base_url=?"); pvals.append(body.base_url.strip())
-        if body.api_key is not None and body.api_key.strip():
-            psets.append("api_key=?"); pvals.append(body.api_key.strip())
-        if psets:
-            pvals.append(row["provider_id"])
-            await db.execute(
-                f"UPDATE ai_providers SET {', '.join(psets)} WHERE id=?", pvals,
-            )
-        await db.commit()
-    return {"ok": True}
+@router.put("/ai/my-models/{mid}", summary="（已下线）")
+async def _update_my_model_gone(mid: int, current_user: dict = Depends(get_current_user)):
+    raise HTTPException(status_code=410, detail=_GONE_MSG)
 
 
-@router.delete("/ai/my-models/{mid}", summary="删除私有 AI 模型（连同 provider）")
-async def delete_my_model(
-    mid: int, current_user: dict = Depends(get_current_user),
-):
-    uid = int(current_user["id"])
-    async with _db.connect(monitor_db.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT provider_id FROM ai_models WHERE id=? AND owner_user_id=?",
-            (mid, uid),
-        ) as cur:
-            row = await cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="模型不存在或无权访问")
-        await db.execute("DELETE FROM ai_models WHERE id=?", (mid,))
-        # provider 是 1:1 自动建的，可一并删除；用 owner_user_id 兜底防误删共享
-        await db.execute(
-            "DELETE FROM ai_providers WHERE id=? AND owner_user_id=?",
-            (row["provider_id"], uid),
-        )
-        await db.commit()
-    # 如果用户偏好指向被删的模型，清空偏好
-    with auth_service._get_db_connection() as conn:
-        conn.execute(
-            "UPDATE users SET preferred_text_model_id=NULL "
-            "WHERE id=? AND preferred_text_model_id=?", (uid, mid),
-        )
-        conn.execute(
-            "UPDATE users SET preferred_image_model_id=NULL "
-            "WHERE id=? AND preferred_image_model_id=?", (uid, mid),
-        )
-        conn.commit()
-    return {"ok": True}
+@router.delete("/ai/my-models/{mid}", summary="（已下线）")
+async def _delete_my_model_gone(mid: int, current_user: dict = Depends(get_current_user)):
+    raise HTTPException(status_code=410, detail=_GONE_MSG)
 
 
-@router.post("/ai/my-models/{mid}/test", summary="测试私有 AI 模型连通性")
-async def test_my_model(
-    mid: int, current_user: dict = Depends(get_current_user),
-):
-    """简单 ping：text 模型发一句"你好"；image 模型不做实际调用（耗钱），
-    只做 base_url 可达性 + 凭证基础校验。"""
-    import httpx
-    uid = int(current_user["id"])
-    async with _db.connect(monitor_db.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT m.usage_type, m.model_id, p.base_url, p.api_key "
-            "FROM ai_models m JOIN ai_providers p ON m.provider_id=p.id "
-            "WHERE m.id=? AND m.owner_user_id=?", (mid, uid),
-        ) as cur:
-            row = await cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="模型不存在")
-    base_url = (row["base_url"] or "").rstrip("/")
-    api_key = row["api_key"]
-    if row["usage_type"] == "text":
-        url = f"{base_url}/chat/completions"
-        payload = {
-            "model": row["model_id"],
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 5,
-        }
-    else:
-        # 图像不实跑（成本），只走 /models 看通不通；走不通就反馈错误
-        url = f"{base_url}/models"
-        payload = None
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            if payload is None:
-                r = await client.get(url, headers={"Authorization": f"Bearer {api_key}"})
-            else:
-                r = await client.post(
-                    url, json=payload,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                )
-        body = (r.text or "")[:400]
-        if r.status_code >= 400:
-            return {"ok": False, "status": r.status_code, "body": body}
-        return {"ok": True, "status": r.status_code, "body": body[:120]}
-    except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+@router.post("/ai/my-models/{mid}/test", summary="（已下线）")
+async def _test_my_model_gone(mid: int, current_user: dict = Depends(get_current_user)):
+    raise HTTPException(status_code=410, detail=_GONE_MSG)

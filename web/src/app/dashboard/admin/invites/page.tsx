@@ -12,6 +12,7 @@ import {
 import { Ticket, Plus, RefreshCw, Trash2, Copy, Link2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastErr, toastOk } from "@/lib/toast";
+import { PageHeader } from "@/components/ui";
 
 const PLANS = ["trial", "free", "pro", "team", "enterprise"];
 
@@ -96,18 +97,12 @@ export default function AdminInvitesPage() {
   const isExhausted = (i: Invite) => i.used_count >= i.max_uses;
 
   return (
-    <div className="max-w-5xl mx-auto p-4 md:p-6 space-y-6">
-      <div className="flex items-start gap-3">
-        <div className="rounded-xl bg-secondary/10 text-secondary p-3">
-          <Ticket size={24} />
-        </div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold">邀请码管理</h1>
-          <p className="text-sm text-default-500 mt-1">
-            生成邀请码控制注册。注册时邀请码自带的套餐会覆盖默认 trial。
-          </p>
-        </div>
-      </div>
+    <div className="max-w-page mx-auto p-4 md:p-6 space-y-6">
+      <PageHeader
+        icon={Ticket}
+        title="邀请码管理"
+        hint="生成邀请码控制注册。邀请码自带的套餐会覆盖默认 trial。"
+      />
 
       <Card>
         <CardBody className="space-y-3">

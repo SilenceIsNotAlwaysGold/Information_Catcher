@@ -23,10 +23,39 @@ import {
 import { Input } from "@nextui-org/input";
 import { Chip } from "@nextui-org/chip";
 import { Spinner } from "@nextui-org/spinner";
-import { ExternalLink, Search, FileText, User as UserIcon } from "lucide-react";
+import {
+  ExternalLink, Search, FileText, User as UserIcon,
+  Presentation, BookOpen, Plane, Sparkles, Plus, Eye, Wand2, Newspaper, Wrench,
+  ArrowRight, ImagePlus, PenLine,
+} from "lucide-react";
 
 import { useAuth } from "@/contexts/AuthContext";
 import { PLATFORM_LABEL, PLATFORM_COLOR, type PlatformKey } from "@/components/platform";
+
+// 快捷动作（无搜索词时显示）—— ⌘K 同时是搜索 + 快捷调用器
+type QuickAction = { label: string; hint?: string; icon: any; href: string; tone: string };
+const QUICK_ACTIONS: QuickAction[] = [
+  { label: "新建 PPT",         icon: Presentation, href: "/dashboard/studio/ppt",       tone: "studio",  hint: "扣 ppt_outline" },
+  { label: "新建漫画",          icon: BookOpen,     href: "/dashboard/studio/comic",     tone: "studio" },
+  { label: "新建小说",          icon: Sparkles,     href: "/dashboard/studio/novel",     tone: "studio" },
+  { label: "AI 生图",           icon: ImagePlus,    href: "/dashboard/tools/product-image", tone: "studio", hint: "扣 product_image" },
+  { label: "原创 · 平台改写",   icon: PenLine,      href: "/dashboard/original",         tone: "original", hint: "你写底稿 → 平台风格成品" },
+  { label: "新建旅游攻略",      icon: Plane,        href: "/dashboard/studio/travel",    tone: "studio" },
+  { label: "添加监控帖子",      icon: Eye,          href: "/dashboard/xhs/posts",        tone: "monitor" },
+  { label: "导入博主全部作品",  icon: Plus,         href: "/dashboard/xhs/creators",     tone: "monitor" },
+  { label: "整体仿写",          icon: Wand2,        href: "/dashboard/tools/product-remix", tone: "remix" },
+  { label: "看热点雷达",        icon: Newspaper,    href: "/dashboard/hotnews",          tone: "hotnews" },
+  { label: "服务监控告警",      icon: Wrench,       href: "/dashboard/toolbox/uptime",   tone: "toolbox" },
+];
+
+const QUICK_ICON_BG: Record<string, string> = {
+  studio:   "bg-studio-100 text-studio-600 dark:bg-studio-900/30 dark:text-studio-400",
+  monitor:  "bg-monitor-100 text-monitor-600 dark:bg-monitor-900/30 dark:text-monitor-400",
+  original: "bg-original-100 text-original-600 dark:bg-original-900/30 dark:text-original-400",
+  remix:    "bg-remix-100 text-remix-600 dark:bg-remix-900/30 dark:text-remix-400",
+  hotnews:  "bg-hotnews-100 text-hotnews-600 dark:bg-hotnews-900/30 dark:text-hotnews-400",
+  toolbox:  "bg-toolbox-100 text-toolbox-600 dark:bg-toolbox-900/30 dark:text-toolbox-400",
+};
 
 // ────────────────────────────────────────────────────────────────────────────
 // 类型
@@ -217,8 +246,36 @@ export function GlobalSearch({
 
               <div className="px-2 pb-3 max-h-[60vh] overflow-y-auto">
                 {showEmptyHint && (
-                  <div className="px-4 py-8 text-center text-default-400 text-sm">
-                    输入关键词以搜索三平台数据
+                  <div className="px-2 py-2">
+                    <p className="px-3 pb-2 text-[11px] font-medium text-default-500 uppercase tracking-wide">
+                      快捷操作
+                    </p>
+                    <ul>
+                      {QUICK_ACTIONS.map((a) => {
+                        const Icon = a.icon;
+                        return (
+                          <li key={a.href}>
+                            <button
+                              type="button"
+                              onClick={() => goInternal(a.href)}
+                              className="w-full flex items-center gap-3 px-3 py-2 rounded-md hover:bg-default-100 dark:hover:bg-default-100/30 text-left"
+                            >
+                              <span className={`rounded-md p-1.5 ${QUICK_ICON_BG[a.tone] || "bg-default-100 text-default-600"}`}>
+                                <Icon size={14} />
+                              </span>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-foreground">{a.label}</p>
+                                {a.hint && <p className="text-[11px] text-default-400">{a.hint}</p>}
+                              </div>
+                              <ArrowRight size={12} className="text-default-300 shrink-0" />
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    <p className="px-3 pt-3 text-[11px] text-default-400 border-t border-divider mt-2">
+                      或者输入关键词搜索帖子、博主…
+                    </p>
                   </div>
                 )}
 

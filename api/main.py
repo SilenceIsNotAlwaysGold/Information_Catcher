@@ -32,6 +32,11 @@ from .routers import (
     extension_router, archive_router, creator_stats_router,
 )
 from .routers.admin_ai import router as admin_ai_router
+from .routers.billing import router as billing_router, admin_router as billing_admin_router
+from .routers.studio import router as studio_router
+from .routers.toolbox import router as toolbox_router
+from .routers.hotnews import router as hotnews_router
+from .routers.original import router as original_router
 from .services.auth_service import init_user_db
 from .services import monitor_db
 from .services import scheduler as monitor_scheduler
@@ -101,9 +106,34 @@ app.include_router(extension_router, prefix="/api")
 app.include_router(archive_router, prefix="/api")
 app.include_router(creator_stats_router, prefix="/api")
 app.include_router(admin_ai_router, prefix="/api")
+app.include_router(billing_router, prefix="/api")
+app.include_router(billing_admin_router, prefix="/api")
+app.include_router(studio_router, prefix="/api")
+app.include_router(toolbox_router, prefix="/api")
+app.include_router(hotnews_router, prefix="/api")
+app.include_router(original_router, prefix="/api")
 
 # 初始化用户数据库（创建默认admin账号）
 init_user_db()
+
+
+# ── 计费：余额不足 → 402，前端可据此弹"去充值" ─────────────────────────────
+from fastapi import Request as _Request
+from fastapi.responses import JSONResponse as _JSONResponse
+from .services.billing_service import InsufficientCredits as _InsufficientCredits
+
+
+@app.exception_handler(_InsufficientCredits)
+async def _insufficient_credits_handler(request: _Request, exc: _InsufficientCredits):
+    return _JSONResponse(
+        status_code=402,
+        content={
+            "detail": str(exc),
+            "code": "insufficient_credits",
+            "balance": float(exc.balance),
+            "needed": float(exc.needed),
+        },
+    )
 
 
 @app.get("/")

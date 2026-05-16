@@ -9,6 +9,7 @@ import { Spinner } from "@nextui-org/spinner";
 import { History, RefreshCw, ChevronDown, ChevronUp } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastErr } from "@/lib/toast";
+import { PageHeader } from "@/components/ui";
 
 type AuditLog = {
   id: number;
@@ -83,18 +84,12 @@ export default function AdminAuditPage() {
   };
 
   return (
-    <div className="max-w-7xl mx-auto p-4 md:p-6 space-y-6">
-      <div className="flex items-start gap-3">
-        <div className="rounded-xl bg-default-100 text-default-600 p-3">
-          <History size={24} />
-        </div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold">审计日志</h1>
-          <p className="text-sm text-default-500 mt-1">
-            登录、注册、用户操作、配额超限、邀请码增删都会被记录。
-          </p>
-        </div>
-      </div>
+    <div className="max-w-page-wide mx-auto p-4 md:p-6 space-y-6">
+      <PageHeader
+        icon={History}
+        title="审计日志"
+        hint="登录、注册、用户操作、配额超限、邀请码增删都会被记录。"
+      />
 
       <Card>
         <CardBody className="space-y-3">

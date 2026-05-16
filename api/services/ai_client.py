@@ -20,8 +20,10 @@ import base64
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiosqlite
 import httpx
@@ -30,6 +32,50 @@ from . import monitor_db
 from . import db as _db
 
 logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────
+# 计费接入（v2 SaaS）—— 所有 AI 调用走平台 key，按模型 × feature 扣点数
+# ──────────────────────────────────────────────────────────────
+
+async def _bill_charge(
+    user_id: Optional[int], model: "_ResolvedModel", feature: str,
+    *, task_ref: Optional[str] = None, units: int = 1,
+) -> Tuple[Decimal, str]:
+    """AI 调用前扣费。返回 (实扣点数, 流水幂等键)。
+
+    - user_id=None（系统后台调用）→ 不扣，返回 (0, "")
+    - 余额不足 → raise billing_service.InsufficientCredits（调用方应据此返回 402，不发起请求）
+    """
+    if user_id is None:
+        return Decimal("0"), ""
+    from . import billing_service as _bill   # lazy，防顶层循环 import
+    cost = await _bill.compute_cost(model.model_row_id, feature)
+    if units and units > 1:
+        cost = (cost * units)
+    if cost <= 0:
+        return Decimal("0"), ""
+    ref = task_ref or f"{feature or 'ai'}:{model.model_row_id}:{uuid.uuid4().hex}"
+    await _bill.deduct(
+        int(user_id), cost=cost, model_id=model.model_row_id, feature=feature, task_ref=ref,
+    )
+    return cost, ref
+
+
+async def _bill_refund(
+    user_id: Optional[int], model: "_ResolvedModel", feature: str,
+    ref: str, cost: Decimal,
+) -> None:
+    """AI 调用失败后退款。失败不抛（退款失败只记日志，不能把原始错误盖掉）。"""
+    if user_id is None or not ref or cost <= 0:
+        return
+    from . import billing_service as _bill
+    try:
+        await _bill.refund(
+            int(user_id), cost=cost, model_id=model.model_row_id, feature=feature, task_ref=ref,
+        )
+    except Exception as e:
+        logger.warning(f"[ai_client] refund failed user={user_id} ref={ref} cost={cost}: {e}")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -88,22 +134,23 @@ async def _resolve_model(
         db.row_factory = aiosqlite.Row
 
         # 1. 显式传 model_row_id —— 但必须 published（或 admin 调用未做限制）
+        #    v2：只接受 owner_user_id IS NULL 的平台模型（私有渠道已下线）
         async def _load(mid: int) -> Optional[aiosqlite.Row]:
             async with db.execute(
                 "SELECT m.*, p.base_url AS p_base_url, p.api_key AS p_api_key, p.enabled AS p_enabled "
                 "FROM ai_models m JOIN ai_providers p ON m.provider_id=p.id "
-                "WHERE m.id=? AND p.enabled=1",
+                "WHERE m.id=? AND p.enabled=1 AND m.owner_user_id IS NULL",
                 (mid,),
             ) as cur:
                 return await cur.fetchone()
 
-        # 用户私有模型的归属判断（不需要 published，但要 enabled）
-        def _is_owned_by(row, uid) -> bool:
+        # v2：用户私有渠道已下线 —— owner_user_id != NULL 的模型一律不选用，
+        # 强制所有用户走 admin 上架的平台模型（owner_user_id IS NULL）。
+        def _is_private(row) -> bool:
             try:
-                ow = row["owner_user_id"]
-            except (KeyError, IndexError):
-                ow = None
-            return ow is not None and uid is not None and int(ow) == int(uid)
+                return row["owner_user_id"] is not None
+            except (KeyError, IndexError, TypeError):
+                return False
 
         # 取用户（用于白名单 + 偏好）
         u = None
@@ -114,9 +161,9 @@ async def _resolve_model(
         row = None
         if model_row_id is not None:
             candidate = await _load(int(model_row_id))
-            # 自己拥有的模型直接放行（不走白名单 / published 检查）
-            if candidate is not None and _is_owned_by(candidate, user_id):
-                row = candidate
+            if candidate is not None and _is_private(candidate):
+                # 指向了私有模型（旧数据）→ 当作没选，fallback 到平台默认
+                logger.info(f"[ai_client] model {model_row_id} is a retired private model, fallback to platform default")
             elif u and not is_model_allowed_for_user(u, int(model_row_id), usage_type):
                 logger.info(
                     f"[ai_client] user {user_id} not allowed to use model {model_row_id}, fallback to default"
@@ -132,23 +179,23 @@ async def _resolve_model(
             if pref and is_model_allowed_for_user(u, int(pref), usage_type):
                 row = await _load(int(pref))
 
-        # 3. 系统默认
+        # 3. 系统默认（仅平台模型 owner_user_id IS NULL）
         if row is None:
             async with db.execute(
                 "SELECT m.*, p.base_url AS p_base_url, p.api_key AS p_api_key, p.enabled AS p_enabled "
                 "FROM ai_models m JOIN ai_providers p ON m.provider_id=p.id "
-                "WHERE m.usage_type=? AND m.is_default=1 AND p.enabled=1 "
+                "WHERE m.usage_type=? AND m.is_default=1 AND p.enabled=1 AND m.owner_user_id IS NULL "
                 "ORDER BY m.sort_order, m.id LIMIT 1",
                 (usage_type,),
             ) as cur:
                 row = await cur.fetchone()
 
-        # 4. 还兜底不到 → 取该 usage_type 任一可用模型
+        # 4. 还兜底不到 → 取该 usage_type 任一可用平台模型
         if row is None:
             async with db.execute(
                 "SELECT m.*, p.base_url AS p_base_url, p.api_key AS p_api_key, p.enabled AS p_enabled "
                 "FROM ai_models m JOIN ai_providers p ON m.provider_id=p.id "
-                "WHERE m.usage_type=? AND p.enabled=1 "
+                "WHERE m.usage_type=? AND p.enabled=1 AND m.owner_user_id IS NULL "
                 "ORDER BY m.sort_order, m.id LIMIT 1",
                 (usage_type,),
             ) as cur:
@@ -236,7 +283,7 @@ async def call_text(
     feature: str = "",
     temperature: float = 0.8,
     max_tokens: int = 2000,
-    timeout: float = 60.0,
+    timeout: float = 120.0,
     system_prompt: Optional[str] = None,
     extra_payload: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -248,6 +295,8 @@ async def call_text(
     model = await _resolve_model(
         usage_type="text", model_row_id=model_id, user_id=user_id,
     )
+    # 计费：调用前扣点数（余额不足在这里 raise InsufficientCredits，不会发起请求）
+    _cost, _ref = await _bill_charge(user_id, model, feature)
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -284,6 +333,7 @@ async def call_text(
             )
             return text_out
         except Exception as e:
+            await _bill_refund(user_id, model, feature, _ref, _cost)
             await _log_usage(
                 user_id=user_id, model=model, feature=feature,
                 latency_ms=int((time.perf_counter() - t0) * 1000),
@@ -324,6 +374,8 @@ async def call_vision_ocr(
             f"请在 admin → AI 模型管理 把它的「支持视觉」打开，"
             f"或在「OCR 模型」下拉里换一个视觉模型（GPT-4o / Claude 3.5 / Gemini / Qwen-VL 等）。"
         )
+    # 计费：预检通过后才扣（余额不足 raise InsufficientCredits）
+    _cost, _ref = await _bill_charge(user_id, model, feature)
     # OpenAI 兼容的多模态格式：messages[0].content = [{type:"text"},{type:"image_url"}]
     messages = [
         {
@@ -400,6 +452,7 @@ async def call_vision_ocr(
             )
             return text_out
         except Exception as e:
+            await _bill_refund(user_id, model, feature, _ref, _cost)
             await _log_usage(
                 user_id=user_id, model=model, feature=feature,
                 latency_ms=int((time.perf_counter() - t0) * 1000),
@@ -462,12 +515,15 @@ async def call_image(
     model = await _resolve_model(
         usage_type="image", model_row_id=model_id, user_id=user_id,
     )
+    n_req = max(1, min(int(n), 4))
+    # 计费：预扣 n 张的钱（余额不足 raise）；调用后按实际成功数退差
+    _cost, _ref = await _bill_charge(user_id, model, feature, units=n_req)
     # size 优先级：显式参数 > 模型 extra_config.size > 默认
     final_size = size or model.extra_config.get("size") or "1024x1024"
     payload: Dict[str, Any] = {
         "model": model.model_id,
         "prompt": prompt,
-        "n": max(1, min(int(n), 4)),
+        "n": n_req,
         "size": final_size,
         "response_format": "b64_json",
     }
@@ -499,13 +555,27 @@ async def call_image(
                             b64s.append(base64.b64encode(r2.content).decode())
                     except Exception as e:
                         logger.warning(f"[ai_client] fetch image url fallback failed: {e}")
+            # 部分失败退差：预扣 n_req 张，实际成功 len(b64s) 张
+            got = len(b64s)
+            if user_id is not None and _cost > 0 and got < n_req:
+                per = _cost / n_req
+                back = (per * (n_req - got))
+                from . import billing_service as _bill
+                try:
+                    await _bill.refund(
+                        int(user_id), cost=back, model_id=model.model_row_id,
+                        feature=feature, task_ref=f"{_ref}:partial",
+                    )
+                except Exception as e:
+                    logger.warning(f"[ai_client] partial refund failed ref={_ref}: {e}")
             await _log_usage(
                 user_id=user_id, model=model, feature=feature,
-                image_count=len(b64s),
+                image_count=got,
                 latency_ms=int((time.perf_counter() - t0) * 1000),
             )
             return b64s
         except Exception as e:
+            await _bill_refund(user_id, model, feature, _ref, _cost)  # 整单退
             await _log_usage(
                 user_id=user_id, model=model, feature=feature,
                 latency_ms=int((time.perf_counter() - t0) * 1000),
@@ -606,41 +676,40 @@ async def log_usage(
 async def list_user_visible_models(
     usage_type: str, user: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """返回某 usage_type 下所有可见模型：admin 共享 published + 用户自己私有的。
+    """返回某 usage_type 下用户可见的平台模型。
 
-    admin 共享：m.owner_user_id IS NULL AND m.published=1 AND p.enabled=1，再按白名单过滤
-    用户私有：m.owner_user_id = current_user.id AND p.enabled=1（不受 published / 白名单影响）
+    v2：只返回 admin 上架的平台模型（owner_user_id IS NULL AND published=1 AND p.enabled=1），
+    再按用户白名单过滤（admin 看全部）。私有渠道已下线，不再返回。
+    带上 price_per_call / feature_pricing 让前端能标单价。
     """
-    uid = int(user.get("id")) if user and user.get("id") is not None else None
     async with _db.connect(monitor_db.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        # 共享 + 私有 一次查
         sql = (
             "SELECT m.id, m.model_id, m.display_name, m.usage_type, m.is_default, m.extra_config, "
-            "       m.owner_user_id, "
+            "       m.supports_vision, m.price_per_call, m.feature_pricing, "
             "       p.name AS provider_name "
             "FROM ai_models m JOIN ai_providers p ON m.provider_id=p.id "
-            "WHERE m.usage_type=? AND p.enabled=1 "
-            "  AND (m.published=1 OR m.owner_user_id IS NOT NULL) "
-            "ORDER BY (m.owner_user_id IS NULL) DESC, m.sort_order, m.id"
+            "WHERE m.usage_type=? AND p.enabled=1 AND m.published=1 AND m.owner_user_id IS NULL "
+            "ORDER BY m.sort_order, m.id"
         )
         async with db.execute(sql, (usage_type,)) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
-    out: List[Dict[str, Any]] = []
     is_admin = bool(user) and (user.get("role") or "").lower() == "admin"
     allowed = _parse_allowed_models(user, usage_type) if user and not is_admin else None
+    out: List[Dict[str, Any]] = []
     for r in rows:
-        ow = r.get("owner_user_id")
-        if ow is None:
-            # 共享模型：admin 永远看；普通用户按白名单
-            if is_admin or not user:
-                out.append(r)
-            elif allowed is None or r["id"] in allowed:
-                out.append(r)
-        else:
-            # 私有：只属于自己（admin 也看不到别人的）
-            if uid is not None and int(ow) == uid:
-                out.append(r)
+        if not (is_admin or not user or allowed is None or r["id"] in allowed):
+            continue
+        # 解析 JSON 字段供前端直接用
+        try:
+            r["feature_pricing"] = json.loads(r.get("feature_pricing") or "{}")
+        except Exception:
+            r["feature_pricing"] = {}
+        try:
+            r["price_per_call"] = float(r.get("price_per_call") or 1)
+        except Exception:
+            r["price_per_call"] = 1.0
+        out.append(r)
     return out
 
 

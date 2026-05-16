@@ -566,6 +566,228 @@ CREATE TABLE IF NOT EXISTS ai_usage_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_usage_user_date ON ai_usage_logs(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ai_usage_model ON ai_usage_logs(model_id, created_at DESC);
+
+-- ── SaaS 计费（v2）─────────────────────────────────────────────────────────
+-- 用户点数余额。balance 永远 == credit_ledger 里该用户所有 signed amount 之和（不变量，可对账）。
+CREATE TABLE IF NOT EXISTS user_credits (
+    user_id INTEGER PRIMARY KEY,
+    balance NUMERIC NOT NULL DEFAULT 0,        -- 当前余额（点数，支持小数）
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+
+-- 点数流水。每一笔变动（充值/扣费/退款/赠送/调整）都记一行，append-only。
+CREATE TABLE IF NOT EXISTS credit_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,                        -- recharge | deduct | refund | grant | adjust
+    amount NUMERIC NOT NULL,                   -- 正数；方向由 kind 决定（recharge/refund/grant/adjust 加，deduct 减）
+    balance_after NUMERIC NOT NULL,            -- 这笔变动后的余额（冗余，便于审计）
+    model_id INTEGER,                          -- 关联 ai_models.id（仅 deduct/refund 有）
+    feature TEXT DEFAULT '',                   -- ocr / image / comic_panel / novel_chapter / ...
+    task_ref TEXT DEFAULT '',                  -- 幂等键：同一 task_ref 的 deduct 不重复扣
+    operator TEXT DEFAULT '',                  -- 谁操作的（admin 用户名 / 'system' / ''）
+    note TEXT DEFAULT '',                      -- adjust 必填；其它可选
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_credit_ledger_user ON credit_ledger(user_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_task_ref
+    ON credit_ledger(task_ref) WHERE kind='deduct' AND task_ref != '';
+
+-- ── AI 工坊 / AI 漫画（v2 板块 2）─────────────────────────────────────────
+-- 一个 comic_project = 一部漫画。流程：对话引导写故事 → 定稿梗概 → 配角色卡 →
+-- AI 拆分镜（生成 panels）→ 逐格生图。AI 调用走 ai_client，按 feature 扣点。
+CREATE TABLE IF NOT EXISTS comic_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT DEFAULT '',
+    synopsis TEXT DEFAULT '',          -- 故事梗概（对话引导后定稿）
+    style_hint TEXT DEFAULT '',        -- 画风："日系少女 / 美式卡通 / 水墨 ..."
+    status TEXT DEFAULT 'drafting',    -- drafting(写故事) | scripting(拆分镜) | drawing(生图) | done
+    text_model_id INTEGER,             -- 写故事/拆分镜用的文本模型（NULL = 平台默认）
+    image_model_id INTEGER,            -- 生格子用的图像模型（NULL = 平台默认）
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_comic_projects_user ON comic_projects(user_id, created_at DESC);
+
+-- 故事引导对话（用户 ↔ AI）
+CREATE TABLE IF NOT EXISTS comic_story_turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    role TEXT NOT NULL,                -- user | assistant
+    content TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_comic_turns_project ON comic_story_turns(project_id, id);
+
+-- 角色卡：固定外貌描述，让生图时人物形象保持一致
+CREATE TABLE IF NOT EXISTS comic_characters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    appearance TEXT DEFAULT '',        -- 外貌描述（拼进每格 prompt）
+    ref_image_url TEXT DEFAULT '',     -- 可选定妆照（用户上传 / AI 先生成）
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_comic_chars_project ON comic_characters(project_id);
+
+-- 分镜格子
+CREATE TABLE IF NOT EXISTS comic_panels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    seq INTEGER NOT NULL,              -- 第几格（1-based）
+    script_text TEXT DEFAULT '',       -- 分镜脚本：场景 + 动作 + 对白
+    char_names TEXT DEFAULT '[]',      -- JSON：这格出现的角色名（拼 prompt 时带其 appearance）
+    image_prompt TEXT DEFAULT '',      -- 实际喂生图模型的 prompt（生成时填）
+    image_url TEXT DEFAULT '',
+    gen_status TEXT DEFAULT 'pending', -- pending | generating | done | error
+    gen_error TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_comic_panels_project ON comic_panels(project_id, seq);
+
+-- ── AI 旅游攻略（v2 板块 2）─────────────────────────────────────────────────
+-- 用户输入目的地 + 天数 + 偏好 → 一次 LLM 调用拿到完整行程 JSON 落库。
+-- plan_json 字段存 LLM 返回的结构化行程（按天分组，每天景点/餐厅/交通/预算）。
+CREATE TABLE IF NOT EXISTS travel_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT DEFAULT '',
+    dest_city TEXT NOT NULL,
+    days INTEGER DEFAULT 3,
+    budget TEXT DEFAULT '',          -- 自由文本："3000-5000 / 不限"
+    travel_style TEXT DEFAULT '',    -- "亲子 / 文艺 / 美食 / 户外"
+    extra_prefs TEXT DEFAULT '',     -- 其它要求（最多 1000 字）
+    plan_json TEXT DEFAULT '{}',     -- AI 输出的行程 JSON
+    text_model_id INTEGER,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_travel_plans_user ON travel_plans(user_id, created_at DESC);
+
+-- ── AI 小说（v2 板块 2）─────────────────────────────────────────────────────
+-- 精简版工作流：建项目（题材+premise）→ AI 生大纲 → 加角色卡 →
+-- AI 一章一章生（基于大纲 + 前面 N 章的 summary 保持连贯）。
+CREATE TABLE IF NOT EXISTS novel_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT DEFAULT '',
+    genre TEXT DEFAULT '',             -- xuanhuan/dushi/xuanyi/yanqing/wuxia/kehuan/lishi/...
+    premise TEXT DEFAULT '',           -- 核心设定 / 一句话故事
+    outline TEXT DEFAULT '',           -- 大纲全文（AI 生 + 用户编辑）
+    style_hint TEXT DEFAULT '',        -- 文风："古风简洁 / 网文白话 / 文学化"
+    status TEXT DEFAULT 'planning',    -- planning(写大纲) | writing(写章节) | done
+    text_model_id INTEGER,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_novel_projects_user ON novel_projects(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS novel_characters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    role TEXT DEFAULT '',              -- 主角 / 配角 / 反派
+    profile TEXT DEFAULT '',           -- 性格 + 背景 + 外貌 + 关键关系（喂模型）
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_novel_chars_project ON novel_characters(project_id);
+
+CREATE TABLE IF NOT EXISTS novel_chapters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    title TEXT DEFAULT '',
+    content TEXT DEFAULT '',
+    summary TEXT DEFAULT '',           -- AI 写完后自动总结一段（喂下一章用，保持连贯）
+    char_count INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_novel_chapters_project ON novel_chapters(project_id, seq);
+
+-- ── 实用工具箱：服务监控（v2 板块 3）─────────────────────────────────────────
+-- 用户可登记一组要监控的 URL（HTTP/TCP），定期探活；失败时推飞书群（复用 bitable_chat_id）。
+CREATE TABLE IF NOT EXISTS service_monitors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,                 -- 完整 URL（含 http/https）
+    method TEXT DEFAULT 'GET',         -- GET / HEAD / POST
+    expected_status INTEGER DEFAULT 200,  -- 预期 HTTP 状态码（其它即认为故障）
+    timeout_seconds INTEGER DEFAULT 15,
+    interval_seconds INTEGER DEFAULT 300, -- 探活间隔（默认 5 分钟）
+    enabled INTEGER DEFAULT 1,
+    last_check_at TEXT DEFAULT '',
+    last_status TEXT DEFAULT 'unknown',   -- ok | down | error | unknown
+    last_latency_ms INTEGER DEFAULT 0,
+    last_error TEXT DEFAULT '',
+    consecutive_fail INTEGER DEFAULT 0,    -- 连续失败次数（用于去抖告警）
+    notify_after_fails INTEGER DEFAULT 1,  -- 连续 N 次失败后才告警
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_svc_monitors_user ON service_monitors(user_id, enabled);
+
+CREATE TABLE IF NOT EXISTS service_monitor_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    monitor_id INTEGER NOT NULL,
+    status TEXT NOT NULL,              -- ok | down | error
+    http_status INTEGER DEFAULT 0,
+    latency_ms INTEGER DEFAULT 0,
+    error TEXT DEFAULT '',
+    checked_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_svc_checks_monitor ON service_monitor_checks(monitor_id, id DESC);
+
+-- ── 热点雷达（v2 板块 4）─────────────────────────────────────────────────
+-- 聚合各渠道热点：GitHub Trending / HN / 36氪 / 知乎热榜 / 微博热搜 ...
+-- 按 category 分类（code/tech/policy/entertainment/finance/...），最新优先展示。
+-- 用 (source, url) 复合唯一索引去重，重复刷新只更 score/fetched_at。
+CREATE TABLE IF NOT EXISTS hotnews_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,            -- 内部 source key：hn / github_trending / ...
+    source_label TEXT NOT NULL,      -- 展示名：Hacker News / GitHub Trending / ...
+    category TEXT NOT NULL,          -- code / tech / policy / entertainment / finance
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    summary TEXT DEFAULT '',
+    score INTEGER DEFAULT 0,         -- 源给的热度分（HN points / GH stars / 评论数 ...）
+    score_label TEXT DEFAULT '',     -- "12.3k stars" / "245 points" 文本
+    published_at TEXT DEFAULT '',    -- 源给的时间（可空）
+    fetched_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hotnews_unique ON hotnews_items(source, url);
+CREATE INDEX IF NOT EXISTS idx_hotnews_category ON hotnews_items(category, fetched_at DESC);
+
+-- ── AI PPT（v2 板块 2）─────────────────────────────────────────────────────
+-- 输入主题 + 目标页数 → AI 生成大纲 JSON（每页标题+要点）→ python-pptx 渲染 .pptx 文件。
+CREATE TABLE IF NOT EXISTS ppt_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT DEFAULT '',
+    topic TEXT NOT NULL,                  -- 用户输入的主题/简介
+    target_pages INTEGER DEFAULT 10,
+    style_hint TEXT DEFAULT '',           -- 风格："商务严肃 / 极简 / 活泼"
+    audience TEXT DEFAULT '',             -- 目标观众："产品评审会 / 学生 / 投资人"
+    plan_json TEXT DEFAULT '{}',          -- AI 大纲 JSON（pages: [{title, bullets}]）
+    pptx_url TEXT DEFAULT '',             -- 渲染后的 .pptx 下载链接（本地存储 / 七牛）
+    status TEXT DEFAULT 'planning',       -- planning(写大纲) | outlined(大纲就绪) | rendering | done
+    text_model_id INTEGER,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_ppt_projects_user ON ppt_projects(user_id, created_at DESC);
+
+-- ── AI PPT 模板（v2.1）：用户上传 .pptx 作公司 VI 风格底版 ──────────────────
+-- 渲染时 Presentation(file_path) 打开它，沿用 master/theme，我们只 add_slide 塞内容
+CREATE TABLE IF NOT EXISTS ppt_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    file_path TEXT NOT NULL,              -- 模板 .pptx 在磁盘的绝对路径
+    size_bytes INTEGER DEFAULT 0,
+    layout_summary TEXT DEFAULT '',       -- "16:9 · 8 layouts · 主色 #1F3F7A"
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_ppt_templates_user ON ppt_templates(user_id, created_at DESC);
 """
 
 
@@ -830,6 +1052,7 @@ async def _migrate(db):
     # gpt-4o / claude-3.5-sonnet / gemini-1.5+ / qwen-vl 等为 1
     await _ensure_column(db, "ai_models", "supports_vision", "INTEGER DEFAULT 0")
     # 用户自定义 AI 模型：owner_user_id IS NULL = admin 共享（原行为）；INT = 该用户私有
+    # v2 起：用户私有渠道功能下架，但列保留（不删数据），_resolve_model 不再走 owner 路径
     await _ensure_column(db, "ai_providers", "owner_user_id", "INTEGER")
     await _ensure_column(db, "ai_models",    "owner_user_id", "INTEGER")
     await db.execute(
@@ -840,6 +1063,14 @@ async def _migrate(db):
         "CREATE INDEX IF NOT EXISTS idx_ai_providers_owner "
         "ON ai_providers(owner_user_id)",
     )
+    # v2 SaaS 计费：每个模型的定价
+    #   price_per_call    — 每次调用的基础点数（按次计价）
+    #   feature_pricing   — JSON，按 feature 覆盖基础价：{"ocr": 0.3, "image": 1.0, "comic_panel": 0.5}
+    await _ensure_column(db, "ai_models", "price_per_call",  "NUMERIC DEFAULT 1")
+    await _ensure_column(db, "ai_models", "feature_pricing", "TEXT DEFAULT '{}'")
+    # v2.1 PPT 增强：每个 PPT 项目可绑定一个用户上传的风格模板 + 配图来源
+    await _ensure_column(db, "ppt_projects", "template_id",  "INTEGER")          # 引用 ppt_templates.id；NULL 走默认风格
+    await _ensure_column(db, "ppt_projects", "image_source", "TEXT DEFAULT 'none'")  # none | pexels | ai
     # 博主追新健康度 + 未读：让列表能区分"挂了 / 卡 cookie / 有新内容"
     await _ensure_column(db, "monitor_creators", "last_check_status", "TEXT DEFAULT 'unknown'")
     await _ensure_column(db, "monitor_creators", "last_check_error",  "TEXT DEFAULT ''")

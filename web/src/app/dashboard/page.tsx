@@ -1,94 +1,58 @@
 "use client";
 
+/**
+ * Dashboard 概览页 v2 — 五大板块入口为骨架。
+ *
+ * 视觉分层：
+ *   1. 顶部：欢迎语 + 余额 + 立即检测按钮
+ *   2. 四大板块大入口卡（监控 / AI 工坊 / 仿写床 / 工具箱），点开进二级首页
+ *   3. 关键指标 StatTile × 4（监控帖子 / 订阅博主 / 今日告警 / 累计点赞）
+ *   4. 双栏：今日告警 Top 5  ‖  最近抓取 Top 5
+ *   5. 平台监控分布 MetricBar（只显示 v2 留存平台 xhs/douyin）
+ */
 import { useState } from "react";
 import Link from "next/link";
 import useSWR from "swr";
-import { Card, CardBody } from "@nextui-org/card";
 import { Button } from "@nextui-org/button";
 import { Chip } from "@nextui-org/chip";
 import {
-  Activity,
-  Bell,
-  RefreshCw,
-  Users,
-  TrendingUp,
-  Inbox,
-  Heart,
-  Bookmark,
-  MessageCircle,
-  Zap,
-  AlertTriangle,
+  Activity, Bell, RefreshCw, Users, Zap, AlertTriangle,
+  Heart, Bookmark, MessageCircle, ArrowRight, Coins,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { CardSkeleton } from "@/components/CardSkeleton";
-import { EmptyState } from "@/components/EmptyState";
 import { OnboardingCard } from "@/components/OnboardingCard";
 import { toastOk, toastErr } from "@/lib/toast";
-
-// ── Types ───────────────────────────────────────────────────────────────────
+import { PageHeader, SectionCard, StatTile, EmptyState, MetricBar } from "@/components/ui";
+import { SECTIONS, SECTION_ORDER } from "@/lib/sections";
 
 type AlertItem = {
-  id: number;
-  note_id: string;
-  title: string | null;
-  alert_type: string;
-  message: string | null;
-  created_at: string;
+  id: number; note_id: string; title: string | null;
+  alert_type: string; message: string | null; created_at: string;
 };
-
 type FetchItem = {
-  platform: string;
-  fetch_type: string;
-  status: "success" | "fail";
-  ok_count: number;
-  fail_count: number;
-  started_at: string;
-  note_id?: string;
+  platform: string; fetch_type: string;
+  status: "success" | "fail"; ok_count: number; fail_count: number;
+  started_at: string; note_id?: string;
 };
-
 type Overview = {
-  today_alerts: {
-    total: number;
-    by_type: { surge: number; comment: number; trending: number };
-    top: AlertItem[];
-  };
+  today_alerts: { total: number; by_type: { surge: number; comment: number; trending: number }; top: AlertItem[] };
   recent_fetches: FetchItem[];
-  quota: {
-    accounts: { total: number; valid: number; expired: number };
-    posts: { total: number; by_platform: Record<string, number> };
-    creators: number;
-  };
+  quota: { accounts: { total: number; valid: number; expired: number };
+           posts: { total: number; by_platform: Record<string, number> };
+           creators: number };
   metric_totals: { likes: number; collects: number; comments: number };
 };
 
 const OVERVIEW_URL = "/api/monitor/dashboard/overview";
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
 const fmtTime = (s: string) => (s ? s.slice(5, 16) : "");
+const PLATFORM_LABEL: Record<string, string> = { xhs: "小红书", douyin: "抖音", mp: "公众号" };
 
-const PLATFORM_LABEL: Record<string, string> = {
-  xhs: "小红书",
-  douyin: "抖音",
-  mp: "公众号",
-};
-const PLATFORM_COLOR: Record<string, "danger" | "default" | "success" | "primary" | "warning" | "secondary"> = {
-  xhs: "danger",
-  douyin: "default",
-  mp: "success",
-};
-
-const ALERT_LABEL: Record<string, string> = {
-  surge: "飙升",
-  comment: "评论",
-  trending: "热门",
-};
+const ALERT_LABEL: Record<string, string> = { surge: "飙升", comment: "评论", trending: "热门" };
 const ALERT_COLOR: Record<string, "warning" | "primary" | "secondary"> = {
-  surge: "warning",
-  comment: "primary",
-  trending: "secondary",
+  surge: "warning", comment: "primary", trending: "secondary",
 };
-
 const classifyAlert = (t: string): "surge" | "comment" | "trending" => {
   const x = (t || "").toLowerCase();
   if (x.startsWith("trending")) return "trending";
@@ -96,373 +60,229 @@ const classifyAlert = (t: string): "surge" | "comment" | "trending" => {
   return "surge";
 };
 
-// ── Page ────────────────────────────────────────────────────────────────────
-
 export default function DashboardPage() {
   const { token, user } = useAuth();
   const [checking, setChecking] = useState(false);
 
   const fetcher = async ([url, t]: [string, string | null]) => {
-    const res = await fetch(url, {
-      headers: t ? { Authorization: `Bearer ${t}` } : {},
-    });
-    if (!res.ok) throw new Error(`${res.status}`);
-    return res.json() as Promise<Overview>;
+    const r = await fetch(url, { headers: t ? { Authorization: `Bearer ${t}` } : {} });
+    if (!r.ok) throw new Error(`${r.status}`);
+    return r.json() as Promise<Overview>;
   };
-
   const { data, error, isLoading, mutate } = useSWR<Overview>(
-    token ? [OVERVIEW_URL, token] : null,
-    fetcher,
-    { dedupingInterval: 5000, revalidateOnFocus: false }
+    token ? [OVERVIEW_URL, token] : null, fetcher,
+    { dedupingInterval: 5000, revalidateOnFocus: false },
+  );
+
+  const { data: billing } = useSWR<{ balance: number }>(
+    token ? ["/api/billing/me", token] : null,
+    fetcher as any,
+    { refreshInterval: 30_000 },
   );
 
   const handleCheck = async () => {
     if (!token) return;
     setChecking(true);
     try {
-      const res = await fetch("/api/monitor/check", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+      const r = await fetch("/api/monitor/check", {
+        method: "POST", headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) throw new Error(String(res.status));
+      if (!r.ok) throw new Error(String(r.status));
       toastOk("检测任务已触发，稍后会刷新数据");
-      // 后台异步抓取，3.5s 后再 revalidate 一次
       setTimeout(() => { mutate(); }, 3500);
     } catch (e: any) {
       toastErr(`触发失败：${e?.message || e}`);
-    } finally {
-      setChecking(false);
-    }
+    } finally { setChecking(false); }
   };
 
   const greeting = (() => {
     const h = new Date().getHours();
-    if (h < 6) return "凌晨好";
-    if (h < 12) return "早上好";
-    if (h < 14) return "中午好";
-    if (h < 18) return "下午好";
+    if (h < 6) return "凌晨好"; if (h < 12) return "早上好";
+    if (h < 14) return "中午好"; if (h < 18) return "下午好";
     return "晚上好";
   })();
   const username = (user as any)?.username || "";
 
-  // ── Loading ──
   if (isLoading || (!data && !error)) {
     return (
-      <div className="p-6 space-y-6 max-w-6xl">
-          <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">运营概览</h1>
-            <p className="text-sm text-default-500 mt-0.5">加载中...</p>
-          </div>
-        </div>
+      <div className="p-6 space-y-6 max-w-page mx-auto">
+        <PageHeader title="加载中…" hint="正在拉取概览数据" />
         <CardSkeleton cards={4} cols={4} />
         <CardSkeleton cards={3} cols={3} />
       </div>
     );
   }
 
-  // ── Error ──
   if (error || !data) {
     return (
-      <div className="p-6 space-y-6 max-w-6xl">
-          <Card className="border border-divider">
-          <CardBody>
-            <EmptyState
-              icon={AlertTriangle}
-              title="加载概览失败"
-              hint="检查后端服务或刷新页面再试一次。"
-              action={
-                <Button size="sm" variant="flat" onPress={() => mutate()}>
-                  重试
-                </Button>
-              }
-            />
-          </CardBody>
-        </Card>
+      <div className="p-6 max-w-page mx-auto">
+        <SectionCard>
+          <EmptyState
+            icon={AlertTriangle}
+            title="加载概览失败"
+            hint="检查后端服务或刷新页面再试一次。"
+            action={<Button size="sm" variant="flat" onPress={() => mutate()}>重试</Button>}
+          />
+        </SectionCard>
       </div>
     );
   }
 
-  const {
-    today_alerts,
-    recent_fetches,
-    quota,
-  } = data;
-
+  const { today_alerts, recent_fetches, quota, metric_totals } = data;
   const postsTotal = quota.posts.total || 0;
-  const platformBars = (["xhs", "douyin", "mp"] as const).map((k) => ({
-    key: k,
+  // v2 只留 xhs + douyin（公众号砍掉，不再展示进度条）
+  const platformBars = (["xhs", "douyin"] as const).map((k) => ({
     label: PLATFORM_LABEL[k],
-    color: PLATFORM_COLOR[k],
-    count: quota.posts.by_platform[k] || 0,
-    pct: postsTotal > 0 ? Math.round(((quota.posts.by_platform[k] || 0) * 100) / postsTotal) : 0,
+    value: quota.posts.by_platform[k] || 0,
+    section: "monitor" as const,
   }));
 
-  // ── 4 张大卡 ──
-  const stats = [
-    {
-      label: "监控帖子",
-      value: postsTotal,
-      icon: <Activity size={18} />,
-      color: "text-primary",
-      href: "/dashboard/monitor",
-    },
-    {
-      label: "订阅创作者",
-      value: quota.creators,
-      icon: <Users size={18} />,
-      color: "text-secondary",
-      href: "/dashboard/xhs/creators",
-    },
-    {
-      label: "今日告警",
-      value: today_alerts.total,
-      icon: <Bell size={18} />,
-      color: "text-warning",
-      href: "/dashboard/monitor/history",
-    },
-  ];
-
   return (
-    <div className="p-6 space-y-6 max-w-6xl">
+    <div className="p-6 space-y-8 max-w-page mx-auto">
+      <PageHeader
+        title={`${greeting}${username ? `，${username}` : ""}`}
+        hint={`今日告警 ${today_alerts.total} 条 · 累计监控 ${postsTotal} 条帖子`}
+        actions={
+          <>
+            <Chip
+              startContent={<Coins size={12} className="ml-1" />}
+              variant="flat" color="default" size="md"
+              className="hidden md:inline-flex"
+            >
+              余额 {billing?.balance !== undefined ? billing.balance.toFixed(2) : "—"}
+            </Chip>
+            <Button
+              size="sm" color="primary" variant="flat"
+              startContent={<RefreshCw size={15} className={checking ? "animate-spin" : ""} />}
+              onPress={handleCheck} isLoading={checking}
+            >
+              立即检测
+            </Button>
+          </>
+        }
+      />
 
-      {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-2xl font-bold">
-            {greeting}{username ? `，${username}` : ""}
-          </h1>
-          <p className="text-sm text-default-500 mt-0.5">
-            今日告警 {today_alerts.total} 条 · 累计监控 {postsTotal} 条帖子
-          </p>
-        </div>
-        <Button
-          size="sm"
-          color="primary"
-          variant="flat"
-          startContent={<RefreshCw size={15} className={checking ? "animate-spin" : ""} />}
-          onPress={handleCheck}
-          isLoading={checking}
-        >
-          立即检测
-        </Button>
-      </div>
-
-      {/* Onboarding（三步未全部完成时显示） */}
       <OnboardingCard token={token} postsTotal={postsTotal} />
 
-      {/* Stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {stats.map((s) => (
-          <Link key={s.label} href={s.href} className="block">
-            <Card className="border border-divider hover:border-primary-300 transition-colors">
-              <CardBody className="py-4 px-5">
-                <div className={`mb-2 ${s.color}`}>{s.icon}</div>
-                <div className="text-2xl font-bold">{s.value}</div>
-                <div className="text-xs text-default-400 mt-0.5">{s.label}</div>
-                {s.hint && (
-                  <div className="text-[11px] text-warning mt-1">{s.hint}</div>
-                )}
-              </CardBody>
-            </Card>
-          </Link>
-        ))}
-      </div>
-
-      {/* 3 columns: alerts / fetches / quota */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {/* 今日告警 Top 5 */}
-        <Card className="border border-divider">
-          <CardBody className="p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="font-semibold text-sm flex items-center gap-1.5">
-                <Bell size={15} className="text-warning" /> 今日告警
-                {today_alerts.total > 0 && (
-                  <Chip size="sm" color="warning" variant="flat">
-                    {today_alerts.total}
-                  </Chip>
-                )}
-              </h2>
-              <Link
-                href="/dashboard/monitor/history"
-                className="text-xs text-primary hover:underline"
-              >
-                全部
-              </Link>
-            </div>
-            {today_alerts.top.length === 0 ? (
-              <EmptyState
-                icon={Bell}
-                title="今日暂无告警"
-                hint="阈值触发时会在这里实时出现。"
-              />
-            ) : (
-              <ul className="space-y-2">
-                {today_alerts.top.slice(0, 5).map((a) => {
-                  const cls = classifyAlert(a.alert_type);
-                  return (
-                    <li
-                      key={a.id}
-                      className="flex flex-col gap-1 p-2.5 rounded-lg border border-divider hover:bg-default-50"
-                    >
-                      <div className="flex items-center gap-2">
-                        <Chip size="sm" color={ALERT_COLOR[cls]} variant="flat">
-                          {ALERT_LABEL[cls]}
-                        </Chip>
-                        <span className="text-xs font-medium truncate flex-1">
-                          {a.title || a.note_id}
-                        </span>
-                        <span className="text-[11px] text-default-300 shrink-0">
-                          {fmtTime(a.created_at)}
-                        </span>
-                      </div>
-                      {a.message && (
-                        <p className="text-[11px] text-default-500 truncate">
-                          {a.message}
-                        </p>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </CardBody>
-        </Card>
-
-        {/* 最近抓取 Top 5 */}
-        <Card className="border border-divider">
-          <CardBody className="p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="font-semibold text-sm flex items-center gap-1.5">
-                <Zap size={15} className="text-primary" /> 最近抓取
-              </h2>
-            </div>
-            {recent_fetches.length === 0 ? (
-              <EmptyState
-                icon={Inbox}
-                title="暂无抓取记录"
-                hint="点击上方「立即检测」触发一次。"
-              />
-            ) : (
-              <ul className="space-y-2">
-                {recent_fetches.slice(0, 5).map((r, i) => (
-                  <li
-                    key={`${r.started_at}-${i}`}
-                    className="flex items-center gap-2 p-2.5 rounded-lg border border-divider"
-                  >
-                    <Chip
-                      size="sm"
-                      color={PLATFORM_COLOR[r.platform] || "default"}
-                      variant="flat"
-                    >
-                      {PLATFORM_LABEL[r.platform] || r.platform || "?"}
-                    </Chip>
-                    <span className="text-xs text-default-600 truncate flex-1">
-                      {r.fetch_type || "—"}
-                    </span>
-                    <Chip
-                      size="sm"
-                      variant="dot"
-                      color={r.status === "success" ? "success" : "danger"}
-                    >
-                      {r.status === "success" ? "成功" : "失败"}
-                    </Chip>
-                    <span className="text-[11px] text-default-300 shrink-0 hidden lg:inline">
-                      {fmtTime(r.started_at)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </CardBody>
-        </Card>
-
-        {/* 配额状态：三平台帖子分布 */}
-        <Card className="border border-divider">
-          <CardBody className="p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="font-semibold text-sm flex items-center gap-1.5">
-                <TrendingUp size={15} className="text-secondary" /> 配额状态
-              </h2>
-              <span className="text-xs text-default-400">
-                共 {postsTotal} 条
-              </span>
-            </div>
-
-            {postsTotal === 0 ? (
-              <EmptyState
-                icon={Activity}
-                title="暂无监控帖子"
-                hint="去监控页添加要追踪的笔记或视频。"
-                action={
-                  <Button
-                    size="sm"
-                    as={Link}
-                    href="/dashboard/monitor"
-                    color="primary"
-                    variant="flat"
-                  >
-                    去添加
-                  </Button>
-                }
-              />
-            ) : (
-              <div className="space-y-3">
-                {platformBars.map((b) => (
-                  <div key={b.key} className="space-y-1">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-medium">{b.label}</span>
-                      <span className="text-default-400">
-                        {b.count} ({b.pct}%)
-                      </span>
-                    </div>
-                    <div className="h-1.5 w-full rounded-full bg-default-100 overflow-hidden">
-                      <div
-                        className={
-                          b.color === "danger"
-                            ? "h-full bg-danger"
-                            : b.color === "success"
-                              ? "h-full bg-success"
-                              : "h-full bg-default-400"
-                        }
-                        style={{ width: `${b.pct}%` }}
-                      />
-                    </div>
+      {/* 五大板块入口 */}
+      <section>
+        <h2 className="text-sm font-medium text-default-500 mb-3 uppercase tracking-wide">板块入口</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          {SECTION_ORDER.map((key) => {
+            const sec = SECTIONS[key];
+            const Icon = sec.icon;
+            return (
+              <Link key={key} href={sec.href}>
+                <div className={`group relative rounded-xl border border-default-200/60 bg-content1 p-5 shadow-card hover:shadow-card-hover transition-all hover:-translate-y-0.5 h-full`}>
+                  <div className={`inline-flex p-2.5 rounded-lg mb-3 bg-${sec.color}-100 text-${sec.color}-600 dark:bg-${sec.color}-900/30 dark:text-${sec.color}-500`}>
+                    <Icon size={20} />
                   </div>
-                ))}
-
-                <div className="pt-2 border-t border-divider grid grid-cols-3 gap-2 text-center">
-                  <div>
-                    <div className="text-[11px] text-default-400 flex items-center justify-center gap-1">
-                      <Heart size={10} /> 点赞
-                    </div>
-                    <div className="text-sm font-semibold">
-                      {data.metric_totals.likes.toLocaleString()}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-[11px] text-default-400 flex items-center justify-center gap-1">
-                      <Bookmark size={10} /> 收藏
-                    </div>
-                    <div className="text-sm font-semibold">
-                      {data.metric_totals.collects.toLocaleString()}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-[11px] text-default-400 flex items-center justify-center gap-1">
-                      <MessageCircle size={10} /> 评论
-                    </div>
-                    <div className="text-sm font-semibold">
-                      {data.metric_totals.comments.toLocaleString()}
-                    </div>
-                  </div>
+                  <h3 className="font-semibold text-foreground flex items-center gap-1 mb-1">
+                    {sec.label}
+                    <ArrowRight size={14} className="text-default-300 group-hover:text-default-600 transition-colors group-hover:translate-x-0.5 duration-150" />
+                  </h3>
+                  <p className="text-xs text-default-500 line-clamp-2">{sec.desc}</p>
                 </div>
+              </Link>
+            );
+          })}
+        </div>
+      </section>
 
-              </div>
-            )}
-          </CardBody>
-        </Card>
-      </div>
+      {/* 关键指标 4 个 */}
+      <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <StatTile
+          label="监控帖子" value={postsTotal} icon={Activity}
+          section="monitor" href="/dashboard/monitor"
+          hint={`xhs ${quota.posts.by_platform.xhs || 0} · douyin ${quota.posts.by_platform.douyin || 0}`}
+        />
+        <StatTile
+          label="订阅博主" value={quota.creators} icon={Users}
+          section="monitor" href="/dashboard/xhs/creators"
+        />
+        <StatTile
+          label="今日告警" value={today_alerts.total} icon={Bell}
+          section="hotnews" href="/dashboard/monitor/history"
+          hint={`飙升 ${today_alerts.by_type.surge} · 评论 ${today_alerts.by_type.comment} · 热门 ${today_alerts.by_type.trending}`}
+        />
+        <StatTile
+          label="累计互动" value={metric_totals.likes.toLocaleString()} icon={Heart}
+          section="studio"
+          hint={`收藏 ${metric_totals.collects.toLocaleString()} · 评论 ${metric_totals.comments.toLocaleString()}`}
+        />
+      </section>
+
+      {/* 双栏：告警 + 抓取 */}
+      <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <SectionCard
+          icon={Bell} title="今日告警"
+          badge={today_alerts.total > 0 && (
+            <Chip size="sm" color="warning" variant="flat">{today_alerts.total}</Chip>
+          )}
+          actions={
+            <Link href="/dashboard/monitor/history" className="text-xs text-primary hover:underline">全部 →</Link>
+          }
+        >
+          {today_alerts.top.length === 0 ? (
+            <EmptyState icon={Bell} compact title="今日暂无告警" hint="阈值触发时会在这里实时出现。" />
+          ) : (
+            <ul className="space-y-2">
+              {today_alerts.top.slice(0, 5).map((a) => {
+                const cls = classifyAlert(a.alert_type);
+                return (
+                  <li key={a.id} className="flex flex-col gap-1 p-2.5 rounded-md hover:bg-default-50 dark:hover:bg-default-100/30 transition-colors">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Chip size="sm" color={ALERT_COLOR[cls]} variant="flat" className="shrink-0">
+                        {ALERT_LABEL[cls]}
+                      </Chip>
+                      <span className="text-sm font-medium truncate flex-1">{a.title || a.note_id}</span>
+                      <span className="text-xs text-default-400 shrink-0">{fmtTime(a.created_at)}</span>
+                    </div>
+                    {a.message && (
+                      <p className="text-xs text-default-500 truncate pl-1">{a.message}</p>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </SectionCard>
+
+        <SectionCard icon={Zap} title="最近抓取">
+          {recent_fetches.length === 0 ? (
+            <EmptyState icon={Zap} compact title="暂无抓取记录" hint="点击上方「立即检测」触发一次。" />
+          ) : (
+            <ul className="space-y-1.5">
+              {recent_fetches.slice(0, 5).map((r, i) => (
+                <li key={`${r.started_at}-${i}`} className="flex items-center gap-2 px-2.5 py-2 rounded-md hover:bg-default-50 dark:hover:bg-default-100/30 transition-colors">
+                  <Chip size="sm" variant="flat" className="shrink-0">
+                    {PLATFORM_LABEL[r.platform] || r.platform || "?"}
+                  </Chip>
+                  <span className="text-sm text-default-700 truncate flex-1">{r.fetch_type || "—"}</span>
+                  <Chip size="sm" variant="dot" color={r.status === "success" ? "success" : "danger"}>
+                    {r.status === "success" ? "成功" : "失败"}
+                  </Chip>
+                  <span className="text-xs text-default-400 shrink-0 hidden lg:inline">{fmtTime(r.started_at)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </SectionCard>
+      </section>
+
+      {/* 平台分布 */}
+      <SectionCard icon={Activity} title="平台监控分布" hint={`共 ${postsTotal} 条监控中`}>
+        {postsTotal === 0 ? (
+          <EmptyState
+            icon={Activity}
+            title="暂无监控帖子"
+            hint="去监控板块添加要追踪的笔记或视频。"
+            action={<Button size="sm" as={Link} href="/dashboard/monitor" color="primary" variant="flat">去添加</Button>}
+          />
+        ) : (
+          <MetricBar items={platformBars} total={postsTotal} unit="条" />
+        )}
+      </SectionCard>
     </div>
   );
 }

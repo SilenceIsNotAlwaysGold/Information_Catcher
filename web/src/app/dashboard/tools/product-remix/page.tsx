@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useMe, useAiModels } from "@/lib/useApi";
 import { toastOk, toastErr } from "@/lib/toast";
+import { PageHeader, BetaBadge } from "@/components/ui";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { ModelSelector } from "@/components/ModelSelector";
 
@@ -527,28 +528,19 @@ export default function ProductRemixPage() {
   };
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6 p-4 md:p-6">
-      <div className="flex items-start gap-3">
-        <div className="rounded-xl bg-secondary/10 text-secondary p-3">
-          <Wand2 size={24} />
-        </div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold text-foreground flex items-center gap-2">
-            整体仿写
-            <Chip size="sm" variant="flat" color="secondary">Beta</Chip>
-          </h1>
-          <p className="text-sm text-default-500 mt-1">
-            粘贴小红书 / 抖音作品链接 → 选参考图 → AI 仿照整体风格批量出 N 套（图上文字保持不变 + 重写文案）。
-            若只想换背景保留文字，用「文案换背景」。
-          </p>
-        </div>
-        <a
-          href="/dashboard/tools/product-image"
-          className="text-sm text-primary hover:underline self-center"
-        >
-          ← 商品图（自创）
-        </a>
-      </div>
+    <div className="max-w-page mx-auto space-y-6 p-4 md:p-6">
+      <PageHeader
+        section="remix"
+        icon={Wand2}
+        title="整体仿写"
+        badge={<BetaBadge />}
+        hint="粘贴小红书 / 抖音作品链接 → 选参考图 → AI 仿照整体风格批量出 N 套（图上文字保持不变 + 重写文案）。"
+        actions={
+          <a href="/dashboard/tools/text-remix" className="text-sm text-remix-600 hover:underline">
+            文案换背景 →
+          </a>
+        }
+      />
 
       <ConfigStatusBar
         cfg={cfg}

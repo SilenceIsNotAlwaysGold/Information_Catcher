@@ -7,7 +7,8 @@ import { Input } from "@nextui-org/input";
 import { Switch } from "@nextui-org/switch";
 import { Divider } from "@nextui-org/divider";
 import { Tabs, Tab } from "@nextui-org/tabs";
-import { Save } from "lucide-react";
+import { Save, Settings } from "lucide-react";
+import { PageHeader } from "@/components/ui";
 import { useAuth } from "@/contexts/AuthContext";
 import { PromptTemplatesCard } from "@/components/PromptTemplatesCard";
 import { MonitorGroupsCard } from "@/components/MonitorGroupsCard";
@@ -15,7 +16,8 @@ import { FeishuBindingCard } from "@/components/FeishuBindingCard";
 import { PlanUsageCard } from "@/components/PlanUsageCard";
 import { FeishuPushToggle } from "@/components/FeishuPushToggle";
 import { AiPreferencesCard } from "@/components/AiPreferencesCard";
-import { MyAiModelsCard } from "@/components/MyAiModelsCard";
+import { BillingCard } from "@/components/BillingCard";
+// v2: 自带 AI 渠道下线（AI 全走平台统一渠道，按点数计费）—— MyAiModelsCard 已移除
 
 const API = (path: string) => `/api/monitor${path}`;
 
@@ -464,8 +466,8 @@ export default function MonitorSettingsPage() {
         </CardBody>
       </Card>
 
-      {/* 用户自带的 OpenAI 兼容模型（出现在所有 ModelSelector 下拉里） */}
-      <MyAiModelsCard token={token} />
+      {/* v2: AI 点数余额（所有 AI 功能按点数计费，走平台统一渠道）*/}
+      <BillingCard />
 
       {/* P15: AI 模型偏好（用户级） */}
       <AiPreferencesCard token={token} />
@@ -482,8 +484,12 @@ export default function MonitorSettingsPage() {
   // ── 系统配置 tab（仅管理员）：AI、检测间隔、账号管理、商品图 API ──────────
 
   return (
-    <div className="p-6 space-y-6 max-w-2xl">
-      <h1 className="text-2xl font-bold">监控设置</h1>
+    <div className="p-6 space-y-6 max-w-page mx-auto">
+      <PageHeader
+        icon={Settings}
+        title="个人中心"
+        hint="账户、监控阈值、AI 模型偏好、通知 webhook 等设置。"
+      />
 
       <Tabs aria-label="settings sections" selectedKey={activeTab} onSelectionChange={(k) => setActiveTab(String(k))}>
         <Tab key="global" title="全局">

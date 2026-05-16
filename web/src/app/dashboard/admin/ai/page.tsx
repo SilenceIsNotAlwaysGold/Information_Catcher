@@ -32,6 +32,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useMe } from "@/lib/useApi";
 import useSWR, { mutate as globalMutate } from "swr";
 import { toastOk, toastErr } from "@/lib/toast";
+import { PageHeader } from "@/components/ui";
 import { confirmDialog } from "@/components/ConfirmDialog";
 
 const API = (p: string) => `/api${p}`;
@@ -101,17 +102,12 @@ export default function AdminAiPage() {
   }
 
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-          <Sparkles size={22} className="text-secondary" />
-          AI 模型配置
-        </h1>
-        <p className="text-sm text-default-500 mt-1">
-          支持配置多个 AI 渠道，每个渠道下管理多个模型；
-          可以上下架决定用户是否可见，设默认决定未选择时用哪个。
-        </p>
-      </div>
+    <div className="p-6 max-w-page mx-auto space-y-6">
+      <PageHeader
+        icon={Sparkles}
+        title="AI 模型配置"
+        hint="配置多个 AI 渠道 + 多个模型；上下架决定用户可见性，设默认决定未选择时用哪个；每个模型可单独设定价（price_per_call + feature_pricing）。"
+      />
 
       <Tabs aria-label="AI Config Tabs" variant="solid" color="secondary">
         <Tab key="text" title="文本模型">

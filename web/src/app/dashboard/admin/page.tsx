@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { toastErr } from "@/lib/toast";
+import { PageHeader } from "@/components/ui";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/TableSkeleton";
 import { CardSkeleton } from "@/components/CardSkeleton";
@@ -166,18 +167,19 @@ export default function AdminPage() {
   if (user.role !== "admin") return null;
 
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-4">
-      <div className="flex items-center gap-2 mb-2">
-        <ShieldCheck className="text-primary" size={22} />
-        <h1 className="text-xl font-semibold">管理员控制台</h1>
-        <Chip size="sm" color="warning" variant="flat" className="ml-2">仅管理员可见</Chip>
-        <Button
-          size="sm" variant="light" startContent={<RefreshCw size={14} />}
-          onPress={fetchAll}
-          isLoading={loading}
-          className="ml-auto"
-        >刷新</Button>
-      </div>
+    <div className="p-6 space-y-6 max-w-page mx-auto">
+      <PageHeader
+        icon={ShieldCheck}
+        title="管理员控制台"
+        badge={<Chip size="sm" color="warning" variant="flat">仅管理员</Chip>}
+        hint="平台全局数据概览 + 快速访问各管理模块。"
+        actions={
+          <Button size="sm" variant="flat" startContent={<RefreshCw size={14} />}
+            onPress={fetchAll} isLoading={loading}>
+            刷新
+          </Button>
+        }
+      />
 
       <div className="grid grid-cols-2 gap-4">
         <StatCard icon={<Users size={18} />} label="用户数" value={users.length} />

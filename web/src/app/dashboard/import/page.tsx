@@ -10,6 +10,7 @@ import { Divider } from "@nextui-org/divider";
 import { Upload, Trash2, Download, CheckCircle, XCircle, AlertCircle } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastErr } from "@/lib/toast";
+import { PageHeader } from "@/components/ui";
 
 const API = (p: string) => `/api/monitor${p}`;
 
@@ -103,18 +104,20 @@ export default function ImportPage() {
   const failCount = results.filter((r) => !r.ok).length;
 
   return (
-    <div className="p-6 space-y-6 max-w-3xl">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">数据导入</h1>
-          <p className="text-sm text-default-500 mt-0.5">批量导入小红书帖子链接进行监控</p>
-        </div>
-        {posts.length > 0 && (
-          <Button size="sm" variant="flat" startContent={<Download size={15} />} onPress={handleExport}>
-            导出链接列表
-          </Button>
-        )}
-      </div>
+    <div className="p-6 space-y-6 max-w-page mx-auto">
+      <PageHeader
+        section="toolbox"
+        icon={Upload}
+        title="数据导入"
+        hint="批量导入小红书帖子链接进行监控；或从博主主页一键导入全部作品。"
+        actions={
+          posts.length > 0 ? (
+            <Button size="sm" variant="flat" startContent={<Download size={15} />} onPress={handleExport}>
+              导出链接列表
+            </Button>
+          ) : null
+        }
+      />
 
       {/* Import form */}
       <Card className="border border-divider">

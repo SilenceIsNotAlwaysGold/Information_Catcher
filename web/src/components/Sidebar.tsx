@@ -1,198 +1,121 @@
 "use client";
 
-import { usePathname, useSearchParams } from "next/navigation";
+/**
+ * Sidebar v2 —— 按板块（SECTIONS）重组。
+ *
+ * 结构：
+ *   🏠 概览
+ *   ────────────
+ *   👁 监控        ▾  （展开子项：小红书 帖子/博主/热门 + 抖音 同 + 检测历史 + 告警设置）
+ *   ✨ AI 工坊      ▾  （漫画 / 小说 / 旅游 / PPT）
+ *   🪄 仿写床      ▾  （商品图 / 整体仿写 / 文案换背景）
+ *   🛠 工具箱      ▾  （服务监控 / 浏览器扩展 / 数据导入 / 发布）
+ *   📰 热点雷达
+ *   ────────────
+ *   ⚙️ 个人设置
+ *   🛡 管理员      ▾  （admin 才可见，默认折叠）
+ *
+ * 跟 v1 比的关键变化：
+ *   - 不再用 module 字段串平台/工具/管理员；改用 SECTIONS 单一真相源
+ *   - "公众号"砍掉；"工具垃圾桶"拆为「仿写床」+「工具箱」两个有清晰主题的板块
+ *   - 子项 icon 不再是 GROUP_ICON 兼并版，每项有自己的图标
+ *   - 移动 drawer + 折叠态（lg 以下）的伪折叠 hack 简化掉了；md 折叠时直接展示组图标 tooltip
+ */
+import { usePathname } from "next/navigation";
 import Link from "next/link";
 import {
-  LayoutDashboard, Upload, Settings, LogOut, TrendingUp,
-  ShieldCheck, Music2, Newspaper, ChevronDown, ChevronRight,
-  FileText, Users, Moon, Sun, X, Sparkles, Link2, SlidersHorizontal,
-  Image as ImageIcon, Wand2, Ticket, History as HistoryIcon, Puzzle, Wrench,
+  Home, Settings, LogOut, ShieldCheck, Moon, Sun, X,
+  ChevronDown, ChevronRight, Users, Ticket, History as HistoryIcon, Sparkles, Link2,
+  SlidersHorizontal,
 } from "lucide-react";
 import { Button } from "@nextui-org/button";
 import { Tooltip } from "@nextui-org/tooltip";
-import { Chip } from "@nextui-org/chip";
 import { useTheme } from "next-themes";
-import { useI18n } from "@/contexts/I18nContext";
 import { useAuth } from "@/contexts/AuthContext";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import {
-  PLATFORM_SECTIONS, SECTION_LABEL,
-  type PlatformKey, type SectionKey,
-} from "@/components/platform";
+import { useEffect, useMemo, useState } from "react";
+import { SECTION_ORDER, SECTIONS, sectionForPath, type SectionKey } from "@/lib/sections";
 
-type ModuleId = "common" | "xhs" | "douyin" | "mp" | "tools" | "admin";
+const COLLAPSE_KEY = "sidebar.collapsed.v2";
 
-type NavItem = {
-  key: string;
-  href: string;
-  icon: ReactNode;
-  label: string;
-  module: ModuleId;
-  wip?: boolean;
-};
-
-const xhsIcon = <span className="text-xl leading-none">🌸</span>;
-
-// 子项 icon：根据 section 类型选择
-const sectionIcon = (section: SectionKey): ReactNode => {
-  if (section === "posts") return <FileText size={16} />;
-  if (section === "trending") return <TrendingUp size={16} />;
-  return <Users size={16} />; // creators
-};
-
-// 可折叠组的"标题图标 + 标签"。common 不在此处。
-const GROUP_ICON: Record<Exclude<ModuleId, "common">, ReactNode> = {
-  xhs: xhsIcon,
-  douyin: <Music2 size={20} />,
-  mp: <Newspaper size={20} />,
-  tools: <Wrench size={20} />,
-  admin: <ShieldCheck size={20} />,
-};
-
-const GROUP_LABEL: Record<Exclude<ModuleId, "common">, string> = {
-  xhs: "小红书",
-  douyin: "抖音",
-  mp: "公众号",
-  tools: "工具",
-  admin: "管理员",
-};
-
-// 用 PLATFORM_SECTIONS 自动生成每个平台的子项
-const buildPlatformItems = (platform: PlatformKey): NavItem[] =>
-  PLATFORM_SECTIONS[platform].map((section) => ({
-    key: `${platform}-${section}`,
-    href: `/dashboard/${platform}/${section}/`,
-    icon: sectionIcon(section),
-    label: SECTION_LABEL[section],
-    module: platform,
-  }));
-
-const baseNavItems: NavItem[] = [
-  { key: "dashboard", href: "/dashboard", icon: <LayoutDashboard size={20} />, label: "概览", module: "common" },
-
-  ...buildPlatformItems("xhs"),
-  ...buildPlatformItems("douyin"),
-  ...buildPlatformItems("mp"),
-
-  { key: "import",      href: "/dashboard/import",                icon: <Upload size={20} />,    label: "数据导入", module: "common" },
-
-  // 工具组（默认折叠）
-  { key: "tools-image",      href: "/dashboard/tools/product-image",   icon: <ImageIcon size={16} />, label: "商品图（自创）", module: "tools" },
-  { key: "tools-remix",      href: "/dashboard/tools/product-remix",   icon: <Wand2 size={16} />,     label: "整体仿写",       module: "tools" },
-  { key: "tools-text-remix", href: "/dashboard/tools/text-remix",      icon: <Wand2 size={16} />,     label: "文案换背景",       module: "tools" },
-  { key: "tools-comic",      href: "/dashboard/tools/comic-style",     icon: <Wand2 size={16} />,     label: "漫画风",         module: "tools" },
-  { key: "tools-extension",  href: "/dashboard/extension",             icon: <Puzzle size={16} />,    label: "我的浏览器扩展", module: "tools" },
-
-  { key: "settings",    href: "/dashboard/profile",               icon: <Settings size={20} />,  label: "个人设置", module: "common" },
+// 管理员子项独立维护
+const ADMIN_ITEMS = [
+  { key: "admin",         href: "/dashboard/admin",         icon: ShieldCheck,         label: "控制台" },
+  { key: "admin-users",   href: "/dashboard/admin/users",   icon: Users,               label: "用户管理" },
+  { key: "admin-invites", href: "/dashboard/admin/invites", icon: Ticket,              label: "邀请码" },
+  { key: "admin-audit",   href: "/dashboard/admin/audit",   icon: HistoryIcon,         label: "审计日志" },
+  { key: "admin-ai",      href: "/dashboard/admin/ai",      icon: Sparkles,            label: "AI 模型" },
+  { key: "admin-feishu",  href: "/dashboard/admin/feishu",  icon: Link2,               label: "飞书应用" },
+  { key: "admin-system",  href: "/dashboard/admin/system",  icon: SlidersHorizontal,   label: "系统配置" },
 ];
 
-// 管理员组（默认折叠，admin 才能看到）
-const adminNavItems: NavItem[] = [
-  { key: "admin",          href: "/dashboard/admin",          icon: <ShieldCheck size={16} />,        label: "控制台",   module: "admin" },
-  { key: "admin-users",    href: "/dashboard/admin/users",    icon: <Users size={16} />,              label: "用户管理", module: "admin" },
-  { key: "admin-invites",  href: "/dashboard/admin/invites",  icon: <Ticket size={16} />,             label: "邀请码",   module: "admin" },
-  { key: "admin-audit",    href: "/dashboard/admin/audit",    icon: <HistoryIcon size={16} />,        label: "审计日志", module: "admin" },
-  { key: "admin-ai",       href: "/dashboard/admin/ai",       icon: <Sparkles size={16} />,           label: "AI 模型",  module: "admin" },
-  { key: "admin-feishu",   href: "/dashboard/admin/feishu",   icon: <Link2 size={16} />,              label: "飞书应用", module: "admin" },
-  { key: "admin-system",   href: "/dashboard/admin/system",   icon: <SlidersHorizontal size={16} />,  label: "系统配置", module: "admin" },
-];
-
-const COLLAPSE_KEY = "sidebar.collapsed.modules";
-
-// 默认所有可折叠组都收起；进入页面时再根据当前 pathname 自动展开命中那一组。
-const DEFAULT_COLLAPSED: Record<string, boolean> = {
-  xhs: true, douyin: true, mp: true, tools: true, admin: true,
+const SECTION_ACTIVE_BG: Record<SectionKey, string> = {
+  monitor:  "bg-monitor-50  text-monitor-700  dark:bg-monitor-900/30  dark:text-monitor-100",
+  studio:   "bg-studio-50   text-studio-700   dark:bg-studio-900/30   dark:text-studio-100",
+  original: "bg-original-50 text-original-700 dark:bg-original-900/30 dark:text-original-100",
+  remix:    "bg-remix-50    text-remix-700    dark:bg-remix-900/30    dark:text-remix-100",
+  toolbox:  "bg-toolbox-50  text-toolbox-700  dark:bg-toolbox-900/30  dark:text-toolbox-100",
+  hotnews:  "bg-hotnews-50  text-hotnews-700  dark:bg-hotnews-900/30  dark:text-hotnews-100",
+};
+const SECTION_DOT: Record<SectionKey, string> = {
+  monitor:  "bg-monitor-500",
+  studio:   "bg-studio-500",
+  original: "bg-original-500",
+  remix:    "bg-remix-500",
+  toolbox:  "bg-toolbox-500",
+  hotnews:  "bg-hotnews-500",
 };
 
 export type SidebarProps = {
-  /** 移动端 drawer 是否打开（仅在 <md 生效） */
   mobileOpen?: boolean;
-  /** 关闭 drawer 的回调（点击遮罩 / 链接 / 关闭按钮触发） */
   onMobileClose?: () => void;
 };
 
 export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps = {}) {
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
-  const tabQuery = searchParams?.get("tab") || "";
-  const { t } = useI18n();
+  const pathname = usePathname() || "/";
   const { logout, user } = useAuth();
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
-  const navItems = user?.role === "admin" ? [...baseNavItems, ...adminNavItems] : baseNavItems;
+  const isAdmin = user?.role === "admin";
 
-  // 折叠状态：默认全部可折叠组收起；localStorage 中有值优先用之；
-  // 当前 pathname 命中的组在初次渲染时强制展开（避免用户进入页面看不到当前位置）。
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(DEFAULT_COLLAPSED);
+  const activeSection = useMemo<SectionKey | null>(() => sectionForPath(pathname), [pathname]);
 
-  // 推断当前 pathname 落在哪个组里（用于初次自动展开）
-  const activeGroup: ModuleId | null = useMemo(() => {
-    for (const it of navItems) {
-      if (it.module === "common") continue;
-      const hrefPath = it.href.split("?")[0];
-      const matched = pathname === hrefPath
-        || pathname === hrefPath.replace(/\/$/, "")
-        || pathname.startsWith(hrefPath + "/");
-      if (matched) return it.module;
-    }
-    return null;
-  }, [pathname, navItems]);
-
+  // 折叠状态：默认全折叠；命中的板块自动展开
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
+    const init: Record<string, boolean> = {};
+    SECTION_ORDER.forEach((k) => (init[k] = true));
+    init["admin"] = true;
+    return init;
+  });
   useEffect(() => {
-    let initial: Record<string, boolean> = { ...DEFAULT_COLLAPSED };
+    let next: Record<string, boolean> = {};
+    SECTION_ORDER.forEach((k) => (next[k] = true));
+    next["admin"] = true;
     try {
       const raw = localStorage.getItem(COLLAPSE_KEY);
-      if (raw) initial = { ...initial, ...JSON.parse(raw) };
+      if (raw) next = { ...next, ...JSON.parse(raw) };
     } catch { /* ignore */ }
-    if (activeGroup) initial[activeGroup] = false; // 当前所在组自动展开
-    setCollapsed(initial);
-    // 仅在首次挂载和 active 组变化时执行
-  }, [activeGroup]);
+    if (activeSection) next[activeSection] = false;  // 命中的板块自动展开
+    if (pathname.startsWith("/dashboard/admin")) next["admin"] = false;
+    setCollapsed(next);
+  }, [activeSection, pathname]);
 
-  const toggle = (m: ModuleId) => {
-    setCollapsed((prev) => {
-      const next = { ...prev, [m]: !prev[m] };
-      try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(next)); } catch {}
-      return next;
+  const toggle = (key: string) => {
+    setCollapsed((p) => {
+      const n = { ...p, [key]: !p[key] };
+      try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(n)); } catch {}
+      return n;
     });
   };
 
-  // 最长前缀匹配 active：精确匹配 href 或 href + "/"
-  // 对带 ?tab=xxx 的入口（如「账号管理」）：当前 path 命中且 query 也匹配才算 active
-  const candidates = navItems
-    .filter((it) => {
-      const [hrefPath, hrefQs] = it.href.split("?");
-      const pathMatch = hrefPath === "/dashboard"
-        ? pathname === "/dashboard" || pathname === "/dashboard/"
-        : pathname === hrefPath
-          || pathname === hrefPath.replace(/\/$/, "")
-          || pathname.startsWith(hrefPath + "/");
-      if (!pathMatch) return false;
-      if (!hrefQs) return true;
-      const want = new URLSearchParams(hrefQs).get("tab") || "";
-      return want === tabQuery;
-    })
-    .sort((a, b) => b.href.length - a.href.length);
-  const activeKey = (() => {
-    if (tabQuery) {
-      const withQuery = candidates.find((c) => c.href.includes("?tab="));
-      if (withQuery) return withQuery.key;
-    }
-    const noQuery = candidates.filter((c) => !c.href.includes("?"));
-    return (noQuery[0] || candidates[0])?.key;
-  })();
-
-  // 按 module 分桶但保留原序
-  const blocks: { module: ModuleId; items: NavItem[] }[] = [];
-  for (const it of navItems) {
-    const last = blocks[blocks.length - 1];
-    if (last && last.module === it.module) last.items.push(it);
-    else blocks.push({ module: it.module, items: [it] });
-  }
+  const isActive = (href: string) =>
+    href === "/dashboard"
+      ? pathname === "/dashboard" || pathname === "/dashboard/"
+      : pathname === href || pathname.startsWith(href + "/");
 
   return (
     <>
+      {/* 移动端遮罩 */}
       <div
         className={`md:hidden fixed inset-0 z-40 bg-black/50 transition-opacity duration-200
           ${mobileOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"}`}
@@ -200,125 +123,235 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps = {}
         aria-hidden="true"
       />
       <aside
-        className={`fixed left-0 top-0 h-screen w-64 md:w-16 lg:w-64 bg-content1 border-r border-divider flex flex-col z-50
+        className={`fixed left-0 top-0 h-screen w-64 bg-content1 border-r border-divider flex flex-col z-50
           transition-transform duration-200 ease-out
           ${mobileOpen ? "translate-x-0" : "-translate-x-full"} md:translate-x-0`}
       >
-      <div className="h-16 flex items-center justify-between md:justify-center lg:justify-start px-4 border-b border-divider gap-2">
-        <div className="flex items-center gap-2">
-          <span className="text-2xl">🪐</span>
-          <span className="hidden max-md:block lg:block font-bold text-base text-foreground tracking-tight">
-            Trend<span className="text-primary">Pulse</span>
-          </span>
+        {/* Brand */}
+        <div className="h-16 flex items-center justify-between px-4 border-b border-divider">
+          <Link href="/dashboard" className="flex items-center gap-2" onClick={onMobileClose}>
+            <span className="text-2xl leading-none">🪐</span>
+            <span className="font-bold text-base text-foreground tracking-tight">
+              Trend<span className="text-primary">Pulse</span>
+            </span>
+          </Link>
+          <button
+            type="button"
+            onClick={onMobileClose}
+            className="md:hidden p-1 rounded hover:bg-default-100 text-default-500"
+            aria-label="关闭菜单"
+          >
+            <X size={20} />
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={onMobileClose}
-          className="md:hidden p-1 rounded hover:bg-default-100 text-default-500"
-          aria-label="关闭菜单"
-        >
-          <X size={20} />
-        </button>
-      </div>
 
-      <nav className="flex-1 py-3 overflow-y-auto">
-        <ul className="space-y-1 px-2">
-          {blocks.map((blk, bi) => {
-            const isCollapsible = blk.module !== "common";
-            const isOpen = !isCollapsible || !collapsed[blk.module];
-            return (
-              <div key={bi} className={isCollapsible ? "mt-3 mb-1" : "mb-1"}>
-                {isCollapsible && (
+        <nav className="flex-1 py-3 overflow-y-auto">
+          <ul className="space-y-0.5 px-2">
+            {/* 概览 */}
+            <NavLeaf
+              href="/dashboard"
+              icon={<Home size={18} />}
+              label="概览"
+              active={isActive("/dashboard")}
+              onClick={onMobileClose}
+            />
+
+            <Divider />
+
+            {/* 5 个板块 */}
+            {SECTION_ORDER.map((key) => {
+              const sec = SECTIONS[key];
+              const isOpen = !collapsed[key];
+              const isHere = activeSection === key;
+              const hasChildren = sec.children.length > 0;
+              const Icon = sec.icon;
+              if (!hasChildren) {
+                // 热点雷达：扁平直链
+                return (
+                  <NavLeaf
+                    key={key}
+                    href={sec.href}
+                    icon={<Icon size={18} className={`text-${sec.color}-600 dark:text-${sec.color}-500`} />}
+                    label={sec.label}
+                    active={isHere}
+                    activeBg={SECTION_ACTIVE_BG[key]}
+                    onClick={onMobileClose}
+                  />
+                );
+              }
+              return (
+                <li key={key}>
                   <button
                     type="button"
-                    onClick={() => toggle(blk.module)}
-                    className="hidden max-md:flex lg:flex w-full items-center gap-2.5 px-3 py-2 text-left
-                               text-default-700 hover:bg-default-100 rounded-lg transition-colors group"
+                    onClick={() => toggle(key)}
+                    className={`w-full flex items-center gap-2.5 px-3 py-2 text-left rounded-lg transition-colors
+                      ${isHere ? SECTION_ACTIVE_BG[key] : "text-default-700 hover:bg-default-100 dark:hover:bg-default-200/40"}`}
                   >
-                    <span className="shrink-0 text-default-500 group-hover:text-default-700 transition-colors">
-                      {GROUP_ICON[blk.module as Exclude<ModuleId, "common">]}
+                    <span className={`shrink-0 ${isHere ? "" : `text-${sec.color}-600 dark:text-${sec.color}-500`}`}>
+                      <Icon size={18} />
                     </span>
-                    <span className="text-sm font-semibold flex-1">
-                      {GROUP_LABEL[blk.module as Exclude<ModuleId, "common">]}
-                    </span>
-                    {blk.items[0]?.wip && (
-                      <Chip size="sm" variant="flat" color="warning" className="h-5 px-1.5 text-[10px]">
-                        WIP
-                      </Chip>
-                    )}
+                    <span className="text-sm font-medium flex-1">{sec.label}</span>
                     {isOpen
-                      ? <ChevronDown size={14} className="text-default-400 shrink-0" />
-                      : <ChevronRight size={14} className="text-default-400 shrink-0" />}
+                      ? <ChevronDown size={14} className="text-default-400" />
+                      : <ChevronRight size={14} className="text-default-400" />}
                   </button>
-                )}
-                {/* 子项：折叠时仅在 lg 屏隐藏；移动端 drawer 内（max-md）按宽态显示 */}
-                <div className={isOpen ? "" : "max-md:hidden hidden lg:hidden"}>
-                  {blk.items.map((item) => {
-                    const isActive = item.key === activeKey;
-                    const indent = isCollapsible ? "max-md:ml-4 lg:ml-4" : "";
-                    return (
-                      <li key={item.key}>
-                        <Tooltip
-                          content={item.wip ? `${item.label}（开发中）` : item.label}
-                          placement="right" className="lg:hidden"
-                        >
-                          <Link href={item.href} onClick={onMobileClose}>
-                            <div className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors ${indent}
-                              ${isActive ? "bg-primary text-primary-foreground"
-                                         : item.wip ? "text-default-400 hover:bg-default-100"
-                                                    : "text-default-600 hover:bg-default-100"}`}>
-                              {/* 可折叠组的子项在窄屏（md 折叠态）显示组图标，宽屏显示子项 icon */}
-                              {isCollapsible ? (
-                                <>
-                                  <span className="max-md:hidden lg:hidden">
-                                    {GROUP_ICON[blk.module as Exclude<ModuleId, "common">]}
-                                  </span>
-                                  <span className="hidden max-md:block lg:block">{item.icon}</span>
-                                </>
-                              ) : item.icon}
-                              <span className="hidden max-md:block lg:block text-sm font-medium flex-1">
-                                {item.label}
-                              </span>
-                            </div>
-                          </Link>
-                        </Tooltip>
-                      </li>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })}
-        </ul>
-      </nav>
+                  {isOpen && (
+                    <ul className="mt-0.5 mb-1 ml-5 pl-3 border-l border-default-200 dark:border-default-200/40 space-y-0.5">
+                      {/* 板块二级首页（如果路径是子页则不再单独显示"概览"快捷条目，避免冗余） */}
+                      <NavChild
+                        href={sec.href}
+                        label={`${sec.label} 概览`}
+                        active={pathname === sec.href || pathname === sec.href + "/"}
+                        dotClass={SECTION_DOT[key]}
+                        onClick={onMobileClose}
+                      />
+                      {sec.children.map((c) => (
+                        <NavChild
+                          key={c.key}
+                          href={c.href}
+                          label={c.label}
+                          hint={c.hint}
+                          active={isActive(c.href)}
+                          dotClass={SECTION_DOT[key]}
+                          onClick={onMobileClose}
+                        />
+                      ))}
+                    </ul>
+                  )}
+                </li>
+              );
+            })}
 
-      <div className="border-t border-divider p-3 space-y-2">
-        <div className="hidden max-md:flex lg:flex items-center gap-2 mb-1 px-1">
-          <span className="text-sm text-default-500 truncate">{user?.username}</span>
+            <Divider />
+
+            <NavLeaf
+              href="/dashboard/profile"
+              icon={<Settings size={18} />}
+              label="个人中心"
+              active={isActive("/dashboard/profile")}
+              onClick={onMobileClose}
+            />
+
+            {/* 管理员组（仅 admin 可见） */}
+            {isAdmin && (
+              <li>
+                <button
+                  type="button"
+                  onClick={() => toggle("admin")}
+                  className={`w-full flex items-center gap-2.5 px-3 py-2 text-left rounded-lg transition-colors
+                    ${pathname.startsWith("/dashboard/admin") ? "bg-default-100 text-foreground dark:bg-default-200/40" : "text-default-600 hover:bg-default-100 dark:hover:bg-default-200/40"}`}
+                >
+                  <span className="shrink-0 text-default-500"><ShieldCheck size={18} /></span>
+                  <span className="text-sm font-medium flex-1">管理员</span>
+                  {collapsed["admin"]
+                    ? <ChevronRight size={14} className="text-default-400" />
+                    : <ChevronDown size={14} className="text-default-400" />}
+                </button>
+                {!collapsed["admin"] && (
+                  <ul className="mt-0.5 mb-1 ml-5 pl-3 border-l border-default-200 dark:border-default-200/40 space-y-0.5">
+                    {ADMIN_ITEMS.map((it) => (
+                      <NavChild
+                        key={it.key}
+                        href={it.href}
+                        label={it.label}
+                        active={isActive(it.href)}
+                        dotClass="bg-default-400"
+                        onClick={onMobileClose}
+                      />
+                    ))}
+                  </ul>
+                )}
+              </li>
+            )}
+          </ul>
+        </nav>
+
+        {/* 底部：用户信息 + 主题 + 退出 */}
+        <div className="border-t border-divider p-3 space-y-2">
+          <div className="flex items-center gap-2 px-1 text-sm">
+            <div className="size-7 rounded-full bg-primary-100 dark:bg-primary-900/40 grid place-items-center text-primary-600 dark:text-primary-400 font-semibold text-xs uppercase">
+              {(user?.username || "U")[0]}
+            </div>
+            <span className="text-default-700 truncate flex-1">{user?.username}</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <Tooltip content="退出登录">
+              <Button isIconOnly variant="light" size="sm" onClick={logout}>
+                <LogOut size={16} />
+              </Button>
+            </Tooltip>
+            <Tooltip content={mounted && theme === "dark" ? "切到浅色" : "切到暗色"}>
+              <Button
+                isIconOnly variant="light" size="sm" aria-label="切换主题"
+                onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              >
+                {mounted && theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+              </Button>
+            </Tooltip>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Tooltip content={t("common.logout")} placement="right">
-            <Button isIconOnly variant="light" className="w-full max-md:w-auto lg:w-auto" onClick={logout}>
-              <LogOut size={18} />
-              <span className="hidden max-md:inline lg:inline ml-2 text-sm">{t("common.logout")}</span>
-            </Button>
-          </Tooltip>
-          <Tooltip
-            content={mounted && theme === "dark" ? "切到浅色" : "切到暗色"}
-            placement="right"
-          >
-            <Button
-              isIconOnly
-              variant="light"
-              aria-label="切换主题"
-              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            >
-              {mounted && theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
-            </Button>
-          </Tooltip>
-        </div>
-      </div>
-    </aside>
+      </aside>
     </>
   );
+}
+
+/** 顶级直链（概览 / 热点雷达 / 个人中心） */
+function NavLeaf({
+  href, icon, label, active, activeBg, onClick,
+}: {
+  href: string;
+  icon: React.ReactNode;
+  label: string;
+  active?: boolean;
+  /** 命中态背景色 className（板块直链覆盖默认 primary） */
+  activeBg?: string;
+  onClick?: () => void;
+}) {
+  const defaultActive = "bg-primary-50 text-primary-700 dark:bg-primary-900/30 dark:text-primary-100";
+  return (
+    <li>
+      <Link href={href} onClick={onClick}>
+        <div className={`flex items-center gap-2.5 px-3 py-2 rounded-lg transition-colors
+          ${active ? (activeBg || defaultActive) : "text-default-700 hover:bg-default-100 dark:hover:bg-default-200/40"}`}>
+          <span className="shrink-0">{icon}</span>
+          <span className="text-sm font-medium flex-1">{label}</span>
+        </div>
+      </Link>
+    </li>
+  );
+}
+
+/** 子菜单项（板块下的具体页面） */
+function NavChild({
+  href, label, hint, active, dotClass, onClick,
+}: {
+  href: string;
+  label: string;
+  hint?: string;
+  active?: boolean;
+  /** 圆点颜色 className */
+  dotClass: string;
+  onClick?: () => void;
+}) {
+  return (
+    <li>
+      <Link href={href} onClick={onClick}>
+        <div className={`relative flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md transition-colors
+          ${active
+            ? "bg-default-100 text-foreground dark:bg-default-200/50 font-medium"
+            : "text-default-600 hover:bg-default-100 dark:hover:bg-default-200/40"}`}>
+          {/* 圆点 — 给侧栏一点节奏感 */}
+          <span className={`absolute -left-[7px] size-1.5 rounded-full ${active ? dotClass : "bg-transparent"}`} />
+          <span className="text-sm truncate flex-1">{label}</span>
+          {hint && active && (
+            <span className="text-[10px] text-default-400 truncate hidden xl:inline-block">{hint}</span>
+          )}
+        </div>
+      </Link>
+    </li>
+  );
+}
+
+function Divider() {
+  return <li className="my-2 mx-3 h-px bg-divider" />;
 }
