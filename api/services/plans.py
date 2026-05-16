@@ -26,12 +26,13 @@ PLANS: Dict[str, Dict[str, Any]] = {
     "trial": {
         "label": "试用",
         "monitor_posts": 50,
-        "total_image_gen": 100,   # 账户累计图额度（不重置）
-        "daily_text_gen":  10,    # 文：每日重置
-        "daily_image_gen": 100,   # deprecated 别名，等于 total_image_gen
-        "daily_remix_sets": 5,    # deprecated
+        "total_image_gen": 100,   # 账户累计图额度（不重置）— v2 起仅作历史展示
+        "daily_text_gen":  10,
+        "daily_image_gen": 100,
+        "daily_remix_sets": 5,
         "accounts": 1,
         "duration_days": 14,
+        "monthly_credits": 50,    # v2: 每月免费点数（cron grant）
         "color": "warning",
     },
     "free": {
@@ -43,6 +44,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "daily_remix_sets": 3,
         "accounts": 1,
         "duration_days": None,
+        "monthly_credits": 20,    # v2
         "color": "default",
     },
     "pro": {
@@ -54,6 +56,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "daily_remix_sets": 30,
         "accounts": 5,
         "duration_days": None,
+        "monthly_credits": 500,   # v2
         "color": "primary",
     },
     "team": {
@@ -65,6 +68,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "daily_remix_sets": 100,
         "accounts": 20,
         "duration_days": None,
+        "monthly_credits": 3000,  # v2
         "color": "secondary",
     },
     "enterprise": {
@@ -76,6 +80,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "daily_remix_sets": -1,
         "accounts": -1,
         "duration_days": None,
+        "monthly_credits": 0,     # 企业版不送，按需充值
         "color": "success",
     },
 }

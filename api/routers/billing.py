@@ -159,3 +159,15 @@ async def admin_reconcile_all(admin: dict = Depends(get_admin_user)):
             for uid, bal, total in bad
         ],
     }
+
+
+class GrantAllIn(BaseModel):
+    ym: Optional[str] = None  # 'YYYY-MM'，不传 = 本月
+
+
+@admin_router.post("/grant-all-monthly", summary="立刻按 plan.monthly_credits 给所有活跃用户送点（cron 同款，幂等）")
+async def admin_grant_all_monthly(body: GrantAllIn, admin: dict = Depends(get_admin_user)):
+    """与 cron `monthly_grant` 完全等价。task_ref = monthly_grant:{uid}:{ym}，
+    同月重复调用不会重复送（前后端踩重也安全）。"""
+    result = await billing_service.monthly_grant_all_users(ym=body.ym)
+    return {"ok": True, **result}

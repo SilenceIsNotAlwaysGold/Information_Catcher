@@ -180,8 +180,180 @@ async def fetch_weibo_hot() -> List[Dict[str, Any]]:
     return items
 
 
-# ── 36 氪 / 知乎 暂未接入（反爬较严，需要 cookie / 复杂签名）
-# TODO（v2.1）：换 newsnow 项目里现成的爬取实现，或者用 RSSHub。
+# ── B 站热门视频（开放 JSON）─────────────────────────────────────────────
+@_register("bilibili_hot", "B 站热门", "entertainment")
+async def fetch_bilibili_hot() -> List[Dict[str, Any]]:
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as cli:
+        r = await cli.get(
+            "https://api.bilibili.com/x/web-interface/popular?ps=30&pn=1",
+            headers={
+                "User-Agent": "Mozilla/5.0 PulseBot/1.0",
+                "Referer": "https://www.bilibili.com/",
+            },
+        )
+        try:
+            data = r.json()
+        except Exception:
+            return []
+    items: List[Dict[str, Any]] = []
+    for v in ((data.get("data") or {}).get("list") or [])[:30]:
+        title = v.get("title") or ""
+        bvid = v.get("bvid") or ""
+        if not (title and bvid):
+            continue
+        stat = v.get("stat") or {}
+        view = int(stat.get("view") or 0)
+        items.append({
+            "title": title,
+            "url": f"https://www.bilibili.com/video/{bvid}",
+            "summary": v.get("desc") or (v.get("owner") or {}).get("name") or "",
+            "score": view,
+            "score_label": f"{view:,} 播放",
+            "published_at": "",
+        })
+    return items
+
+
+# ── Solidot（IT 资讯，多年稳定 RSS）─────────────────────────────────────
+@_register("solidot", "Solidot", "tech")
+async def fetch_solidot() -> List[Dict[str, Any]]:
+    return await _fetch_rss("https://www.solidot.org/index.rss", score_label_from_pubdate=True)
+
+
+# ── 百度热搜（公开 JSON 接口）────────────────────────────────────────────
+@_register("baidu_hot", "百度热搜", "entertainment")
+async def fetch_baidu_hot() -> List[Dict[str, Any]]:
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as cli:
+        r = await cli.get(
+            "https://top.baidu.com/api/board?platform=wise&tab=realtime",
+            headers={"User-Agent": "Mozilla/5.0 PulseBot/1.0",
+                     "Referer": "https://top.baidu.com/"},
+        )
+        try:
+            data = r.json()
+        except Exception:
+            return []
+    items: List[Dict[str, Any]] = []
+    # data.cards[0].content[0].content  ← 真正的列表（百度套了两层 content）
+    try:
+        cards_list = (data.get("data") or {}).get("cards") or []
+        first_card = cards_list[0] if cards_list else {}
+        inner = first_card.get("content") or []
+        items_raw = inner[0].get("content") if inner else []
+    except Exception:
+        items_raw = []
+    if not isinstance(items_raw, list):
+        items_raw = []
+    # 兜底：如果直接是平铺的（不同 platform 可能不一样）
+    if not items_raw and isinstance(inner, list) and inner and isinstance(inner[0], dict) and "word" in inner[0]:
+        items_raw = inner
+    for x in items_raw[:30]:
+        title = x.get("word") or x.get("query") or ""
+        if not title:
+            continue
+        url = x.get("url") or x.get("appUrl") or f"https://www.baidu.com/s?wd={title}"
+        score = 0
+        try:
+            score = int(x.get("hotScore") or 0)
+        except Exception:
+            pass
+        items.append({
+            "title": title,
+            "url": url,
+            "summary": (x.get("desc") or "")[:240],
+            "score": score,
+            "score_label": f"{score:,} 热度" if score else "",
+            "published_at": "",
+        })
+    return items
+
+
+# ── IT之家 RSS（业内最稳的 RSS 之一）─────────────────────────────────────
+@_register("ithome", "IT 之家", "tech")
+async def fetch_ithome() -> List[Dict[str, Any]]:
+    return await _fetch_rss(
+        "https://www.ithome.com/rss/",
+        score_label_from_pubdate=True,
+    )
+
+
+# ── 少数派最新（公开 JSON，sspai matrix）────────────────────────────────
+@_register("sspai", "少数派 Matrix", "tech")
+async def fetch_sspai() -> List[Dict[str, Any]]:
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as cli:
+        r = await cli.get(
+            "https://sspai.com/api/v1/article/index/page/get?limit=30&offset=0&created_at=0&sort=matrix",
+            headers={"User-Agent": "Mozilla/5.0 PulseBot/1.0"},
+        )
+        try:
+            data = r.json()
+        except Exception:
+            return []
+    items: List[Dict[str, Any]] = []
+    for x in (data.get("data") or [])[:30]:
+        title = x.get("title") or ""
+        aid = x.get("id")
+        if not (title and aid):
+            continue
+        like = int(x.get("like_count") or 0)
+        items.append({
+            "title": title,
+            "url": f"https://sspai.com/post/{aid}",
+            "summary": (x.get("summary") or "")[:240],
+            "score": like,
+            "score_label": f"{like} 赞" if like else "",
+            "published_at": "",
+        })
+    return items
+
+
+# ── 通用 RSS 解析（标准 RSS 2.0 / Atom 都吃）─────────────────────────────
+
+async def _fetch_rss(url: str, *, score_label_from_pubdate: bool = False) -> List[Dict[str, Any]]:
+    """简陋但够用的 RSS 解析（不引第三方库，避免增加依赖）。"""
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as cli:
+        r = await cli.get(url, headers={"User-Agent": "Mozilla/5.0 PulseBot/1.0"})
+        text = r.text
+    items: List[Dict[str, Any]] = []
+    # 切 <item> 或 <entry>
+    chunks = re.findall(r"<item\b[\s\S]*?</item>", text, flags=re.I)
+    if not chunks:
+        chunks = re.findall(r"<entry\b[\s\S]*?</entry>", text, flags=re.I)
+
+    def _extract(tag: str, blk: str) -> str:
+        # 兼容 <title>x</title> 和 <title><![CDATA[x]]></title>
+        m = re.search(rf"<{tag}\b[^>]*>([\s\S]*?)</{tag}>", blk, flags=re.I)
+        if not m:
+            return ""
+        s = m.group(1).strip()
+        s = re.sub(r"^<!\[CDATA\[", "", s)
+        s = re.sub(r"\]\]>$", "", s)
+        s = re.sub(r"<[^>]+>", "", s)
+        return s.strip()
+
+    for blk in chunks[:30]:
+        title = _extract("title", blk)
+        if not title:
+            continue
+        # link 可能是 <link>...</link> 或 atom 风格 <link href="..."/>
+        url2 = _extract("link", blk)
+        if not url2:
+            m = re.search(r'<link[^>]*href="([^"]+)"', blk, flags=re.I)
+            if m:
+                url2 = m.group(1)
+        if not url2:
+            continue
+        desc = _extract("description", blk) or _extract("summary", blk) or _extract("content", blk)
+        pub = _extract("pubDate", blk) or _extract("published", blk) or _extract("updated", blk)
+        items.append({
+            "title": title[:300],
+            "url": url2,
+            "summary": desc[:240],
+            "score": 0,
+            "score_label": pub[:30] if score_label_from_pubdate else "",
+            "published_at": pub,
+        })
+    return items
 
 
 # ── 调度 & 落库 ────────────────────────────────────────────────────────────

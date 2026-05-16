@@ -105,10 +105,34 @@ COMMIT;
 
 | # | 任务 | 工作量 | 状态 |
 |---|---|---|---|
-| 0 | **SaaS 计费系统**：模型定价 + user_credits/credit_ledger + 扣费事务 + 砍用户私有渠道 + admin 充值后台 + 用户余额 UI | 4-6 天 | 进行中 |
-| 1 | AI 漫画（LoreVista 思路，接入计费）| 3-5 天 | |
-| 2 | AI 小说（NovelMaker 思路，接入计费）| 5-7 天 | |
-| 3 | 服务监控 + 周报 | 2-3 天 | |
-| 4 | 热点雷达骨架 | 3-4 天 | |
-| 5 | AI 旅游攻略 | 2-3 天 | |
-| 6 | 砍公众号 UI、B站平台、AI PPT（生成+上传改造）、文档转换、AI 音乐、AI 视频、后期接支付 | — | |
+| 0 | **SaaS 计费系统**：模型定价 + user_credits/credit_ledger + 扣费事务 + 砍用户私有渠道 + admin 充值后台 + 用户余额 UI | 4-6 天 | ✅ 完成 |
+| 1 | AI 漫画（LoreVista 思路，接入计费）| 3-5 天 | ✅ 完成 |
+| 2 | AI 小说（NovelMaker 思路，接入计费）| 5-7 天 | ✅ 完成（骨架） |
+| 3 | 服务监控 + 周报 | 2-3 天 | ✅ 完成 |
+| 4 | 热点雷达骨架（9 源：HN/GitHub/V2EX/微博/B站/Solidot/百度/IT之家/少数派）| 3-4 天 | ✅ 完成 |
+| 5 | AI 旅游攻略 | 2-3 天 | ✅ 完成 |
+| 6 | AI PPT（生成大纲 + 上传 .pptx + AI 修订重写）| 3-5 天 | ✅ 完成 |
+| 7 | 月度 grant cron（每月 1 号按 plan.monthly_credits 自动送，幂等）| 0.5 天 | ✅ 完成 |
+| 8 | 旧配额 → v2 点数迁移工具（`api/tools/migrate_quota_to_credits.py`，幂等 + dry-run）| 0.5 天 | ✅ 完成 |
+| 9 | **PPT 增强 v2.1**（参考 [ppt-master](https://github.com/hugohe3/ppt-master)）：模板复用 + 6 种布局 + Pexels/AI 双路配图 | 2-3 天 | ✅ 完成 |
+| — | TODO v2.2+：B站平台、文档转换（gotenberg）、AI 音乐（ace-step）、AI 视频、SVG 中间层、原生 OOXML 动画、后期接支付 | — | |
+
+### v2.1 PPT 增强细节
+
+| 子功能 | 实现要点 |
+|---|---|
+| 模板复用 | `ppt_templates` 表 + `database/ppt_templates/{id}.pptx` 文件存储；渲染时 `Presentation(template_path)` 复用 master/theme，并妥善 drop 模板自带 sample slides 的 rels 和 part（无 duplicate name warning） |
+| 6 种布局 | LLM 输出每页 `layout` 字段（cover/bullets/two_column/image_right/quote/closing）；老 plan 无 layout 自动 fallback 到 bullets + 注入封面 |
+| Pexels 配图 | `api/services/pexels_client.py`，admin 通过 `PUT /api/studio/ppt/admin/pexels-key` 配置 key（或 `PEXELS_API_KEY` 环境变量兜底）；进程内 LRU 缓存（64 条/1 h） |
+| AI 生图配图 | 复用 `ai_client.call_image`，feature='image' 计费；upstream 失败自动兜底到 Pexels；`InsufficientCredits` 透出由上层全局 402 handler 处理 |
+| 三档配图来源 | `ppt_projects.image_source` ∈ {none, pexels, ai}；前端新建表单 Select 切换 |
+
+## v2 上线 Runbook
+
+1. `git checkout main && git merge --no-ff v2-dev`（或按板块 cherry-pick）
+2. `uv sync`（含新依赖 `python-pptx`）
+3. 数据库：v2 新表（`user_credits` / `credit_ledger` / `ppt_projects` / `hotnews_items` / `service_monitors` / `comic_*` / `novel_*` / `travel_plans`）都在 `_INIT_SQL`，启动自动建表
+4. 一次性迁移老用户：先 `uv run python -m api.tools.migrate_quota_to_credits --dry-run` 看汇总，再去掉 `--dry-run` 正式跑（可加 `--multiplier 3` 给老用户福利）
+5. admin 后台：`/dashboard/admin/users` 顶部 `AdminBillingPanel` 充值；`/dashboard/admin/ai-models` 给每个模型设 `price_per_call` / `feature_pricing`
+6. `cron monthly_grant` 自动在每月 1 号 00:10 触发；也可走 `POST /api/admin/billing/grant-all-monthly` 手动触发（幂等）
+7. 全员对账：`GET /api/admin/billing/reconcile`，应返回 `ok=true`

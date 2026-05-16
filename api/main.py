@@ -36,6 +36,7 @@ from .routers.billing import router as billing_router, admin_router as billing_a
 from .routers.studio import router as studio_router
 from .routers.toolbox import router as toolbox_router
 from .routers.hotnews import router as hotnews_router
+from .routers.original import router as original_router
 from .services.auth_service import init_user_db
 from .services import monitor_db
 from .services import scheduler as monitor_scheduler
@@ -110,6 +111,7 @@ app.include_router(billing_admin_router, prefix="/api")
 app.include_router(studio_router, prefix="/api")
 app.include_router(toolbox_router, prefix="/api")
 app.include_router(hotnews_router, prefix="/api")
+app.include_router(original_router, prefix="/api")
 
 # 初始化用户数据库（创建默认admin账号）
 init_user_db()

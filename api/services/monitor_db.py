@@ -775,6 +775,19 @@ CREATE TABLE IF NOT EXISTS ppt_projects (
     updated_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_ppt_projects_user ON ppt_projects(user_id, created_at DESC);
+
+-- ── AI PPT 模板（v2.1）：用户上传 .pptx 作公司 VI 风格底版 ──────────────────
+-- 渲染时 Presentation(file_path) 打开它，沿用 master/theme，我们只 add_slide 塞内容
+CREATE TABLE IF NOT EXISTS ppt_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    file_path TEXT NOT NULL,              -- 模板 .pptx 在磁盘的绝对路径
+    size_bytes INTEGER DEFAULT 0,
+    layout_summary TEXT DEFAULT '',       -- "16:9 · 8 layouts · 主色 #1F3F7A"
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_ppt_templates_user ON ppt_templates(user_id, created_at DESC);
 """
 
 
@@ -1055,6 +1068,9 @@ async def _migrate(db):
     #   feature_pricing   — JSON，按 feature 覆盖基础价：{"ocr": 0.3, "image": 1.0, "comic_panel": 0.5}
     await _ensure_column(db, "ai_models", "price_per_call",  "NUMERIC DEFAULT 1")
     await _ensure_column(db, "ai_models", "feature_pricing", "TEXT DEFAULT '{}'")
+    # v2.1 PPT 增强：每个 PPT 项目可绑定一个用户上传的风格模板 + 配图来源
+    await _ensure_column(db, "ppt_projects", "template_id",  "INTEGER")          # 引用 ppt_templates.id；NULL 走默认风格
+    await _ensure_column(db, "ppt_projects", "image_source", "TEXT DEFAULT 'none'")  # none | pexels | ai
     # 博主追新健康度 + 未读：让列表能区分"挂了 / 卡 cookie / 有新内容"
     await _ensure_column(db, "monitor_creators", "last_check_status", "TEXT DEFAULT 'unknown'")
     await _ensure_column(db, "monitor_creators", "last_check_error",  "TEXT DEFAULT ''")

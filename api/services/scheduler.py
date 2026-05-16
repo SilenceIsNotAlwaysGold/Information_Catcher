@@ -1324,6 +1324,17 @@ async def start_scheduler():
         )
     except Exception as e:
         logger.warning(f"[scheduler] hotnews cron 注册失败: {e}")
+    # v2: 月度 grant — 每月 1 号 00:10 按 plan.monthly_credits 给所有活跃用户送点。
+    # 幂等键 monthly_grant:{uid}:{YYYY-MM}，重跑不会重复送。
+    try:
+        from . import billing_service as _billing
+        scheduler.add_job(
+            _billing.monthly_grant_all_users,
+            CronTrigger(day=1, hour=0, minute=10, timezone="Asia/Shanghai"),
+            id="monthly_grant", replace_existing=True, max_instances=1,
+        )
+    except Exception as e:
+        logger.warning(f"[scheduler] monthly_grant cron 注册失败: {e}")
     scheduler.start()
     logger.info(f"[scheduler] started — interval={interval}min, report={report_time}")
 

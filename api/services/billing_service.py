@@ -282,6 +282,76 @@ async def reconcile(user_id: int) -> Tuple[bool, Decimal, Decimal]:
     return (total == bal, bal, total)
 
 
+async def monthly_grant_all_users(*, ym: Optional[str] = None) -> Dict[str, Any]:
+    """每月 1 号给所有活跃用户按 plan.monthly_credits 送点。
+
+    幂等：task_ref = f"monthly_grant:{user_id}:{YYYY-MM}"，同月只送一次。
+    返回 {month, total, granted, skipped_dup, skipped_zero, errors}。
+    """
+    from datetime import datetime
+    from . import plans as _plans
+    from . import auth_service as _auth
+
+    month = ym or datetime.now().strftime("%Y-%m")
+    # 拉所有用户 + 套餐（users.db 在 auth_service）
+    try:
+        users = _auth.list_users()  # admin 视图：[{id, username, plan, ...}]
+    except Exception as exc:  # pragma: no cover
+        logger.exception("monthly_grant_all_users: list_users failed: %s", exc)
+        return {"month": month, "total": 0, "granted": 0, "errors": [str(exc)]}
+
+    granted = skipped_dup = skipped_zero = 0
+    errors: List[str] = []
+
+    for u in users:
+        uid = int(u.get("id") or 0)
+        if uid <= 0:
+            continue
+        # 跳过封禁/未激活用户
+        if not u.get("is_active") or (u.get("status") or "active") != "active":
+            continue
+        plan_key = (u.get("plan") or "free").strip().lower()
+        amount = _plans.get_plan(plan_key).get("monthly_credits", 0) or 0
+        if amount <= 0:
+            skipped_zero += 1
+            continue
+        ref = f"monthly_grant:{uid}:{month}"
+        # 用 ledger 查重（grant 不走 deduct 的幂等支路，自己查）
+        try:
+            async with _db.connect(DB_PATH) as conn:
+                conn.row_factory = _db.Row
+                async with conn.execute(
+                    "SELECT 1 FROM credit_ledger WHERE task_ref=? AND kind='grant' LIMIT 1",
+                    (ref,),
+                ) as cur:
+                    if await cur.fetchone():
+                        skipped_dup += 1
+                        continue
+            await _apply_change(
+                uid, kind="grant", delta=_dec(amount),
+                operator="system", task_ref=ref,
+                note=f"plan={plan_key} monthly free credits {month}",
+                allow_negative=True,
+            )
+            granted += 1
+        except Exception as exc:  # pragma: no cover
+            logger.exception("monthly grant failed for user %s: %s", uid, exc)
+            errors.append(f"uid={uid}: {exc}")
+
+    logger.info(
+        "monthly_grant_all_users %s: total=%d granted=%d skipped_dup=%d skipped_zero=%d errors=%d",
+        month, len(users), granted, skipped_dup, skipped_zero, len(errors),
+    )
+    return {
+        "month": month,
+        "total": len(users),
+        "granted": granted,
+        "skipped_dup": skipped_dup,
+        "skipped_zero": skipped_zero,
+        "errors": errors,
+    }
+
+
 async def reconcile_all() -> List[Tuple[int, Decimal, Decimal]]:
     """巡检所有有流水的用户，返回 [(user_id, balance, ledger_sum), ...]（只返回不一致的）。"""
     async with _db.connect(DB_PATH) as conn:

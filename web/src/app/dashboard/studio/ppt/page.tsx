@@ -12,7 +12,7 @@ import { Button } from "@nextui-org/button";
 import { Input, Textarea } from "@nextui-org/input";
 import { Chip } from "@nextui-org/chip";
 import { Spinner } from "@nextui-org/spinner";
-import { Presentation, Plus, Trash2, Sparkles, Download, RefreshCw, FileText } from "lucide-react";
+import { Presentation, Plus, Trash2, Sparkles, Download, RefreshCw, FileText, Upload, Wand2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { ModelSelector } from "@/components/ModelSelector";
 import { toastOk, toastErr } from "@/lib/toast";
@@ -54,6 +54,11 @@ export default function PptStudioPage() {
   const [textModelId, setTextModelId] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
   const [rendering, setRendering] = useState(false);
+  // 上传 .pptx
+  const [uploading, setUploading] = useState(false);
+  // AI 修改指令
+  const [revInstruction, setRevInstruction] = useState("");
+  const [revising, setRevising] = useState(false);
 
   const loadList = useCallback(async () => {
     if (!token) return;
@@ -97,6 +102,52 @@ export default function PptStudioPage() {
       if (selectedId === id) setSelectedId(null);
       await loadList();
     }
+  };
+
+  // ── 上传 .pptx 创建项目 ─────────────────────────────────────
+  const handleUpload = async (f: File) => {
+    if (!f) return;
+    if (!f.name.toLowerCase().endsWith(".pptx")) {
+      toastErr("仅支持 .pptx（不支持老 .ppt / WPS .dps）"); return;
+    }
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", f);
+      fd.append("style_hint", style);
+      const r = await fetch(API("/projects/upload"), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },  // 不要塞 Content-Type，让浏览器加 boundary
+        body: fd,
+      });
+      const d = await r.json();
+      if (!r.ok) { toastErr(d.detail || "上传失败"); return; }
+      toastOk(`已导入 · 解析出 ${d.pages} 页`);
+      await loadList();
+      setSelectedId(d.id);
+    } catch (e: any) {
+      toastErr(e?.message || "上传异常");
+    } finally { setUploading(false); }
+  };
+
+  // ── AI 修改大纲 ─────────────────────────────────────────────
+  const handleRevise = async () => {
+    if (!selectedId || !revInstruction.trim()) {
+      toastErr("先选 PPT 并输入修改指令"); return;
+    }
+    setRevising(true);
+    try {
+      const r = await fetch(API(`/projects/${selectedId}/revise`), {
+        method: "POST", headers,
+        body: JSON.stringify({ instruction: revInstruction, text_model_id: textModelId }),
+      });
+      const d = await r.json();
+      if (r.status === 402) { toastErr(`余额不足：${d.detail || ""}`); return; }
+      if (!r.ok) { toastErr(d.detail || "修改失败"); return; }
+      toastOk(`大纲已重写，现 ${d.pages} 页（旧 .pptx 已失效，请重新渲染）`);
+      setRevInstruction("");
+      await loadList(); await loadDetail();
+    } finally { setRevising(false); }
   };
 
   const handleRender = async () => {
@@ -157,11 +208,29 @@ export default function PptStudioPage() {
             label="主题描述（500 字内）" labelPlacement="outside"
             value={topic} onValueChange={setTopic}
             placeholder="如：介绍 RAG 检索增强生成技术，针对 AI 工程师，覆盖原理、典型架构、几个开源框架对比、生产部署的常见坑" />
-          <Button color="primary" startContent={<Sparkles size={16} />}
-            isLoading={creating} isDisabled={!topic.trim()}
-            onPress={handleCreate}>
-            生成大纲（扣 ppt_outline 点）
-          </Button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Button color="primary" startContent={<Sparkles size={16} />}
+              isLoading={creating} isDisabled={!topic.trim()}
+              onPress={handleCreate}>
+              生成大纲（扣 ppt_outline 点）
+            </Button>
+            <span className="text-xs text-default-400">或</span>
+            <label className="inline-flex items-center gap-1 cursor-pointer">
+              <Button as="span" variant="flat" color="secondary" size="sm"
+                startContent={<Upload size={14} />}
+                isLoading={uploading}>
+                上传已有 .pptx
+              </Button>
+              <input type="file" accept=".pptx" className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0]; if (f) handleUpload(f);
+                  e.currentTarget.value = "";  // 允许再次选同名文件
+                }} />
+            </label>
+            <span className="text-[11px] text-default-400">
+              上传不扣点；AI 改造（在详情页"修改"扣 ppt_outline 点）
+            </span>
+          </div>
         </CardBody>
       </Card>
 
@@ -227,6 +296,22 @@ export default function PptStudioPage() {
             </div>
           </CardHeader>
           <CardBody className="space-y-3">
+            {/* AI 修改大纲 */}
+            <div className="rounded border border-default-200 p-3 bg-default-50/50">
+              <p className="text-xs font-medium mb-2 flex items-center gap-1">
+                <Wand2 size={13} /> 让 AI 修改大纲（扣 ppt_outline 点）
+              </p>
+              <div className="flex gap-2 items-start">
+                <Textarea minRows={2} maxRows={4} size="sm" className="flex-1"
+                  placeholder="如：把第 3 页改成投资人视角；删掉最后一页；加一页竞品对比列 3 个对手；把全部标题改得更口语化"
+                  value={revInstruction} onValueChange={setRevInstruction} />
+                <Button color="secondary" size="sm" startContent={<Wand2 size={14} />}
+                  isLoading={revising} isDisabled={!revInstruction.trim()}
+                  onPress={handleRevise}>
+                  AI 修改
+                </Button>
+              </div>
+            </div>
             {(detail.plan?.pages || []).map((pg, i) => (
               <div key={i} className="rounded border border-default-200 p-3">
                 <p className="font-medium mb-1">{i + 1}. {pg.title}</p>
