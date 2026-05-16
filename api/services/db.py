@@ -422,5 +422,24 @@ def connect(path: str | os.PathLike):
     return aiosqlite.connect(path)
 
 
+def connect_tx(path: str | os.PathLike):
+    """供需要显式事务 / 写锁的调用方使用（计费扣费等命脉路径）。
+
+    与 connect() 的关键差别：SQLite 走 isolation_level=None（autocommit），
+    把事务边界完全交给应用——只有这样 `BEGIN IMMEDIATE` 才真正立刻拿到
+    RESERVED 写锁、`ROLLBACK` 才可靠。Python sqlite3 默认 isolation_level=''
+    是隐式事务模式，会自行 BEGIN 并与应用手写的 BEGIN IMMEDIATE 冲突，导致
+    写锁不生效 / 失败不回滚（多进程并发会真双扣、对账永久不平）。
+
+    注意：用了本函数后，调用方必须自己显式 BEGIN/COMMIT/ROLLBACK，
+    且建议每条连接 `PRAGMA busy_timeout=<ms>`（busy_timeout 不持久化在 DB 文件，
+    每条新连接都要设，否则并发写锁竞争会即时 'database is locked' 而非等待）。
+    PG 模式与 connect() 完全相同（_PGConnection 已显式管理事务）。
+    """
+    if _driver() == "pg":
+        return _PGConnection()
+    return aiosqlite.connect(path, isolation_level=None)
+
+
 # 暴露 aiosqlite.Row 兼容标识（方便 monitor_db 设置 row_factory）
 Row = aiosqlite.Row

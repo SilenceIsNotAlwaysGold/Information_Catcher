@@ -216,6 +216,7 @@ async def story_chat(pid: int, body: ChatIn, current_user: dict = Depends(get_cu
         full_prompt, model_id=p.get("text_model_id"), user_id=uid,
         feature="comic_story", system_prompt=_STORY_SYSTEM,
         temperature=0.9, max_tokens=600,
+        task_ref=ai_client.make_task_ref("comic_chat", pid, uid, msg),
     )
     # 落两轮
     async with _db.connect(DB_PATH) as db:
@@ -348,6 +349,7 @@ async def make_storyboard(pid: int, body: StoryboardIn, current_user: dict = Dep
         prompt, model_id=p.get("text_model_id"), user_id=uid,
         feature="comic_story", system_prompt=_STORYBOARD_SYSTEM,
         temperature=0.7, max_tokens=2500,
+        task_ref=ai_client.make_task_ref("comic_storyboard", pid),
     )
     # 解析 JSON（容错：模型可能裹 ```json ）
     txt = raw.strip()
@@ -473,6 +475,7 @@ async def _gen_one_panel(panel: Dict[str, Any], project: Dict[str, Any],
         b64s = await ai_client.call_image(
             prompt, model_id=project.get("image_model_id"), user_id=user_id,
             feature="comic_panel", n=1,
+            task_ref=ai_client.make_task_ref("comic_panel", pid),
         )
         if not b64s:
             raise RuntimeError("图像模型未返回图片")

@@ -126,6 +126,10 @@ async def create_project(body: CreateProjectIn, current_user: dict = Depends(get
         user_prompt, model_id=body.text_model_id, user_id=uid,
         feature="ppt_outline", system_prompt=_OUTLINE_SYSTEM,
         temperature=0.7, max_tokens=3000,
+        task_ref=ai_client.make_task_ref(
+            "ppt_outline", uid, body.topic, body.target_pages,
+            body.audience or "", body.style_hint or "",
+        ),
     )
     txt = _strip_codeblock(raw)
     try:
@@ -296,6 +300,7 @@ async def revise_project(
         user_id=uid, feature="ppt_outline",
         system_prompt=_REVISE_SYSTEM,
         temperature=0.4, max_tokens=4000,
+        task_ref=ai_client.make_task_ref("ppt_revise", pid, body.instruction),
     )
     txt = _strip_codeblock(raw)
     try:
@@ -900,6 +905,7 @@ async def _ai_image_for_ppt(query: str, *, user_id: int) -> Optional[bytes]:
     try:
         b64s = await ai_client.call_image(
             prompt, user_id=user_id, feature="image", n=1, size="1024x768",
+            task_ref=ai_client.make_task_ref("ppt_img", user_id, q),
         )
         if not b64s:
             return None

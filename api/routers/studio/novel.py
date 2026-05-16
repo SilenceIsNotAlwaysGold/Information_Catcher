@@ -166,6 +166,7 @@ async def generate_outline(pid: int, current_user: dict = Depends(get_current_us
         prompt, model_id=p.get("text_model_id"), user_id=uid,
         feature="novel_outline", system_prompt=_OUTLINE_SYSTEM,
         temperature=0.85, max_tokens=2500,
+        task_ref=ai_client.make_task_ref("novel_outline", pid),
     )
     await _touch(pid, outline=outline.strip()[:20000], status="writing")
     return {"ok": True, "outline": outline}
@@ -287,6 +288,7 @@ async def generate_next_chapter(
         user_prompt, model_id=p.get("text_model_id"), user_id=uid,
         feature="novel_chapter", system_prompt=_CHAPTER_SYSTEM,
         temperature=0.95, max_tokens=4500,
+        task_ref=ai_client.make_task_ref("novel_chapter", pid, next_seq),
     )
     # 拆标题（第一行是【标题】）
     lines = (out or "").strip().split("\n", 1)
@@ -411,6 +413,7 @@ async def summarize_chapter(cid: int, current_user: dict = Depends(get_current_u
         content[:8000], model_id=row["text_model_id"], user_id=uid,
         feature="novel_outline", system_prompt=_SUMMARY_SYSTEM,
         temperature=0.4, max_tokens=400,
+        task_ref=ai_client.make_task_ref("novel_summary", cid),
     )
     async with _db.connect(DB_PATH) as db:
         await db.execute(

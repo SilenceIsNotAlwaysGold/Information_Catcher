@@ -115,6 +115,9 @@ async def rewrite(body: RewriteIn, current_user: dict = Depends(get_current_user
             system_prompt=sys_prompt,
             temperature=0.8,
             max_tokens=2400,
+            task_ref=ai_client.make_task_ref(
+                "cross_rewrite", uid, body.platform, body.source_text, body.extra_hint or "",
+            ),
         )
     except Exception as exc:
         # InsufficientCredits 已被全局 handler 处理；其它失败原样回

@@ -22,7 +22,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiosqlite
@@ -37,6 +37,12 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────
 # 计费接入（v2 SaaS）—— 所有 AI 调用走平台 key，按模型 × feature 扣点数
 # ──────────────────────────────────────────────────────────────
+
+def make_task_ref(*parts):
+    """计费幂等键构造（转发 billing_service.make_task_ref，方便已 import ai_client 的调用方直接用）。"""
+    from . import billing_service as _bill
+    return _bill.make_task_ref(*parts)
+
 
 async def _bill_charge(
     user_id: Optional[int], model: "_ResolvedModel", feature: str,
@@ -55,7 +61,16 @@ async def _bill_charge(
         cost = (cost * units)
     if cost <= 0:
         return Decimal("0"), ""
-    ref = task_ref or f"{feature or 'ai'}:{model.model_row_id}:{uuid.uuid4().hex}"
+    if task_ref:
+        ref = task_ref
+    else:
+        # 没有稳定业务幂等键：重试/重复提交/worker 重投递会重复扣费。
+        # 仍生成随机 ref 不阻断业务，但 WARNING 暴露出来，便于逐个调用方补稳定键。
+        ref = f"{feature or 'ai'}:{model.model_row_id}:{uuid.uuid4().hex}"
+        logger.warning(
+            "[ai_client] _bill_charge 无 task_ref（幂等失效，重试会重复扣费）"
+            " user=%s feature=%s model=%s", user_id, feature or "-", model.model_row_id,
+        )
     await _bill.deduct(
         int(user_id), cost=cost, model_id=model.model_row_id, feature=feature, task_ref=ref,
     )
@@ -286,17 +301,20 @@ async def call_text(
     timeout: float = 120.0,
     system_prompt: Optional[str] = None,
     extra_payload: Optional[Dict[str, Any]] = None,
+    task_ref: Optional[str] = None,
 ) -> str:
     """统一文本生成调用。返回 assistant 的文本内容。失败抛异常并记日志。
 
     system_prompt: 可选系统提示词（追加为 messages[0]）
     extra_payload: 透传到 chat/completions 的额外字段，如 {"response_format": {...}}
+    task_ref: 计费幂等键（业务稳定值，如 novel_chapter:{nid}:{seq}）。
+              不传则随机生成 + WARNING——重试/重复提交会重复扣费。
     """
     model = await _resolve_model(
         usage_type="text", model_row_id=model_id, user_id=user_id,
     )
     # 计费：调用前扣点数（余额不足在这里 raise InsufficientCredits，不会发起请求）
-    _cost, _ref = await _bill_charge(user_id, model, feature)
+    _cost, _ref = await _bill_charge(user_id, model, feature, task_ref=task_ref)
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -359,6 +377,7 @@ async def call_vision_ocr(
         "原样提取出来（保留换行 / 段落结构）。只输出文字本身，不要加引号、"
         "解释、Markdown 标记。"
     ),
+    task_ref: Optional[str] = None,
 ) -> str:
     """用文本模型的 vision 能力对图片做 OCR，返回提取出的纯文本。
 
@@ -375,7 +394,7 @@ async def call_vision_ocr(
             f"或在「OCR 模型」下拉里换一个视觉模型（GPT-4o / Claude 3.5 / Gemini / Qwen-VL 等）。"
         )
     # 计费：预检通过后才扣（余额不足 raise InsufficientCredits）
-    _cost, _ref = await _bill_charge(user_id, model, feature)
+    _cost, _ref = await _bill_charge(user_id, model, feature, task_ref=task_ref)
     # OpenAI 兼容的多模态格式：messages[0].content = [{type:"text"},{type:"image_url"}]
     messages = [
         {
@@ -474,22 +493,25 @@ async def call_text_variants(
     model_id: Optional[int] = None,
     user_id: Optional[int] = None,
     feature: str = "",
+    task_ref: Optional[str] = None,
 ) -> List[str]:
-    """并行生成 n 个不同温度的变体；失败的丢弃，剩下的返回。"""
+    """并行生成 n 个不同温度的变体；失败的丢弃，剩下的返回。
+    task_ref: 计费幂等键基；每个变体用 {task_ref}:v{i} 各自独立扣费。"""
     n = max(1, min(int(n), 5))
     temps = (temperatures or [0.7, 1.0, 1.3, 1.5, 1.7])[:n]
 
-    async def _one(t: float) -> Optional[str]:
+    async def _one(i: int, t: float) -> Optional[str]:
         try:
             return await call_text(
                 prompt, model_id=model_id, user_id=user_id,
                 feature=feature, temperature=t,
+                task_ref=f"{task_ref}:v{i}" if task_ref else None,
             )
         except Exception as e:
             logger.warning(f"[ai_client] variant t={t} failed: {e}")
             return None
 
-    results = await asyncio.gather(*[_one(t) for t in temps])
+    results = await asyncio.gather(*[_one(i, t) for i, t in enumerate(temps)])
     return [r for r in results if r]
 
 
@@ -507,17 +529,19 @@ async def call_image(
     n: int = 1,
     size: Optional[str] = None,
     timeout: float = 120.0,
+    task_ref: Optional[str] = None,
 ) -> List[str]:
     """统一图像生成 —— OpenAI 兼容 /images/generations。
 
     返回 b64-encoded 图像列表（不返回 URL）。如需 URL 让调用方自行上传。
+    task_ref: 计费幂等键（业务稳定值）。不传则随机 + WARNING。
     """
     model = await _resolve_model(
         usage_type="image", model_row_id=model_id, user_id=user_id,
     )
     n_req = max(1, min(int(n), 4))
     # 计费：预扣 n 张的钱（余额不足 raise）；调用后按实际成功数退差
-    _cost, _ref = await _bill_charge(user_id, model, feature, units=n_req)
+    _cost, _ref = await _bill_charge(user_id, model, feature, units=n_req, task_ref=task_ref)
     # size 优先级：显式参数 > 模型 extra_config.size > 默认
     final_size = size or model.extra_config.get("size") or "1024x1024"
     payload: Dict[str, Any] = {
@@ -558,8 +582,12 @@ async def call_image(
             # 部分失败退差：预扣 n_req 张，实际成功 len(b64s) 张
             got = len(b64s)
             if user_id is not None and _cost > 0 and got < n_req:
-                per = _cost / n_req
-                back = (per * (n_req - got))
+                # 退差额：预扣 n_req 张，实成 got 张。量化到 0.01 与 ledger 精度一致。
+                # ref=`{_ref}:partial` 稳定（取决于调用方传稳定 task_ref）；
+                # refund 幂等已由 _apply_change 按 (task_ref,kind='refund') 查重，
+                # 整操作重试不会累计多退（P0-4）。
+                per = (_cost / Decimal(n_req))
+                back = (per * Decimal(n_req - got)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 from . import billing_service as _bill
                 try:
                     await _bill.refund(

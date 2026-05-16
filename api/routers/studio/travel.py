@@ -63,6 +63,10 @@ async def create_plan(body: CreatePlanIn, current_user: dict = Depends(get_curre
         user_prompt, model_id=body.text_model_id, user_id=uid,
         feature="travel_plan", system_prompt=_SYSTEM,
         temperature=0.6, max_tokens=2500,
+        task_ref=ai_client.make_task_ref(
+            "travel_plan", uid, body.dest_city, body.days,
+            body.budget or "", body.travel_style or "", (body.extra_prefs or "")[:200],
+        ),
     )
     txt = _strip_codeblock(raw)
     try:

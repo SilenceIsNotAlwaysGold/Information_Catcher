@@ -25,8 +25,10 @@
 - `credit_ledger` 表（**每一笔变动都记**）：
   `id, user_id, kind ∈ {recharge|deduct|refund|grant|adjust}, amount NUMERIC(12,2),
    balance_after NUMERIC(12,2), model_id, feature, task_ref, operator, note, created_at`
-- **不变量**：`user_credits.balance == SUM(signed amount in credit_ledger)`，任何时刻可对账
-  - 对账脚本：`SELECT SUM(CASE WHEN kind IN ('recharge','refund','grant') THEN amount ELSE -amount END) FROM credit_ledger WHERE user_id=?` 必须 == `balance`
+- **不变量**：`user_credits.balance == SUM(amount in credit_ledger)`，任何时刻可对账
+  - `amount` 存的是**带符号 delta**（deduct 为负，其余为正/可负），故对账直接求和：
+    `SELECT SUM(amount) FROM credit_ledger WHERE user_id=?` 必须 == `balance`
+    （勿用 `CASE WHEN kind...` 再翻符号——amount 已带符号，那样会算反/翻倍）
 
 ### 扣费流程（事务 + 行锁，幂等）
 ```sql

@@ -189,3 +189,57 @@ async def test_concurrent_deduct_some_fail_when_insufficient(billing):
     assert await billing.get_balance(1) == Decimal("0.00")
     ok, bal, _ = await billing.reconcile(1)
     assert ok and bal == Decimal("0.00")
+
+
+@pytest.mark.asyncio
+async def test_refund_idempotent(billing):
+    """P0-4：同一 (task_ref,kind=refund) 重复退款只生效一次，整操作重试不累计多退。"""
+    await billing.recharge(1, 100, operator="admin")
+    await billing.deduct(1, cost=30, model_id=1, feature="image", task_ref="r1")
+    assert await billing.get_balance(1) == Decimal("70.00")
+    b1 = await billing.refund(1, cost=30, model_id=1, feature="image", task_ref="r1")
+    b2 = await billing.refund(1, cost=30, model_id=1, feature="image", task_ref="r1")  # 重试
+    assert b1 == Decimal("100.00") and b2 == Decimal("100.00")
+    assert await billing.get_balance(1) == Decimal("100.00")  # 没被退两次到 130
+    led = await billing.list_ledger(1, limit=100)
+    assert len([x for x in led if x["kind"] == "refund"]) == 1
+    ok, bal, total = await billing.reconcile(1)
+    assert ok and bal == Decimal("100.00")
+
+
+@pytest.mark.asyncio
+async def test_insufficient_leaves_no_partial_ledger(billing):
+    """P0-1：余额不足时事务整体回滚——余额表不动、流水里没有半条 deduct。"""
+    await billing.recharge(1, 10, operator="admin")
+    with pytest.raises(billing.InsufficientCredits):
+        await billing.deduct(1, cost=999, model_id=1, feature="ocr", task_ref="big")
+    assert await billing.get_balance(1) == Decimal("10.00")
+    led = await billing.list_ledger(1, limit=100)
+    assert [x["kind"] for x in led] == ["recharge"]  # 只有充值，没有 deduct 残留
+    ok, bal, total = await billing.reconcile(1)
+    assert ok and bal == total == Decimal("10.00")
+
+
+@pytest.mark.asyncio
+async def test_grant_idempotent(billing):
+    """P1-2：同一 (task_ref,kind=grant) 月度赠送并发/重投递不双发。"""
+    b1 = await billing.grant(1, 50, note="m")
+    from api.services import billing_service as bs
+    # 直接走 _apply_change 模拟 monthly_grant 的带 ref 赠送，重复两次
+    await bs._apply_change(1, kind="grant", delta=Decimal("50"),
+                           task_ref="monthly_grant:1:2026-05", note="x", allow_negative=True)
+    await bs._apply_change(1, kind="grant", delta=Decimal("50"),
+                           task_ref="monthly_grant:1:2026-05", note="x", allow_negative=True)
+    assert await billing.get_balance(1) == Decimal("100.00")  # 50(b1) + 50(一次) ，不是 150
+    led = await billing.list_ledger(1, limit=100)
+    assert len([x for x in led if x["kind"] == "grant"]) == 2
+
+
+def test_make_task_ref_stable():
+    """P0-2：make_task_ref 进程间稳定（短 id 直拼，长文本 md5），不用内置 hash。"""
+    from api.services import billing_service as bs
+    assert bs.make_task_ref("novel_chapter", 12, 5) == "novel_chapter:12:5"
+    long = "x" * 100 + "\n换行"
+    r1 = bs.make_task_ref("k", 1, long)
+    r2 = bs.make_task_ref("k", 1, long)
+    assert r1 == r2 and r1.startswith("k:1:") and len(r1.split(":")[-1]) == 16

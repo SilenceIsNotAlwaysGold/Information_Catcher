@@ -154,6 +154,9 @@ async def extract_text(
             user_id=int(current_user["id"]),
             model_id=req.model_id,
             feature="text_remix_ocr",
+            task_ref=ai_client.make_task_ref(
+                "text_remix_ocr", int(current_user["id"]), data_url,
+            ),
         )
     except ai_client.AIModelNotConfigured as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -233,6 +236,9 @@ async def rewrite_text(
                 feature="text_remix_rewrite",
                 temperature=t,
                 max_tokens=1500,
+                task_ref=ai_client.make_task_ref(
+                    "text_remix_rewrite", int(current_user["id"]), prompt, t,
+                ),
             )
             return out.strip() if out else None
         except ai_client.AIModelNotConfigured as e:

@@ -99,6 +99,9 @@ async def generate_prompts(
             feature="product_prompts",
             temperature=0.85,
             max_tokens=1200,
+            task_ref=ai_client.make_task_ref(
+                "product_prompts", int(current_user["id"]), full_prompt,
+            ),
         )
     except ai_client.AIModelNotConfigured as e:
         return {"error": str(e)}

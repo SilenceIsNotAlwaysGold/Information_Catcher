@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import uuid
@@ -56,6 +57,23 @@ def _dec(v) -> Decimal:
         return Decimal(str(v)).quantize(_Q, rounding=ROUND_HALF_UP)
     except Exception:
         return Decimal("0")
+
+
+def make_task_ref(*parts: Any) -> str:
+    """构造计费幂等键。短 id 直接拼，长/多行文本走 md5（进程间稳定，
+    不用内置 hash()——它带 PYTHONHASHSEED 盐，重启即变会击穿幂等）。
+
+    例：make_task_ref("novel_chapter", pid, seq) → "novel_chapter:12:5"
+        make_task_ref("cross_rewrite", uid, long_text) → "cross_rewrite:3:9af1c2..."
+    """
+    out: List[str] = []
+    for p in parts:
+        s = str(p)
+        if len(s) <= 40 and "\n" not in s:
+            out.append(s)
+        else:
+            out.append(hashlib.md5(s.encode("utf-8")).hexdigest()[:16])
+    return ":".join(out)
 
 
 class InsufficientCredits(Exception):
@@ -131,8 +149,14 @@ async def _apply_change(
     """
     uid = int(user_id)
     is_pg = _db.is_pg()
-    async with _db.connect(DB_PATH) as conn:
+    # connect_tx：SQLite 走 autocommit，事务边界由本函数显式控制——这是
+    # BEGIN IMMEDIATE 写锁真正生效、ROLLBACK 可靠的前提（见 db.connect_tx 注释）。
+    async with _db.connect_tx(DB_PATH) as conn:
         conn.row_factory = _db.Row
+        if not is_pg:
+            # busy_timeout 不持久化，每条新连接都要设；否则并发写锁竞争即时报
+            # 'database is locked' 而非排队等待。
+            await conn.execute("PRAGMA busy_timeout=5000")
         await conn.execute("BEGIN IMMEDIATE")  # PG 适配层把它翻成 BEGIN
         try:
             # 锁并取当前余额行；不存在则建一行 0
@@ -152,19 +176,21 @@ async def _apply_change(
             else:
                 cur_balance = _dec(row["balance"])
 
-            # 幂等：deduct 的 task_ref 已扣过 → 直接返回当前余额
-            if kind == "deduct" and task_ref:
+            # 幂等：同一 task_ref 的同类变动已落账 → 直接返回当前余额（不重复扣/退/发）。
+            # deduct 防重试/重复提交双扣；refund 防整操作重试累计多退（P0-4）；
+            # grant 防月度免费额度并发/重投递双倍发放（事务内 SELECT+INSERT 原子）。
+            if kind in ("deduct", "refund", "grant") and task_ref:
                 async with conn.execute(
-                    "SELECT 1 FROM credit_ledger WHERE task_ref=? AND kind='deduct' LIMIT 1",
-                    (task_ref,),
+                    "SELECT 1 FROM credit_ledger WHERE task_ref=? AND kind=? LIMIT 1",
+                    (task_ref, kind),
                 ) as cur:
                     if await cur.fetchone():
-                        await conn.commit()
+                        await conn.execute("ROLLBACK")  # 无改动，释放写锁
                         return cur_balance
 
             new_balance = (cur_balance + delta).quantize(_Q, rounding=ROUND_HALF_UP)
             if new_balance < 0 and not allow_negative:
-                # 不提交（__aexit__/close 会回滚）
+                await conn.execute("ROLLBACK")
                 raise InsufficientCredits(cur_balance, abs(delta))
 
             await conn.execute(
@@ -177,12 +203,16 @@ async def _apply_change(
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 (uid, kind, str(delta), str(new_balance), model_id, feature, task_ref, operator, note),
             )
-            await conn.commit()
+            await conn.execute("COMMIT")
+            logger.info(
+                "[billing] uid=%s kind=%s delta=%s balance=%s feature=%s ref=%s",
+                uid, kind, delta, new_balance, feature or "-", task_ref or "-",
+            )
             return new_balance
         except InsufficientCredits:
-            raise
+            raise  # ROLLBACK 已在上面显式执行
         except Exception:
-            # 兜底回滚（PG）；sqlite 连接 close 时自动回滚
+            # autocommit 模式不会自动回滚，必须显式 ROLLBACK
             try:
                 await conn.execute("ROLLBACK")
             except Exception:

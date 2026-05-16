@@ -580,18 +580,21 @@ CREATE TABLE IF NOT EXISTS credit_ledger (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     kind TEXT NOT NULL,                        -- recharge | deduct | refund | grant | adjust
-    amount NUMERIC NOT NULL,                   -- 正数；方向由 kind 决定（recharge/refund/grant/adjust 加，deduct 减）
+    amount NUMERIC NOT NULL,                   -- 带符号 delta：对余额的有符号影响（deduct 为负，recharge/refund/grant/adjust 为正/可负）。对账即 SUM(amount)==balance
     balance_after NUMERIC NOT NULL,            -- 这笔变动后的余额（冗余，便于审计）
     model_id INTEGER,                          -- 关联 ai_models.id（仅 deduct/refund 有）
     feature TEXT DEFAULT '',                   -- ocr / image / comic_panel / novel_chapter / ...
-    task_ref TEXT DEFAULT '',                  -- 幂等键：同一 task_ref 的 deduct 不重复扣
+    task_ref TEXT DEFAULT '',                  -- 幂等键：同一 (task_ref, kind) 不重复入账（deduct/refund/grant）
     operator TEXT DEFAULT '',                  -- 谁操作的（admin 用户名 / 'system' / ''）
     note TEXT DEFAULT '',                      -- adjust 必填；其它可选
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_credit_ledger_user ON credit_ledger(user_id, created_at DESC);
+-- 幂等 DB 兜底（应用层 _apply_change 在事务内已查重，这是 defense-in-depth）。
+-- 用 (task_ref, kind)：deduct 与其 refund 共用同一 ref 是正常流程，不能只按 task_ref 唯一。
+-- 注：旧库已存在 deduct-only 老索引，新定义仅对新装库生效；旧库靠事务内查重保证。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_task_ref
-    ON credit_ledger(task_ref) WHERE kind='deduct' AND task_ref != '';
+    ON credit_ledger(task_ref, kind) WHERE task_ref != '' AND kind IN ('deduct','refund','grant');
 
 -- ── AI 工坊 / AI 漫画（v2 板块 2）─────────────────────────────────────────
 -- 一个 comic_project = 一部漫画。流程：对话引导写故事 → 定稿梗概 → 配角色卡 →

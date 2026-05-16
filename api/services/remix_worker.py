@@ -186,6 +186,10 @@ async def _generate_caption(
             max_tokens=1000,
             timeout=45.0,
             extra_payload={"response_format": {"type": "json_object"}},
+            # 幂等键：worker 重启重投递同一任务不重复扣费（按用户+套号+原文内容稳定）
+            task_ref=ai_client.make_task_ref(
+                "remix_caption", user_id, set_idx, post_title, post_desc[:200],
+            ),
         )
     except ai_client.AIModelNotConfigured as e:
         return "", "", str(e)
