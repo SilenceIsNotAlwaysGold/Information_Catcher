@@ -99,6 +99,28 @@ BACKEND_FILES=(
   api/services/platforms/douyin/trendinsight_fetcher.py
   api/services/platforms/mp/__init__.py
   api/services/platforms/mp/fetcher.py
+  # ── v2（SaaS 计费 + 四大板块）+ 计费 P0 / P0-5 改动的既有文件 ────────────
+  # v1.1.0 以来新增/改动、不在原清单的文件；漏同步 → api/main.py import 崩 →
+  # 生产宕机。务必随 v2 一起部署。
+  api/routers/auth.py
+  api/routers/billing.py
+  api/routers/hotnews.py
+  api/routers/original.py
+  api/routers/image_gen/comic_style.py
+  api/routers/studio/__init__.py
+  api/routers/studio/ppt.py
+  api/routers/studio/ppt_templates.py
+  api/routers/studio/comic.py
+  api/routers/studio/novel.py
+  api/routers/studio/travel.py
+  api/routers/toolbox/__init__.py
+  api/routers/toolbox/uptime.py
+  api/services/db.py
+  api/services/billing_service.py
+  api/services/hotnews_fetcher.py
+  api/services/pexels_client.py
+  api/tools/__init__.py
+  api/tools/migrate_quota_to_credits.py
   pyproject.toml
 )
 
