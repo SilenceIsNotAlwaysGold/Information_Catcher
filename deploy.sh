@@ -51,6 +51,32 @@ RSYNC="sshpass -p $PASSWORD rsync -avzR --no-perms --no-times --omit-dir-times -
 # ── 后端要同步的关键文件清单（相对路径，rsync -R 保结构） ─────────────────
 BACKEND_FILES=(
   api/main.py
+  # ── 包 __init__ + 被 api.main import 的 v1 核心模块 ───────────────────────
+  # 这些原来靠"初装时已在服务器"侥幸跑着，不在清单 → 改动静默不同步 /
+  # 全新机器直接崩。补全使 deploy.sh 真正完整（tests/test_deploy_manifest.py 守卫）。
+  api/__init__.py
+  api/schemas/__init__.py
+  api/schemas/auth.py
+  api/schemas/crawler.py
+  api/services/__init__.py
+  api/services/ai_rewriter.py
+  api/services/comment_fetcher.py
+  api/services/crawler_manager.py
+  api/services/feishu_bitable.py
+  api/services/feishu/__init__.py
+  api/services/feishu/client.py
+  api/services/feishu/oauth.py
+  api/services/feishu/chat.py
+  api/services/feishu/bitable.py
+  api/services/feishu/provisioning.py
+  api/routers/crawler.py
+  api/routers/data.py
+  api/routers/websocket.py
+  api/routers/publisher.py
+  api/routers/feishu.py
+  api/routers/global_search.py
+  api/routers/health_ops.py
+  api/routers/dashboard_overview.py
   api/routers/__init__.py
   api/routers/monitor.py
   api/routers/archive.py
