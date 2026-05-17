@@ -130,6 +130,7 @@ async def create_project(body: CreateProjectIn, current_user: dict = Depends(get
             "ppt_outline", uid, body.topic, body.target_pages,
             body.audience or "", body.style_hint or "",
         ),
+        expect_json=True,
     )
     txt = _strip_codeblock(raw)
     try:
@@ -301,6 +302,7 @@ async def revise_project(
         system_prompt=_REVISE_SYSTEM,
         temperature=0.4, max_tokens=4000,
         task_ref=ai_client.make_task_ref("ppt_revise", pid, body.instruction),
+        expect_json=True,
     )
     txt = _strip_codeblock(raw)
     try:

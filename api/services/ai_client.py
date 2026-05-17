@@ -342,6 +342,23 @@ async def _log_usage(
 # ──────────────────────────────────────────────────────────────
 
 
+def _looks_like_json(s: str) -> bool:
+    """宽松判断文本是否是合法 JSON（容忍 ```json 代码块包裹）。"""
+    t = (s or "").strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t[:4].lower() == "json":
+            t = t[4:]
+    t = t.strip()
+    if not t:
+        return False
+    try:
+        json.loads(t)
+        return True
+    except Exception:
+        return False
+
+
 async def call_text(
     prompt: str,
     *,
@@ -354,6 +371,7 @@ async def call_text(
     system_prompt: Optional[str] = None,
     extra_payload: Optional[Dict[str, Any]] = None,
     task_ref: Optional[str] = None,
+    expect_json: bool = False,
 ) -> str:
     """统一文本生成调用。返回 assistant 的文本内容。失败抛异常并记日志。
 
@@ -361,6 +379,9 @@ async def call_text(
     extra_payload: 透传到 chat/completions 的额外字段，如 {"response_format": {...}}
     task_ref: 计费幂等键（业务稳定值，如 novel_chapter:{nid}:{seq}）。
               不传则随机生成 + WARNING——重试/重复提交会重复扣费。
+    expect_json: 调用方期望 JSON 输出。模型返 HTTP 200 但内容非合法 JSON 时，
+              主动退款本次点数（调用方原 json.loads→502 行为不变，零改动），
+              避免"上游 200 但输出垃圾，用户白扣点"（跨模块 P1）。
     """
     model = await _resolve_model(
         usage_type="text", model_row_id=model_id, user_id=user_id,
@@ -395,6 +416,18 @@ async def call_text(
                 data = resp.json()
             text_out = data["choices"][0]["message"]["content"].strip()
             usage = data.get("usage") or {}
+            if expect_json and not _looks_like_json(text_out):
+                # 上游 200 但输出不是合法 JSON：调用方 json.loads 会失败→502，
+                # 但点数已扣。主动退款（保持调用方 502 行为不变，无需改调用方）。
+                await _bill_refund(user_id, model, feature, _ref, _cost)
+                await _log_usage(
+                    user_id=user_id, model=model, feature=feature,
+                    input_tokens=int(usage.get("prompt_tokens") or 0),
+                    output_tokens=int(usage.get("completion_tokens") or 0),
+                    latency_ms=int((time.perf_counter() - t0) * 1000),
+                    status="error", error="invalid json output (refunded)",
+                )
+                return text_out
             await _log_usage(
                 user_id=user_id, model=model, feature=feature,
                 input_tokens=int(usage.get("prompt_tokens") or 0),

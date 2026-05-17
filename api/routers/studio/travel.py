@@ -67,6 +67,7 @@ async def create_plan(body: CreatePlanIn, current_user: dict = Depends(get_curre
             "travel_plan", uid, body.dest_city, body.days,
             body.budget or "", body.travel_style or "", (body.extra_prefs or "")[:200],
         ),
+        expect_json=True,
     )
     txt = _strip_codeblock(raw)
     try:

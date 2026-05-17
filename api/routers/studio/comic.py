@@ -350,6 +350,7 @@ async def make_storyboard(pid: int, body: StoryboardIn, current_user: dict = Dep
         feature="comic_story", system_prompt=_STORYBOARD_SYSTEM,
         temperature=0.7, max_tokens=2500,
         task_ref=ai_client.make_task_ref("comic_storyboard", pid),
+        expect_json=True,
     )
     # 解析 JSON（容错：模型可能裹 ```json ）
     txt = raw.strip()
