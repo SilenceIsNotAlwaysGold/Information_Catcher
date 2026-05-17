@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { Radar } from "lucide-react";
 import {
   PlatformKey, SectionKey, PLATFORM_LABEL, SECTION_LABEL, PLATFORM_SECTIONS,
 } from "./types";
@@ -23,6 +24,12 @@ export function PlatformSubNav({
 
   return (
     <div className="flex items-center gap-3 mb-5 flex-wrap">
+      {/* monitor 板块色图标块：与 v2 PageHeader 同款视觉语言，让平台监控页
+          和 AI 工坊/工具箱等新板块页风格统一（升级这一个共享组件即可，
+          无需逐个改 16 个平台页） */}
+      <div className="shrink-0 rounded-xl p-2.5 bg-monitor-100 text-monitor-600 dark:bg-monitor-900/30 dark:text-monitor-500">
+        <Radar size={20} strokeWidth={2} />
+      </div>
       <h1 className="text-2xl font-semibold tracking-tight whitespace-nowrap">
         {PLATFORM_LABEL[platform]}
       </h1>
