@@ -13,7 +13,7 @@ import { Select, SelectItem } from "@nextui-org/select";
 import { Chip } from "@nextui-org/chip";
 import { Spinner } from "@nextui-org/spinner";
 import { Switch } from "@nextui-org/switch";
-import { Activity, Plus, Trash2, Play, RefreshCw } from "lucide-react";
+import { Activity, Plus, Trash2, Play, RefreshCw, Pencil, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toastOk, toastErr } from "@/lib/toast";
 import { PageHeader, BetaBadge } from "@/components/ui";
@@ -54,6 +54,9 @@ export default function UptimePage() {
   const [method, setMethod] = useState("GET");
   const [expectStatus, setExpectStatus] = useState(200);
   const [intervalSec, setIntervalSec] = useState(300);
+  const [timeoutSec, setTimeoutSec] = useState(15);
+  const [notifyAfter, setNotifyAfter] = useState(1);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
 
   const loadList = useCallback(async () => {
@@ -78,23 +81,46 @@ export default function UptimePage() {
   }, [headers]);
   useEffect(() => { if (selectedId) loadChecks(selectedId); else setChecks([]); }, [selectedId, loadChecks]);
 
-  const handleCreate = async () => {
+  const resetForm = () => {
+    setEditingId(null);
+    setName(""); setUrl(""); setMethod("GET");
+    setExpectStatus(200); setIntervalSec(300);
+    setTimeoutSec(15); setNotifyAfter(1);
+  };
+
+  const startEdit = (m: Monitor) => {
+    setEditingId(m.id);
+    setName(m.name); setUrl(m.url); setMethod(m.method);
+    setExpectStatus(m.expected_status);
+    setIntervalSec(m.interval_seconds);
+    setTimeoutSec(m.timeout_seconds);
+    setNotifyAfter(m.notify_after_fails);
+    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handleSubmit = async () => {
     if (!name.trim() || !url.trim()) { toastErr("name + url 必填"); return; }
     setCreating(true);
     try {
-      const r = await fetch(API("/monitors"), {
-        method: "POST", headers,
-        body: JSON.stringify({
-          name, url, method, expected_status: expectStatus,
-          interval_seconds: intervalSec, timeout_seconds: 15, notify_after_fails: 1,
-          enabled: true,
-        }),
-      });
+      const editing = editingId != null;
+      const r = await fetch(
+        API(editing ? `/monitors/${editingId}` : "/monitors"),
+        {
+          method: editing ? "PUT" : "POST", headers,
+          body: JSON.stringify({
+            name, url, method, expected_status: expectStatus,
+            interval_seconds: intervalSec,
+            timeout_seconds: timeoutSec,
+            notify_after_fails: notifyAfter,
+            enabled: true,
+          }),
+        },
+      );
       const d = await r.json();
-      if (!r.ok) { toastErr(d.detail || "登记失败"); return; }
-      setName(""); setUrl("");
+      if (!r.ok) { toastErr(d.detail || (editing ? "保存失败" : "登记失败")); return; }
+      resetForm();
       await loadList();
-      toastOk("已登记");
+      toastOk(editing ? "已保存" : "已登记");
     } finally { setCreating(false); }
   };
 
@@ -140,10 +166,13 @@ export default function UptimePage() {
         hint="登记 URL → 立即探活 / 看历史。连续失败达阈值会推飞书群。不耗 AI 点数。"
       />
 
-      {/* 新建 */}
+      {/* 新建 / 编辑 */}
       <Card>
         <CardHeader className="flex items-center gap-2">
-          <Plus size={16} /><span className="font-medium">登记新监控</span>
+          {editingId != null ? <Pencil size={16} /> : <Plus size={16} />}
+          <span className="font-medium">
+            {editingId != null ? `编辑监控 #${editingId}` : "登记新监控"}
+          </span>
         </CardHeader>
         <CardBody>
           <div className="flex gap-2 flex-wrap items-end">
@@ -158,12 +187,23 @@ export default function UptimePage() {
               <SelectItem key="HEAD" value="HEAD">HEAD</SelectItem>
               <SelectItem key="POST" value="POST">POST</SelectItem>
             </Select>
-            <Input label="预期状态码" size="sm" type="number" className="w-28"
+            <Input label="预期状态码" size="sm" type="number" className="w-24"
               value={String(expectStatus)} onValueChange={(v) => setExpectStatus(Number(v) || 200)} />
-            <Input label="间隔（秒）" size="sm" type="number" className="w-28"
+            <Input label="间隔（秒）" size="sm" type="number" className="w-24"
               value={String(intervalSec)} onValueChange={(v) => setIntervalSec(Math.max(60, Number(v) || 300))} />
-            <Button size="sm" color="primary" startContent={<Plus size={14} />}
-              isLoading={creating} onPress={handleCreate}>登记</Button>
+            <Input label="超时（秒）" size="sm" type="number" className="w-24"
+              value={String(timeoutSec)} onValueChange={(v) => setTimeoutSec(Math.max(3, Math.min(120, Number(v) || 15)))} />
+            <Input label="连失告警" size="sm" type="number" className="w-24"
+              value={String(notifyAfter)} onValueChange={(v) => setNotifyAfter(Math.max(1, Math.min(10, Number(v) || 1)))} />
+            <Button size="sm" color="primary"
+              startContent={editingId != null ? <Pencil size={14} /> : <Plus size={14} />}
+              isLoading={creating} onPress={handleSubmit}>
+              {editingId != null ? "保存" : "登记"}
+            </Button>
+            {editingId != null && (
+              <Button size="sm" variant="light" startContent={<X size={14} />}
+                onPress={resetForm}>取消</Button>
+            )}
           </div>
         </CardBody>
       </Card>
@@ -221,7 +261,9 @@ export default function UptimePage() {
                       <div className="flex gap-1">
                         <Button size="sm" variant="flat" color="primary" startContent={<Play size={12} />}
                           onPress={() => handleCheckNow(m.id)}>测一下</Button>
-                        <Button size="sm" variant="light" color="danger" isIconOnly
+                        <Button size="sm" variant="light" isIconOnly title="编辑"
+                          onPress={() => startEdit(m)}><Pencil size={14} /></Button>
+                        <Button size="sm" variant="light" color="danger" isIconOnly title="删除"
                           onPress={() => handleDelete(m.id)}><Trash2 size={14} /></Button>
                       </div>
                     </td>
