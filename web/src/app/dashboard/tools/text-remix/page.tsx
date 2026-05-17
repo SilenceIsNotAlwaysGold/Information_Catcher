@@ -23,6 +23,7 @@ import { IMAGE_API, proxyUrl, SIZE_OPTIONS } from "@/components/product-image/ut
 import { ImagePreviewModal } from "@/components/product-image/ImagePreviewModal";
 import { ModelSelector } from "@/components/ModelSelector";
 import { BitablePushToggle } from "@/components/BitablePushToggle";
+import { PageHeader, BetaBadge } from "@/components/ui";
 
 type FetchedPost = {
   images: string[];
@@ -653,21 +654,19 @@ export default function TextRemixPage() {
 
   return (
     <div className="p-6 space-y-5 max-w-5xl">
-      {/* 头 */}
-      <div className="flex items-start gap-3">
-        <div className="w-10 h-10 rounded-lg bg-secondary/10 text-secondary flex items-center justify-center">
-          <Wand2 size={24} />
-        </div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            文案换背景
-            <Chip size="sm" variant="flat" color="secondary">MVP</Chip>
-          </h1>
-          <p className="text-sm text-default-500 mt-1">
-            扒原作品图里的文字（OCR） + 用户上传/选择背景图 → AI 把文字按背景风格重绘出新图。
-          </p>
-        </div>
-      </div>
+      {/* 头（与「整体仿写」同板块统一风格 PageHeader）*/}
+      <PageHeader
+        section="remix"
+        icon={Wand2}
+        title="文案换背景"
+        badge={<BetaBadge />}
+        hint="扒原作品图里的文字（OCR） + 用户上传/选择背景图 → AI 把文字按背景风格重绘出新图。"
+        actions={
+          <a href="/dashboard/tools/product-remix" className="text-sm text-remix-600 hover:underline">
+            ← 整体仿写
+          </a>
+        }
+      />
 
       {/* 步骤 1：链接 */}
       <Card>

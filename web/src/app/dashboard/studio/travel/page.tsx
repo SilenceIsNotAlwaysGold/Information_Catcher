@@ -13,7 +13,7 @@ import { Spinner } from "@nextui-org/spinner";
 import { Map, Plus, Trash2, Sparkles, RefreshCw, FileText } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { ModelSelector } from "@/components/ModelSelector";
-import { toastOk, toastErr } from "@/lib/toast";
+import { toastOk, toastErr, toastInsufficientCredits } from "@/lib/toast";
 import { PageHeader, BetaBadge } from "@/components/ui";
 
 const API = (p: string) => `/api/studio/travel${p}`;
@@ -86,7 +86,7 @@ export default function TravelStudioPage() {
         }),
       });
       const d = await r.json();
-      if (r.status === 402) { toastErr(`余额不足：${d.detail || ""}`); return; }
+      if (r.status === 402) { toastInsufficientCredits(d.detail); return; }
       if (!r.ok) { toastErr(d.detail || "生成失败"); return; }
       toastOk(`已生成《${d.title}》`);
       setDest(""); setBudget(""); setStyle(""); setExtra("");

@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { ModelSelector } from "@/components/ModelSelector";
-import { toastOk, toastErr } from "@/lib/toast";
+import { toastOk, toastErr, toastInsufficientCredits } from "@/lib/toast";
 import { PageHeader, BetaBadge } from "@/components/ui";
 
 const API = (p: string) => `/api/studio/comic${p}`;
@@ -151,7 +151,7 @@ export default function ComicStudioPage() {
       });
       const d = await r.json();
       if (r.status === 402) {
-        toastErr(`余额不足：${d.detail || ""}（去个人中心找管理员充值）`);
+        toastInsufficientCredits(d.detail);
         return;
       }
       if (!r.ok) { toastErr(d.detail || "对话失败"); return; }
@@ -201,7 +201,7 @@ export default function ComicStudioPage() {
         method: "POST", headers, body: JSON.stringify({ n_panels: nPanels, replace: true }),
       });
       const d = await r.json();
-      if (r.status === 402) { toastErr(`余额不足：${d.detail || ""}`); return; }
+      if (r.status === 402) { toastInsufficientCredits(d.detail); return; }
       if (!r.ok) { toastErr(d.detail || "拆分镜失败"); return; }
       toastOk(`拆出 ${d.n_panels} 格`);
       await loadDetail();
@@ -215,7 +215,7 @@ export default function ComicStudioPage() {
     try {
       const r = await fetch(API(`/panels/${panelId}/generate`), { method: "POST", headers });
       const d = await r.json();
-      if (r.status === 402) { toastErr(`余额不足：${d.detail || ""}`); return; }
+      if (r.status === 402) { toastInsufficientCredits(d.detail); return; }
       if (!d.ok) toastErr(d.error || "生图失败");
       else toastOk("生图完成");
       await loadDetail();

@@ -17,7 +17,7 @@ import { Presentation, Plus, Trash2, Sparkles, Download, RefreshCw, FileText, Up
 import { PageHeader, SectionCard, EmptyState, BetaBadge } from "@/components/ui";
 import { useAuth } from "@/contexts/AuthContext";
 import { ModelSelector } from "@/components/ModelSelector";
-import { toastOk, toastErr } from "@/lib/toast";
+import { toastOk, toastErr, toastInsufficientCredits } from "@/lib/toast";
 
 const API = (p: string) => `/api/studio/ppt${p}`;
 
@@ -108,7 +108,7 @@ export default function PptStudioPage() {
         }),
       });
       const d = await r.json();
-      if (r.status === 402) { toastErr(`余额不足：${d.detail || ""}`); return; }
+      if (r.status === 402) { toastInsufficientCredits(d.detail); return; }
       if (!r.ok) { toastErr(d.detail || "生成大纲失败"); return; }
       toastOk(`大纲生成完成 · ${d.plan?.pages?.length || 0} 页`);
       setTitle(""); setTopic(""); setAudience("");
@@ -192,7 +192,7 @@ export default function PptStudioPage() {
         body: JSON.stringify({ instruction: revInstruction, text_model_id: textModelId }),
       });
       const d = await r.json();
-      if (r.status === 402) { toastErr(`余额不足：${d.detail || ""}`); return; }
+      if (r.status === 402) { toastInsufficientCredits(d.detail); return; }
       if (!r.ok) { toastErr(d.detail || "修改失败"); return; }
       toastOk(`大纲已重写，现 ${d.pages} 页（旧 .pptx 已失效，请重新渲染）`);
       setRevInstruction("");

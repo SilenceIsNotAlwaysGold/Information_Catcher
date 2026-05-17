@@ -15,7 +15,7 @@ import {
   ScrollText, Plus, Trash2, Sparkles, RefreshCw, FileText, Users as UsersIcon, Download,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { toastOk, toastErr } from "@/lib/toast";
+import { toastOk, toastErr, toastInsufficientCredits } from "@/lib/toast";
 import { PageHeader, BetaBadge } from "@/components/ui";
 
 const API = (p: string) => `/api/studio/novel${p}`;
@@ -131,7 +131,7 @@ export default function NovelStudioPage() {
         method: "POST", headers,
       });
       const d = await r.json();
-      if (r.status === 402) { toastErr(`余额不足：${d.detail || ""}`); return; }
+      if (r.status === 402) { toastInsufficientCredits(d.detail); return; }
       if (!r.ok) { toastErr(d.detail || "生大纲失败"); return; }
       setOutlineDraft(d.outline || "");
       toastOk("大纲已生成（已保存到项目）");
@@ -179,7 +179,7 @@ export default function NovelStudioPage() {
         body: JSON.stringify({ hint, target_chars: targetChars }),
       });
       const d = await r.json();
-      if (r.status === 402) { toastErr(`余额不足：${d.detail || ""}`); return; }
+      if (r.status === 402) { toastInsufficientCredits(d.detail); return; }
       if (!r.ok) { toastErr(d.detail || "生章节失败"); return; }
       toastOk(`第 ${d.seq} 章「${d.title}」已生成（${d.char_count} 字）`);
       setHint("");
@@ -206,7 +206,7 @@ export default function NovelStudioPage() {
   const summarizeChapter = async (cid: number) => {
     const r = await fetch(API(`/chapters/${cid}/summarize`), { method: "POST", headers });
     const d = await r.json();
-    if (r.status === 402) { toastErr(`余额不足：${d.detail || ""}`); return; }
+    if (r.status === 402) { toastInsufficientCredits(d.detail); return; }
     if (r.ok) { toastOk("摘要已生成"); await loadDetail(); }
     else toastErr(d.detail || "总结失败");
   };

@@ -19,7 +19,7 @@ import {
 import { useAuth } from "@/contexts/AuthContext";
 import { ModelSelector } from "@/components/ModelSelector";
 import { PageHeader, SectionCard, EmptyState } from "@/components/ui";
-import { toastOk, toastErr } from "@/lib/toast";
+import { toastOk, toastErr, toastInsufficientCredits } from "@/lib/toast";
 
 type Platform = "xhs" | "douyin" | "mp";
 
@@ -71,7 +71,7 @@ export default function OriginalPage() {
         }),
       });
       const d = await r.json();
-      if (r.status === 402) { toastErr(`余额不足：${d.detail || ""}`); return; }
+      if (r.status === 402) { toastInsufficientCredits(d.detail); return; }
       if (!r.ok) { toastErr(d.detail || "改写失败"); return; }
       setResult(d.result || "");
       toastOk(`已改写完成（${d.result_length} 字）`);
