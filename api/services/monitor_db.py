@@ -725,6 +725,7 @@ CREATE TABLE IF NOT EXISTS service_monitors (
     last_error TEXT DEFAULT '',
     consecutive_fail INTEGER DEFAULT 0,    -- 连续失败次数（用于去抖告警）
     notify_after_fails INTEGER DEFAULT 1,  -- 连续 N 次失败后才告警
+    monitor_type TEXT DEFAULT 'http',      -- http（按状态码）| tcp（按端口可连），tcp 时 url 填 host:port
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_svc_monitors_user ON service_monitors(user_id, enabled);
@@ -1035,6 +1036,8 @@ async def _migrate(db):
     await _ensure_column(db, "monitor_accounts", "cookie_synced_at", "TEXT DEFAULT ''")
     await _ensure_column(db, "monitor_accounts", "cookie_synced_via", "TEXT DEFAULT ''")
     # remix v2：多张参考图（向后兼容，老任务仍用 ref_image_idx/ref_image_url 单值字段）
+    # uptime 服务监控：http（状态码）/ tcp（端口可连）双模式，老库默认 http
+    await _ensure_column(db, "service_monitors", "monitor_type", "TEXT DEFAULT 'http'")
     # 新任务：ref_image_idxs/urls 存 JSON list；worker 用 list 长度判断走多图逻辑
     await _ensure_column(db, "remix_tasks", "ref_image_idxs", "TEXT DEFAULT ''")
     await _ensure_column(db, "remix_tasks", "ref_image_urls", "TEXT DEFAULT ''")

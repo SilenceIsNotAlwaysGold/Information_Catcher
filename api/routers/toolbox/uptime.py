@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Optional
@@ -38,9 +39,42 @@ async def _get_monitor(mid: int, user_id: int):
 
 # ── 探活实现 ─────────────────────────────────────────────────────────────
 
-async def _probe(url: str, method: str, expected_status: int, timeout: float) -> dict:
-    """返回 {status, http_status, latency_ms, error}。status ∈ ok/down/error。"""
+def _parse_host_port(url: str) -> tuple[str, int]:
+    """从 tcp 监控的 url 取 (host, port)。容忍 tcp:// 前缀 / host:port / 纯 host(默认 80)。"""
+    s = (url or "").strip()
+    if "://" in s:
+        s = s.split("://", 1)[1]
+    s = s.split("/", 1)[0].strip()
+    if ":" in s:
+        host, _, p = s.rpartition(":")
+        try:
+            return host, int(p)
+        except ValueError:
+            return s, 80
+    return s, 80
+
+
+async def _probe(url: str, method: str, expected_status: int, timeout: float,
+                 monitor_type: str = "http") -> dict:
+    """返回 {status, http_status, latency_ms, error}。status ∈ ok/down/error。
+    monitor_type=tcp 时只测端口能否在 timeout 内建立 TCP 连接（url=host:port）。"""
     t0 = time.perf_counter()
+    if (monitor_type or "http").lower() == "tcp":
+        host, port = _parse_host_port(url)
+        try:
+            fut = asyncio.open_connection(host, port)
+            reader, writer = await asyncio.wait_for(fut, timeout=timeout)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return {"status": "ok", "http_status": 0,
+                    "latency_ms": int((time.perf_counter() - t0) * 1000), "error": ""}
+        except Exception as e:
+            return {"status": "error", "http_status": 0,
+                    "latency_ms": int((time.perf_counter() - t0) * 1000),
+                    "error": f"TCP {host}:{port} 不可连 — {type(e).__name__}: {str(e)[:160]}"}
     method = (method or "GET").upper()
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as cli:
@@ -128,26 +162,35 @@ class MonitorIn(BaseModel):
     interval_seconds: int = 300
     notify_after_fails: int = 1
     enabled: bool = True
+    monitor_type: str = "http"   # http=按状态码 | tcp=按端口可连（url 填 host:port）
 
 
 @router.post("/monitors", summary="登记一个监控目标")
 async def create_monitor(body: MonitorIn, current_user: dict = Depends(get_current_user)):
     uid = int(current_user["id"])
-    if body.method.upper() not in ("GET", "HEAD", "POST"):
-        raise HTTPException(400, "method 只能是 GET / HEAD / POST")
-    if not (body.url.startswith("http://") or body.url.startswith("https://")):
-        raise HTTPException(400, "url 必须以 http:// 或 https:// 开头")
+    mtype = (body.monitor_type or "http").lower()
+    if mtype not in ("http", "tcp"):
+        raise HTTPException(400, "monitor_type 只能是 http / tcp")
+    if mtype == "http":
+        if body.method.upper() not in ("GET", "HEAD", "POST"):
+            raise HTTPException(400, "method 只能是 GET / HEAD / POST")
+        if not (body.url.startswith("http://") or body.url.startswith("https://")):
+            raise HTTPException(400, "http 监控的 url 必须以 http:// 或 https:// 开头")
+    else:  # tcp
+        _h, _p = _parse_host_port(body.url)
+        if not _h or not (0 < _p < 65536):
+            raise HTTPException(400, "tcp 监控的 url 应为 host:port（如 db.example.com:5432）")
     async with _db.connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT INTO service_monitors(user_id, name, url, method, expected_status, "
-            "timeout_seconds, interval_seconds, notify_after_fails, enabled) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "timeout_seconds, interval_seconds, notify_after_fails, enabled, monitor_type) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (uid, body.name.strip()[:80], body.url.strip()[:500],
              body.method.upper(), int(body.expected_status),
              max(3, min(int(body.timeout_seconds), 120)),
              max(60, min(int(body.interval_seconds), 86400)),
              max(1, min(int(body.notify_after_fails), 10)),
-             1 if body.enabled else 0),
+             1 if body.enabled else 0, mtype),
         )
         await db.commit()
         return {"ok": True, "id": cur.lastrowid}
@@ -174,13 +217,16 @@ async def update_monitor(mid: int, body: MonitorIn, current_user: dict = Depends
     async with _db.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE service_monitors SET name=?, url=?, method=?, expected_status=?, "
-            "timeout_seconds=?, interval_seconds=?, notify_after_fails=?, enabled=? WHERE id=?",
+            "timeout_seconds=?, interval_seconds=?, notify_after_fails=?, enabled=?, "
+            "monitor_type=? WHERE id=?",
             (body.name.strip()[:80], body.url.strip()[:500], body.method.upper(),
              int(body.expected_status),
              max(3, min(int(body.timeout_seconds), 120)),
              max(60, min(int(body.interval_seconds), 86400)),
              max(1, min(int(body.notify_after_fails), 10)),
-             1 if body.enabled else 0, int(mid)),
+             1 if body.enabled else 0,
+             (body.monitor_type or "http").lower() if (body.monitor_type or "http").lower() in ("http", "tcp") else "http",
+             int(mid)),
         )
         await db.commit()
     return {"ok": True}
@@ -208,6 +254,7 @@ async def check_now(mid: int, current_user: dict = Depends(get_current_user)):
     result = await _probe(
         m["url"], m["method"], int(m["expected_status"]),
         float(m["timeout_seconds"]),
+        monitor_type=(m.get("monitor_type") or "http"),
     )
     await _record_check(int(mid), result, m)
     return {"ok": True, **result}
@@ -261,7 +308,8 @@ async def run_all_due_checks() -> dict:
             due.append(m)
     for m in due:
         try:
-            r = await _probe(m["url"], m["method"], int(m["expected_status"]), float(m["timeout_seconds"]))
+            r = await _probe(m["url"], m["method"], int(m["expected_status"]), float(m["timeout_seconds"]),
+                             monitor_type=(m.get("monitor_type") or "http"))
             await _record_check(int(m["id"]), r, m)
         except Exception as e:
             logger.warning(f"[uptime.run_all_due_checks] monitor={m['id']} 异常: {e}")

@@ -23,7 +23,7 @@ const API = (p: string) => `/api/toolbox/uptime${p}`;
 type Monitor = {
   id: number; name: string; url: string; method: string;
   expected_status: number; timeout_seconds: number; interval_seconds: number;
-  enabled: number; notify_after_fails: number;
+  enabled: number; notify_after_fails: number; monitor_type?: string;
   last_check_at: string; last_status: string; last_latency_ms: number; last_error: string;
   consecutive_fail: number;
 };
@@ -52,6 +52,7 @@ export default function UptimePage() {
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [method, setMethod] = useState("GET");
+  const [monitorType, setMonitorType] = useState("http");
   const [expectStatus, setExpectStatus] = useState(200);
   const [intervalSec, setIntervalSec] = useState(300);
   const [timeoutSec, setTimeoutSec] = useState(15);
@@ -83,7 +84,7 @@ export default function UptimePage() {
 
   const resetForm = () => {
     setEditingId(null);
-    setName(""); setUrl(""); setMethod("GET");
+    setName(""); setUrl(""); setMethod("GET"); setMonitorType("http");
     setExpectStatus(200); setIntervalSec(300);
     setTimeoutSec(15); setNotifyAfter(1);
   };
@@ -91,6 +92,7 @@ export default function UptimePage() {
   const startEdit = (m: Monitor) => {
     setEditingId(m.id);
     setName(m.name); setUrl(m.url); setMethod(m.method);
+    setMonitorType(m.monitor_type || "http");
     setExpectStatus(m.expected_status);
     setIntervalSec(m.interval_seconds);
     setTimeoutSec(m.timeout_seconds);
@@ -112,6 +114,7 @@ export default function UptimePage() {
             interval_seconds: intervalSec,
             timeout_seconds: timeoutSec,
             notify_after_fails: notifyAfter,
+            monitor_type: monitorType,
             enabled: true,
           }),
         },
@@ -150,7 +153,8 @@ export default function UptimePage() {
         name: m.name, url: m.url, method: m.method,
         expected_status: m.expected_status, timeout_seconds: m.timeout_seconds,
         interval_seconds: m.interval_seconds,
-        notify_after_fails: m.notify_after_fails, enabled: on,
+        notify_after_fails: m.notify_after_fails,
+        monitor_type: m.monitor_type || "http", enabled: on,
       }),
     });
     if (r.ok) await loadList();
@@ -179,8 +183,16 @@ export default function UptimePage() {
             <Input label="名称" size="sm" className="w-44"
               value={name} onValueChange={setName} placeholder="如：官网首页" />
             <Input label="URL" size="sm" className="flex-1 min-w-[260px]"
-              value={url} onValueChange={setUrl} placeholder="https://example.com" />
+              value={url} onValueChange={setUrl}
+              placeholder={monitorType === "tcp" ? "host:port（如 db.x.com:5432）" : "https://example.com"} />
+            <Select label="类型" size="sm" className="w-24"
+              selectedKeys={[monitorType]}
+              onSelectionChange={(k) => { const v = Array.from(k)[0]; if (v) setMonitorType(String(v)); }}>
+              <SelectItem key="http" value="http">HTTP</SelectItem>
+              <SelectItem key="tcp" value="tcp">TCP</SelectItem>
+            </Select>
             <Select label="方法" size="sm" className="w-24"
+              isDisabled={monitorType === "tcp"}
               selectedKeys={[method]}
               onSelectionChange={(k) => { const v = Array.from(k)[0]; if (v) setMethod(String(v)); }}>
               <SelectItem key="GET" value="GET">GET</SelectItem>
@@ -240,7 +252,11 @@ export default function UptimePage() {
                   <tr key={m.id} className={`border-b border-default-100 ${selectedId === m.id ? "bg-default-50" : ""}`}>
                     <td className="py-2 pr-2 cursor-pointer" onClick={() => setSelectedId(m.id)}>
                       <b>{m.name}</b>
-                      <p className="text-[10px] text-default-400">{m.method} · 期望 {m.expected_status} · 每 {m.interval_seconds}s</p>
+                      <p className="text-[10px] text-default-400">
+                        {(m.monitor_type || "http") === "tcp"
+                          ? `TCP · 每 ${m.interval_seconds}s`
+                          : `${m.method} · 期望 ${m.expected_status} · 每 ${m.interval_seconds}s`}
+                      </p>
                     </td>
                     <td className="pr-2 max-w-[260px] truncate text-default-500">{m.url}</td>
                     <td className="pr-2">
