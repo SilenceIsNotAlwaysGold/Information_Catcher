@@ -56,18 +56,22 @@
 
 ## 进度（2026-05-17）
 
-**全部 9 个 P0 已修复并提交**：P0-1~4(6720296) · P0-9(ef91cc0) · P0-8(53614fd) ·
-P0-5/6(2bd4918) · P0-7(7d9e3a3)。前端 P1 部分：comic-style 入导航 + 删
-MyAiModelsCard 死文件(9ef6d23)。本地领先 origin/main 多个提交，未推送。
+**全部 9 个 P0 已修复并提交**（已 push origin/main）：P0-1~4(6720296) · P0-9(ef91cc0) ·
+P0-8(53614fd) · P0-5/6(2bd4918) · P0-7(7d9e3a3)。
+
+**P1 已修（/loop 持续迭代）**：
+- 前端：comic-style 入导航 + 删 MyAiModelsCard 死文件(9ef6d23)；全局 402「去充值」
+  拦截 + text-remix 头统一 PageHeader(45ce2e0)
+- 计费：免费模型(price=0)乱扣 + 负/非法单价钳 0(58f2d55)；adjust 负值打穿防护(本轮)
+- PPT：封面纯黑罩→真 alpha 半透 + 产物落 database/ppt_cache 持久(58f2d55)
+- 小说：落章后自动摘要，续写连贯性不再因没点摘要而退化(本轮)
 
 ### 剩余（P1/P2，非阻断）
-- ✅ 全局 402「去充值」拦截 + text-remix 头统一 PageHeader（45ce2e0 已修）
 - **前端 P1（仅剩）**：16 个监控/仿写老页未接 `@/components/ui` PageHeader
   （xhs/douyin posts·creators·trending 等，纯 cosmetic 视觉一致性，量大）
-- **Studio P1**：小说补世界观/伏笔/卷/自动摘要；漫画 generate-all 异步化 + 角色 ref 图
-  一致性；PPT transparency 纯黑罩 + 产物持久化 + 删模板页健壮性；旅游 max_tokens 动态；
-  跨模块「HTTP 200 但内容非法不退款」
-- **计费 P1/P2**：price_per_call=0 配不出免费模型；adjust 负值打穿；refund 失败无补偿队列；
-  reconcile 无定时巡检告警；PG 路径零测试
+- **Studio P1**：小说补世界观/伏笔/卷结构/插重章；漫画 generate-all 异步化 + 角色 ref 图
+  一致性；PPT 删模板页失败应回退默认而非静默产损坏 .pptx；旅游 max_tokens 动态；
+  跨模块「HTTP 200 但内容非法 JSON 不退款」
+- **计费 P2**：refund 失败无补偿队列；reconcile 无定时巡检告警；PG 路径零测试
 - **P2**：hotnews 政策/金融 Tab 空 + 文案造假；uptime 无 TCP/无周报/无编辑入口；
   original 无历史/批量/同步阻塞；文档债

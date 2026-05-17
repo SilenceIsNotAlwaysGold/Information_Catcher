@@ -142,6 +142,25 @@ async def test_grant_and_adjust(billing):
 
 
 @pytest.mark.asyncio
+async def test_adjust_negative_guard(billing):
+    """adjust 默认不许把余额调成负数（防手滑 -999999 锁死用户）；
+    显式 allow_negative=True 才放行。"""
+    await billing.grant(1, 30, note="m")
+    # 默认拒绝调成负 → ValueError，余额不动
+    with pytest.raises(ValueError):
+        await billing.adjust(1, -100, operator="admin", note="手滑")
+    assert await billing.get_balance(1) == Decimal("30.00")
+    # 负但不打穿 → 允许
+    await billing.adjust(1, -10, operator="admin", note="正常纠错")
+    assert await billing.get_balance(1) == Decimal("20.00")
+    # 显式二次确认 → 允许打穿成负
+    await billing.adjust(1, -50, operator="admin", note="确需扣负", allow_negative=True)
+    assert await billing.get_balance(1) == Decimal("-30.00")
+    ok, bal, total = await billing.reconcile(1)
+    assert ok and bal == total == Decimal("-30.00")
+
+
+@pytest.mark.asyncio
 async def test_reconcile(billing):
     await billing.recharge(7, 100, operator="admin")
     await billing.deduct(7, cost=15, model_id=1, feature="ocr", task_ref="r1")

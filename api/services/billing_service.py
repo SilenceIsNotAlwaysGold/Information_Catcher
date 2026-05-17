@@ -283,13 +283,28 @@ async def grant(user_id: int, amount, *, note: str = "monthly_free") -> Decimal:
     )
 
 
-async def adjust(user_id: int, delta, *, operator: str, note: str) -> Decimal:
-    """admin 手动纠错。delta 可正可负。note 必填（说明原因，进流水审计）。"""
+async def adjust(
+    user_id: int, delta, *, operator: str, note: str,
+    allow_negative: bool = False,
+) -> Decimal:
+    """admin 手动纠错。delta 可正可负。note 必填（说明原因，进流水审计）。
+
+    安全：默认不允许把余额调成负数——一次手滑 delta=-999999 会让余额变大负数，
+    之后所有扣费因 new_balance<0 永久失败 → 用户被锁死。确需扣成负的，
+    必须显式 allow_negative=True（管理员二次确认）。
+    """
     if not note:
         raise ValueError("adjust 必须填 note 说明原因")
     d = _dec(delta)
     if d == 0:
         return await get_balance(user_id)
+    if d < 0 and not allow_negative:
+        cur = await get_balance(user_id)
+        if (cur + d) < 0:
+            raise ValueError(
+                f"调整后余额将为负（当前 {cur} + 调整 {d} = {cur + d}）。"
+                f"如确需扣成负数，请显式勾选 allow_negative 二次确认。"
+            )
     return await _apply_change(
         user_id, kind="adjust", delta=d, operator=operator, note=note, allow_negative=True,
     )

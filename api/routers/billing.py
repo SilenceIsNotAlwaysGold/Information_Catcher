@@ -94,6 +94,7 @@ class AdjustIn(BaseModel):
     user_id: int
     delta: float        # 可正可负
     note: str           # 必填
+    allow_negative: bool = False  # 显式二次确认才允许把余额扣成负数（防手滑锁死用户）
 
 
 def _check_user_exists(uid: int):
@@ -119,9 +120,15 @@ async def admin_adjust(body: AdjustIn, admin: dict = Depends(get_admin_user)):
     _check_user_exists(body.user_id)
     if not body.note.strip():
         raise HTTPException(status_code=400, detail="adjust 必须填 note 说明原因")
-    bal = await billing_service.adjust(
-        body.user_id, body.delta, operator=str(admin.get("username") or "admin"), note=body.note.strip(),
-    )
+    try:
+        bal = await billing_service.adjust(
+            body.user_id, body.delta,
+            operator=str(admin.get("username") or "admin"),
+            note=body.note.strip(),
+            allow_negative=body.allow_negative,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True, "user_id": body.user_id, "balance": _fnum(bal)}
 
 

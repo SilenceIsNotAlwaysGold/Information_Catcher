@@ -310,7 +310,28 @@ async def generate_next_chapter(
         await db.commit()
         ch_id = cur.lastrowid
     await _touch(pid)
-    return {"ok": True, "id": ch_id, "seq": next_seq, "title": title, "content": content, "char_count": cc}
+    # 自动摘要本章：续写下一章的上下文用「前几章 summary」，若靠用户手点摘要，
+    # 不点 → summary 为空 → 续写连贯性退化。这里落章后即生成（最佳努力，
+    # 失败/余额不足不影响本章已保存的结果）。
+    summary_txt = ""
+    try:
+        s = await ai_client.call_text(
+            content[:8000], model_id=p.get("text_model_id"), user_id=uid,
+            feature="novel_outline", system_prompt=_SUMMARY_SYSTEM,
+            temperature=0.4, max_tokens=400,
+            task_ref=ai_client.make_task_ref("novel_summary", ch_id),
+        )
+        summary_txt = (s or "").strip()[:2000]
+        if summary_txt:
+            async with _db.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE novel_chapters SET summary=? WHERE id=?", (summary_txt, int(ch_id)),
+                )
+                await db.commit()
+    except Exception as e:
+        logger.warning(f"[novel] 自动摘要失败 ch={ch_id}: {e}")
+    return {"ok": True, "id": ch_id, "seq": next_seq, "title": title,
+            "content": content, "char_count": cc, "summary": summary_txt}
 
 
 @router.get("/chapters/{cid}", summary="某章正文")
