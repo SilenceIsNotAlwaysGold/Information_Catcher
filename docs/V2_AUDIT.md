@@ -15,7 +15,7 @@
 | P0-5 | PPT | `ppt.py:989-1004` + `ppt/page.tsx:215-221` | 下载端点要 Bearer header，`<a target=_blank>` 带不了 → 永远 401，渲染好的 .pptx 下不到（整模块致命） | 下载端点接受 `?token=` query 自行 verify；或一次性签名 URL；或 fetch 带 header 取 blob |
 | P0-6 | 漫画 | `comic.py:479-482` + `comic.py:123-136` | 未配对象存储时 base64 灌 DB，详情接口一次返几十 MB 卡死前端/撑爆 SQLite | 未配存储直接标 `gen_status='error'` 提示配存储；或详情接口不返 data: URL |
 | P0-7 | 热点雷达 | `hotnews_fetcher.py:87` | GitHub Trending 字面量正则切分，GitHub HTML 结构变动后基本抓 0 条 | 改宽松匹配 / 用 GitHub search API |
-| P0-8 | 前端 | `web/src/lib/sections.ts:41-50` | 公众号 mp 整套真实功能页（611+143 行）无导航入口，但 GlobalSearch/profile 仍能进 → 状态自相矛盾 | 决策：补回 mp 导航 **或** 彻底删 mp（页+profile tab+GlobalSearch 分支），别留半下线 |
+| ✅修复 | 前端 | P0-8 | 公众号 mp UI 彻底下线：删 app/dashboard/mp/ + GlobalSearch mp 跳转 + profile mp tab/类型；后端保留。2026-05-17 提交 53614fd | — |
 | ✅修复 | 计费 | P0-9 | call_edits/call_generations 五处调用方接入计费（bill_edits/refund_edits 助手 + comic_style 单价 + 预扣/整退/部分退/稳定 task_ref）—— 2026-05-17 已修并提交 ef91cc0 | — |
 | ✅修复 | 计费 | P0-1/2/3/4 | SQLite 事务锁(connect_tx+busy_timeout+显式 ROLLBACK) / 幂等键(make_task_ref 贯通 call_* + v2 调用方稳定 ref + _bill_charge 缺失 WARNING) / amount 带符号约定对齐 / 部分退款量化+refund 幂等 —— 2026-05-17 已修并提交 6720296（23 测试过）| — |
 
