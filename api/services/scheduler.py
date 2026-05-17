@@ -1294,6 +1294,42 @@ async def run_trial_expiration():
         logger.exception(f"[trial_expiration] failed: {e}")
 
 
+async def run_reconcile_check():
+    """每日计费对账巡检（命脉安全网）。
+
+    billing_service 不变量：user_credits.balance == SUM(credit_ledger.amount)。
+    全员对账，发现不平 → ERROR 日志 + 飞书红卡告警（best-effort，用全局
+    feishu_webhook_url）。不平通常意味着事务/退款 bug，必须人工介入查账。
+    """
+    try:
+        from . import billing_service as _billing
+        bad = await _billing.reconcile_all()
+    except Exception as e:
+        logger.exception(f"[reconcile_check] reconcile_all 失败: {e}")
+        return
+    if not bad:
+        logger.info("[reconcile_check] 全员对账通过 ✓")
+        return
+    lines = [f"user={uid} 余额={bal} 流水累计={total} 差={bal - total}"
+             for uid, bal, total in bad[:20]]
+    detail = "\n".join(lines)
+    logger.error(
+        "[reconcile_check] ⚠️ 计费对账不平 %d 个用户（命脉异常，需查账）:\n%s",
+        len(bad), detail,
+    )
+    try:
+        webhook = await db.get_setting("feishu_webhook_url", "")
+        if webhook:
+            await notifier.send_feishu(
+                webhook,
+                "⚠️ 计费对账不平（命脉异常）",
+                f"{len(bad)} 个用户余额与流水累计不一致，请尽快查账：\n{detail}",
+                template="red",
+            )
+    except Exception as e:
+        logger.warning(f"[reconcile_check] 飞书告警发送失败: {e}")
+
+
 async def start_scheduler():
     settings = await db.get_all_settings()
     interval = int(settings.get("check_interval_minutes", "30") or "30")
@@ -1392,6 +1428,15 @@ async def start_scheduler():
         )
     except Exception as e:
         logger.warning(f"[scheduler] monthly_grant cron 注册失败: {e}")
+    # v2: 计费对账巡检 — 每日 03:30 全员对账，不平即 ERROR + 飞书告警（命脉安全网）
+    try:
+        scheduler.add_job(
+            run_reconcile_check,
+            CronTrigger(hour=3, minute=30, timezone="Asia/Shanghai"),
+            id="reconcile_check", replace_existing=True, max_instances=1,
+        )
+    except Exception as e:
+        logger.warning(f"[scheduler] reconcile_check cron 注册失败: {e}")
     scheduler.start()
     logger.info(f"[scheduler] started — interval={interval}min, report={report_time}")
 
