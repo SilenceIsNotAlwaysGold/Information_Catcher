@@ -108,20 +108,30 @@ async def compute_cost(model_id: Optional[int], feature: str = "") -> Decimal:
         # model 被删了仍有调用兜底到 feature 默认 / 1.0
         return _dec(DEFAULT_FEATURE_PRICE.get(feature, "1.0"))
     keys = set(row.keys())
-    base = _dec(row["price_per_call"]) if "price_per_call" in keys else Decimal("1")
+    # 原始值（不过 _dec）：用来区分 NULL/未配 与 显式 0。显式 0 = 免费模型，
+    # 必须尊重；以前 `Decimal("0") or 1` 把刻意配的免费模型扣成 1 点（bug）。
+    raw_ppc = row["price_per_call"] if "price_per_call" in keys else None
     fp_raw = row["feature_pricing"] if "feature_pricing" in keys else "{}"
     try:
         fp = json.loads(fp_raw or "{}")
     except Exception:
         fp = {}
+
+    def _nonneg(v) -> Decimal:
+        # 负数 / 非法值钳到 0（免费），杜绝负单价变相充值白嫖（P1-7）
+        d = _dec(v)
+        return d if d > 0 else Decimal("0")
+
+    # 1) feature_pricing 显式配了该 feature → 最高优先（含显式 0 = 该 feature 免费）
     if feature and feature in fp:
-        return _dec(fp[feature])
-    if base > 0:
-        return base
-    # base 是默认 1，但 admin 可能想让某 feature 走默认表
+        return _nonneg(fp[feature])
+    # 2) price_per_call 显式配置（含 0）→ 尊重；仅 NULL/空 才落兜底
+    if raw_ppc is not None and str(raw_ppc).strip() != "":
+        return _nonneg(raw_ppc)
+    # 3) 未配单价 → feature 默认表 → 1.0
     if feature in DEFAULT_FEATURE_PRICE:
         return _dec(DEFAULT_FEATURE_PRICE[feature])
-    return base or Decimal("1")
+    return Decimal("1")
 
 
 # ── 余额读取 ───────────────────────────────────────────────────────────────

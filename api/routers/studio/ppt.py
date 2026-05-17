@@ -13,7 +13,6 @@ import io
 import json
 import logging
 import os
-import tempfile
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -28,8 +27,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/studio/ppt", tags=["AI-Studio-PPT"])
 DB_PATH = monitor_db.DB_PATH
 
-# 用户的 PPTX 缓存目录（不上传到对象存储时直接 file 返）
-_PPT_CACHE_DIR = os.path.join(tempfile.gettempdir(), "pulse_ppt_cache")
+# 渲染产物目录：必须持久（系统临时目录会被 OS/重启清理 → 列表显示"已渲染"
+# 但下载 404）。落到项目 database/ 下，与 ppt_templates 同基准。
+_PPT_CACHE_DIR = os.path.join(os.path.dirname(str(DB_PATH)), "ppt_cache")
 os.makedirs(_PPT_CACHE_DIR, exist_ok=True)
 
 
@@ -542,13 +542,19 @@ def _layout_cover(prs, palette, page, *, page_idx: int, total: int, image_bytes:
             from pptx.enum.shapes import MSO_SHAPE
             slide.shapes.add_picture(BytesIO(image_bytes),
                 Inches(0), Inches(0), width=Inches(13.333), height=Inches(7.5))
-            # 暗罩：黑色半透矩形，让文字醒目
+            # 暗罩：黑色半透矩形，让文字醒目。
+            # 注意：python-pptx 的 FillFormat 没有可写的 transparency 属性，
+            # 直接赋值会 AttributeError 被外层 except 吞掉 → 矩形仍是 100%
+            # 不透明纯黑，把底图整张盖死（旧 bug）。改为往 a:srgbClr 注入
+            # <a:alpha> 实现真半透（OOXML alpha：100000=完全不透明）。
+            from pptx.oxml.ns import qn
             overlay = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE,
                 Inches(0), Inches(0), Inches(13.333), Inches(7.5))
             overlay.fill.solid()
             overlay.fill.fore_color.rgb = RGBColor(0x00, 0x00, 0x00)
-            overlay.fill.transparency = 0.4  # 注意：python-pptx 不直接暴露 transparency；保留属性供后续 XML hack
             overlay.line.fill.background()
+            _srgb = overlay._element.spPr.find(qn("a:solidFill")).find(qn("a:srgbClr"))
+            _srgb.append(_srgb.makeelement(qn("a:alpha"), {"val": "42000"}))  # 42% 不透明，底图透出 ~58%
         except Exception:
             pass
     title = (page.get("title") or "PPT").strip()
