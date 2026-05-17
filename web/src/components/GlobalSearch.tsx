@@ -92,14 +92,13 @@ function postInternalHref(platform: string, noteId: string): string {
     return `/dashboard/xhs/posts/history?note_id=${encodeURIComponent(noteId)}`;
   }
   if (platform === "douyin") return `/dashboard/douyin/posts/`;
-  if (platform === "mp") return `/dashboard/mp/posts/`;
+  // 公众号 mp 已下线（v2）：旧 mp 数据回退到 dashboard，不再链到已删页面
   return "/dashboard";
 }
 
 function creatorInternalHref(platform: string): string {
   if (platform === "xhs") return "/dashboard/xhs/creators/";
   if (platform === "douyin") return "/dashboard/douyin/creators/";
-  if (platform === "mp") return "/dashboard/mp/creators/";
   return "/dashboard";
 }
 

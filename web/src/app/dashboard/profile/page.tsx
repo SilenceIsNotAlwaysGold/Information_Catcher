@@ -99,16 +99,14 @@ const DEFAULTS: Settings = {
   comments_fetch_enabled: "0",
 };
 
-type PlatformKey = "xhs" | "douyin" | "mp";
+type PlatformKey = "xhs" | "douyin";
 type MetricKey = "likes" | "collects" | "comments";
 
 const PLATFORM_LABELS: Record<PlatformKey, string> = {
   xhs: "小红书",
   douyin: "抖音",
-  mp: "公众号",
 };
 
-// 公众号没有"收藏"概念，第二项展示成"在看"，但仍存到 collects_threshold 字段
 const METRIC_DEFS: Record<PlatformKey, Array<{ key: MetricKey; label: string; desc: string; unit: string }>> = {
   xhs: [
     { key: "likes",    label: "点赞量告警", desc: "单次检测点赞增量超过阈值时推送", unit: "次" },
@@ -119,11 +117,6 @@ const METRIC_DEFS: Record<PlatformKey, Array<{ key: MetricKey; label: string; de
     { key: "likes",    label: "点赞量告警", desc: "单次检测点赞增量超过阈值时推送", unit: "次" },
     { key: "collects", label: "收藏量告警", desc: "单次检测收藏增量超过阈值时推送", unit: "次" },
     { key: "comments", label: "评论告警",   desc: "单次检测新增评论超过阈值时推送", unit: "条" },
-  ],
-  mp: [
-    { key: "likes",    label: "点赞量告警", desc: "单次检测点赞增量超过阈值时推送", unit: "次" },
-    { key: "collects", label: "在看告警",   desc: "单次检测在看增量超过阈值时推送（公众号特有）", unit: "次" },
-    { key: "comments", label: "留言告警",   desc: "单次检测新增留言超过阈值时推送", unit: "条" },
   ],
 };
 
@@ -144,7 +137,7 @@ export default function MonitorSettingsPage() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     const t = new URLSearchParams(window.location.search).get("tab");
-    if (t && ["global", "xhs", "douyin", "mp", "system"].includes(t)) {
+    if (t && ["global", "xhs", "douyin", "system"].includes(t)) {
       setActiveTab(t);
     }
   }, []);
@@ -364,7 +357,7 @@ export default function MonitorSettingsPage() {
         <CardHeader className="font-semibold">全局告警阈值（兜底）</CardHeader>
         <CardBody className="space-y-5">
           <p className="text-xs text-default-400">
-            未单独配置的平台会沿用此处阈值。如需为「小红书 / 抖音 / 公众号」分别设置，请切换到对应 tab。
+            未单独配置的平台会沿用此处阈值。如需为「小红书 / 抖音」分别设置，请切换到对应 tab。
           </p>
           {[
             { key: "likes" as const, label: "点赞量告警", desc: "单次检测点赞增量超过阈值时推送", unit: "次" },
@@ -500,9 +493,6 @@ export default function MonitorSettingsPage() {
         </Tab>
         <Tab key="douyin" title={PLATFORM_LABELS.douyin}>
           {renderPlatformPanel("douyin")}
-        </Tab>
-        <Tab key="mp" title={PLATFORM_LABELS.mp}>
-          {renderPlatformPanel("mp")}
         </Tab>
       </Tabs>
 
