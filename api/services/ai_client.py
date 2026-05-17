@@ -38,6 +38,58 @@ logger = logging.getLogger(__name__)
 # 计费接入（v2 SaaS）—— 所有 AI 调用走平台 key，按模型 × feature 扣点数
 # ──────────────────────────────────────────────────────────────
 
+async def bill_edits(
+    user_id: Optional[int], model_row_id: Optional[int], feature: str,
+    *, n: int = 1, task_ref: Optional[str] = None,
+) -> Decimal:
+    """call_edits / call_generations 路径计费。
+
+    这俩是 routers/image_gen/_common.py 里的裸上游 HTTP helper，**不自带计费**，
+    必须由调用方在调用前调本函数预扣（否则图生图/参考图等核心付费功能全免费）。
+    返回实扣点数（0 = 未扣，如 user_id/model 缺失或单价 0）。
+    余额不足 → raise billing_service.InsufficientCredits（调用方据此 402 / 标任务失败，不发起上游请求）。
+    """
+    if user_id is None or not model_row_id:
+        return Decimal("0")
+    from . import billing_service as _bill
+    cost = await _bill.compute_cost(int(model_row_id), feature)
+    if n and n > 1:
+        cost = cost * n
+    if cost <= 0:
+        return Decimal("0")
+    if task_ref:
+        ref = task_ref
+    else:
+        ref = f"{feature or 'edits'}:{model_row_id}:{uuid.uuid4().hex}"
+        logger.warning(
+            "[ai_client] bill_edits 无 task_ref（幂等失效，重试会重复扣费）"
+            " user=%s feature=%s model=%s", user_id, feature or "-", model_row_id,
+        )
+    await _bill.deduct(
+        int(user_id), cost=cost, model_id=int(model_row_id), feature=feature, task_ref=ref,
+    )
+    return cost
+
+
+async def refund_edits(
+    user_id: Optional[int], model_row_id: Optional[int], feature: str,
+    task_ref: str, cost,
+) -> None:
+    """call_edits/generations 整单或部分失败退款。失败只记日志不抛（不能盖掉原始错误）。
+    幂等由 _apply_change 按 (task_ref, kind='refund') 查重——整操作重试不会累计多退。"""
+    if user_id is None or not task_ref or not cost or cost <= 0:
+        return
+    from . import billing_service as _bill
+    try:
+        await _bill.refund(
+            int(user_id), cost=cost,
+            model_id=int(model_row_id) if model_row_id else None,
+            feature=feature, task_ref=task_ref,
+        )
+    except Exception as e:
+        logger.warning(f"[ai_client] refund_edits failed user={user_id} ref={task_ref}: {e}")
+
+
 def make_task_ref(*parts):
     """计费幂等键构造（转发 billing_service.make_task_ref，方便已 import ai_client 的调用方直接用）。"""
     from . import billing_service as _bill

@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from ..auth import get_current_user
-from ...services import ai_client, local_storage, monitor_db, qiniu_uploader, quota_service
+from ...services import ai_client, billing_service, local_storage, monitor_db, qiniu_uploader, quota_service
 
 logger = logging.getLogger(__name__)
 
@@ -337,6 +337,17 @@ async def text_remix_generate(
     async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=30.0)) as client:
         for i in range(count):
             t0 = time.perf_counter()
+            # 计费：call_edits 裸 HTTP 不自带计费——逐张预扣（余额不足→本张记错继续）
+            _ref_i = ai_client.make_task_ref(
+                "text_remix_legacy", user_id, image_model_row_id, prompt, ref_bytes, i,
+            )
+            try:
+                _cost_i = await ai_client.bill_edits(
+                    user_id, image_model_row_id, "text_remix", n=1, task_ref=_ref_i,
+                )
+            except billing_service.InsufficientCredits as _e:
+                results.append({"image_url": "", "error": f"余额不足：{_e}"})
+                continue
             async with ai_client.acquire_slot(image_model_row_id, image_max_concurrent):
                 imgs, err = await call_edits(
                     client, base_url=base_url, model=model, prompt=prompt,
@@ -357,6 +368,9 @@ async def text_remix_generate(
             except Exception:
                 pass
             if not imgs:
+                await ai_client.refund_edits(
+                    user_id, image_model_row_id, "text_remix", _ref_i, _cost_i,
+                )
                 results.append({"image_url": "", "error": (err or {}).get("error", "未知错误")})
                 continue
             b64 = imgs[0].get("b64") or ""

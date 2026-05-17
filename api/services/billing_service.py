@@ -40,6 +40,7 @@ DEFAULT_FEATURE_PRICE: Dict[str, str] = {
     "product_image": "1.0",
     "remix": "1.0",
     "text_remix": "1.0",
+    "comic_style": "1.0",       # 漫画风：图生图一张
     "comic_panel": "0.5",       # AI 漫画：一格图
     "comic_story": "0.5",       # AI 漫画：对话推进一轮
     "novel_chapter": "1.0",     # AI 小说：生成一章

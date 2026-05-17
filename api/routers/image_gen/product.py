@@ -184,6 +184,23 @@ async def generate_image(
     local_ready = await local_storage.is_configured()
     qiniu_ready = await qiniu_uploader.is_configured()
 
+    # 计费：call_edits/call_generations 是裸 HTTP，不自带计费——调用前预扣 n 张
+    #（余额不足 → InsufficientCredits → 全局 402；不发起上游）。失败/少出图按张退。
+    _bill_ref = ai_client.make_task_ref(
+        "product_image", user_id, final_prompt, n, used_reference,
+    )
+    _bill_cost = await ai_client.bill_edits(
+        user_id, _model_row_id, "product_image", n=n, task_ref=_bill_ref,
+    )
+
+    def _refund_for(missing: int):
+        """退 missing 张的钱（量化到 0.01）。"""
+        if _bill_cost <= 0 or missing <= 0:
+            return None
+        from decimal import Decimal, ROUND_HALF_UP
+        return (_bill_cost / Decimal(n) * Decimal(missing)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP)
+
     all_images: List[dict] = []
     timeout = httpx.Timeout(600.0, connect=30.0)  # 10min 给慢上游 API 留余地
     # 单批失败时的重试策略：最多 5 次，指数退避；认证 / 内容违规等致命错误不重试
@@ -221,12 +238,21 @@ async def generate_image(
                     await _aio.sleep(wait_s)
             if err and not images:
                 if all_images:
+                    # 部分成功：退未产出的那部分
+                    await ai_client.refund_edits(
+                        user_id, _model_row_id, "product_image",
+                        f"{_bill_ref}:partial", _refund_for(n - len(all_images)),
+                    )
                     return {
                         "images": all_images,
                         "partial": True,
                         "requested": n,
                         "error": err.get("error"),
                     }
+                # 整单失败：全退
+                await ai_client.refund_edits(
+                    user_id, _model_row_id, "product_image", _bill_ref, _bill_cost,
+                )
                 return err
 
             for offset, img in enumerate(images or []):
@@ -298,6 +324,13 @@ async def generate_image(
             )
         except Exception as e:
             logger.warning(f"[image_gen] ai usage log failed: {e}")
+
+    # 正常结束但少出图（无 err 但 len<n）：退差额
+    if len(all_images) < n:
+        await ai_client.refund_edits(
+            user_id, _model_row_id, "product_image",
+            f"{_bill_ref}:partial", _refund_for(n - len(all_images)),
+        )
 
     return {
         "images": all_images,

@@ -181,6 +181,11 @@ async def comic_style_generate(
     size = (req.size or "").strip() or cfg_size
     headers_up = {"Authorization": f"Bearer {api_key}"}
 
+    # 4.5 计费：call_edits 是裸 HTTP，不自带计费——调用前预扣 n 张（余额不足 → 402，不发起上游）
+    _uid = int(current_user["id"])
+    _ref = ai_client.make_task_ref("comic_style", _uid, prompt, n)
+    _cost = await ai_client.bill_edits(_uid, model_row_id, "comic_style", n=n, task_ref=_ref)
+
     # 5. 调上游 /images/edits（用 call_edits）
     timeout = httpx.Timeout(600.0, connect=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -190,9 +195,17 @@ async def comic_style_generate(
                 n=n, size=size, img_bytes=img_bytes, headers=headers_up,
             )
     if err:
+        await ai_client.refund_edits(_uid, model_row_id, "comic_style", _ref, _cost)
         raise HTTPException(err.get("status", 502), err.get("error", "上游失败"))
     if not images:
+        await ai_client.refund_edits(_uid, model_row_id, "comic_style", _ref, _cost)
         raise HTTPException(502, "上游未返回图片")
+    # 部分成功退差额（预扣 n，实得 len(images)）
+    if _cost > 0 and len(images) < n:
+        from decimal import Decimal, ROUND_HALF_UP
+        _back = (_cost / Decimal(n) * Decimal(n - len(images))).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP)
+        await ai_client.refund_edits(_uid, model_row_id, "comic_style", f"{_ref}:partial", _back)
 
     # 6. 入历史（存储到本地 / 七牛 + 写 image_gen_history）
     #    batch_id 用 comic_style:{ts} 让前端能筛出本工具的历史

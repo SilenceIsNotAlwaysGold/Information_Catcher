@@ -77,6 +77,18 @@ async def _gen_one_cell(
     返回 {image_url, b64, error}。
     """
     auth_headers = {"Authorization": f"Bearer {api_key}"}
+    # 计费：call_edits 裸 HTTP 不自带计费——预扣 1 张（余额不足→返错，不发起上游）。
+    # ref 按 (user, model, prompt, 背景图) 稳定：worker 重投递同格不重复扣。
+    from . import billing_service as _bs
+    _bill_ref = ai_client.make_task_ref(
+        "text_remix_image", user_id, image_model_row_id, prompt, bg_bytes,
+    )
+    try:
+        _bill_cost = await ai_client.bill_edits(
+            user_id, image_model_row_id, "text_remix", n=1, task_ref=_bill_ref,
+        )
+    except _bs.InsufficientCredits as e:
+        return {"image_url": "", "b64": "", "error": f"余额不足：{e}"}
     _FATAL = ("Unauthorized", "Forbidden", "invalid api key",
               "model not found", "policy violation", "safety system")
     last_err = ""
@@ -108,6 +120,7 @@ async def _gen_one_cell(
     except Exception:
         pass
     if not images:
+        await ai_client.refund_edits(user_id, image_model_row_id, "text_remix", _bill_ref, _bill_cost)
         return {"image_url": "", "b64": "", "error": last_err}
     b64 = (images[0] or {}).get("b64") or ""
     image_url = await _upload_image(b64, user_id) or (images[0] or {}).get("url", "")

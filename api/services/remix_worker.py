@@ -222,6 +222,19 @@ async def _gen_one_image(
     import time as _time
     auth_headers = {"Authorization": f"Bearer {api_key}"}
 
+    # 计费：call_edits 是裸 HTTP 不自带计费——预扣 1 张（余额不足→返错，不发起上游）。
+    # ref 按 (user, model, prompt, 参考图) 稳定：worker 重投递同一图不重复扣。
+    from . import billing_service as _bs
+    _bill_ref = ai_client.make_task_ref(
+        "remix_image", user_id, image_model_row_id, prompt, ref_bytes,
+    )
+    try:
+        _bill_cost = await ai_client.bill_edits(
+            user_id, image_model_row_id, "remix", n=1, task_ref=_bill_ref,
+        )
+    except _bs.InsufficientCredits as e:
+        return {"image_url": "", "image_b64": "", "error": f"余额不足：{e}"}
+
     images = None
     last_err = ""
     _t0 = _time.perf_counter()
@@ -270,6 +283,7 @@ async def _gen_one_image(
         logger.warning(f"[remix_worker] log_usage failed: {e}")
 
     if not images:
+        await ai_client.refund_edits(user_id, image_model_row_id, "remix", _bill_ref, _bill_cost)
         return {"image_url": "", "image_b64": "", "error": f"图片生成失败：{last_err}"}
 
     img = images[0]
