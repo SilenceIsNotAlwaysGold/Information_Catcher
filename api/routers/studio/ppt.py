@@ -412,7 +412,19 @@ def _build_pptx(
     from pptx.dml.color import RGBColor
 
     if template_path:
-        return _build_from_template(plan, template_path, images_by_idx=images_by_idx)
+        try:
+            return _build_from_template(plan, template_path, images_by_idx=images_by_idx)
+        except Exception as e:
+            # 模板渲染走 python-pptx 私有 API 删 sample slides，不同来源 .pptx
+            # （WPS 导出 / 含 sectionLst / notesSlide rels）易触发异常并产出
+            # partname 重复的损坏 .pptx（PowerPoint 打开报修复）。任何失败一律
+            # 回退内置样式，保证用户拿到的是合法可打开的 .pptx 而非坏文件。
+            logger.warning(
+                "[ppt] 模板渲染失败，回退内置样式（避免产损坏 .pptx）: %s", e
+            )
+            return _build_pptx(
+                plan, style_hint, template_path=None, images_by_idx=images_by_idx,
+            )
 
     prs = Presentation()
     prs.slide_width = Inches(13.333)

@@ -59,10 +59,14 @@ async def create_plan(body: CreatePlanIn, current_user: dict = Depends(get_curre
         f"其它要求：{(body.extra_prefs or '').strip()[:1000] or '无'}\n\n"
         "请生成完整行程 JSON。"
     )
+    # max_tokens 按天数动态：每天≈1 个含 ~7 字段的 JSON 对象，固定 2500 会把
+    # 长行程（如 14 天）截断 → JSON 解析失败 502。按天放大并夹在 [2500, 8000]。
+    _days = max(1, min(int(body.days or 1), 30))
+    _mt = max(2500, min(8000, 1200 + _days * 480))
     raw = await ai_client.call_text(
         user_prompt, model_id=body.text_model_id, user_id=uid,
         feature="travel_plan", system_prompt=_SYSTEM,
-        temperature=0.6, max_tokens=2500,
+        temperature=0.6, max_tokens=_mt,
         task_ref=ai_client.make_task_ref(
             "travel_plan", uid, body.dest_city, body.days,
             body.budget or "", body.travel_style or "", (body.extra_prefs or "")[:200],
