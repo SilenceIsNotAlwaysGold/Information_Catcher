@@ -239,17 +239,34 @@ class _PGCursor:
             if upper.startswith(("SELECT", "WITH")):
                 self._rows = await raw.fetch(sql, *self._params)
             elif upper.startswith("INSERT") and "RETURNING" not in upper:
-                # 自动 RETURNING id 以模拟 lastrowid（兼容 monitor_db.py 现有用法）
+                # 自动 RETURNING id 以模拟 lastrowid（兼容 monitor_db.py 现有用法）。
+                # 但有的表无 id 列（user_credits 主键 user_id / daily_usage 复合主键），
+                # RETURNING id 会 UndefinedColumnError。在显式事务里这会 abort 整个
+                # 事务，后续语句全部 "current transaction is aborted" —— 旧的
+                # try/except 普通回退在事务内失效。故用 SAVEPOINT 隔离这次尝试：
+                # 失败 → ROLLBACK TO SAVEPOINT 再不带 RETURNING 重试，不污染外层事务。
                 sql_with_returning = sql.rstrip(";") + " RETURNING id"
-                try:
-                    row = await raw.fetchrow(sql_with_returning, *self._params)
-                    self.lastrowid = int(row["id"]) if row else None
-                    self.rowcount = 1 if row else 0
-                except Exception:
-                    # 没有 id 列的表（如 daily_usage 复合主键）回退普通 execute
-                    result = await raw.execute(sql, *self._params)
-                    # asyncpg execute 返回 "INSERT 0 N" 文本
-                    self.rowcount = _parse_rowcount(result)
+                in_tx = bool(getattr(self._conn, "_in_tx", False))
+                if in_tx:
+                    await raw.execute("SAVEPOINT _ins_ret")
+                    try:
+                        row = await raw.fetchrow(sql_with_returning, *self._params)
+                        self.lastrowid = int(row["id"]) if row else None
+                        self.rowcount = 1 if row else 0
+                        await raw.execute("RELEASE SAVEPOINT _ins_ret")
+                    except Exception:
+                        await raw.execute("ROLLBACK TO SAVEPOINT _ins_ret")
+                        result = await raw.execute(sql, *self._params)
+                        self.rowcount = _parse_rowcount(result)
+                else:
+                    # 非事务（autocommit）：单语句失败不会污染后续，沿用原回退
+                    try:
+                        row = await raw.fetchrow(sql_with_returning, *self._params)
+                        self.lastrowid = int(row["id"]) if row else None
+                        self.rowcount = 1 if row else 0
+                    except Exception:
+                        result = await raw.execute(sql, *self._params)
+                        self.rowcount = _parse_rowcount(result)
             else:
                 result = await raw.execute(sql, *self._params)
                 self.rowcount = _parse_rowcount(result)
