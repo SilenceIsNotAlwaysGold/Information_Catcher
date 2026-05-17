@@ -25,13 +25,14 @@ type Item = {
   score: number; score_label: string; fetched_at: string;
 };
 
+// 只列实际有源喂数据的分类（fetcher 当前产 code/tech/entertainment）。
+// 原来还有 政策/金融 两个 Tab，但无任何源 → 永远空，误导用户，去掉。
+// 后续补了对应源再加回对应 key。
 const CATEGORIES = [
   { key: "all", label: "全部" },
   { key: "code", label: "Code / 开源" },
   { key: "tech", label: "科技" },
-  { key: "policy", label: "政策" },
   { key: "entertainment", label: "娱乐" },
-  { key: "finance", label: "金融" },
 ];
 
 export default function HotNewsPage() {
@@ -94,7 +95,11 @@ export default function HotNewsPage() {
         section="hotnews"
         icon={Flame}
         title="热点雷达"
-        hint="聚合 9 个源：HN / GitHub Trending / V2EX / 微博 / B 站 / 知乎 / Solidot / 百度 / 少数派 / IT 之家。不耗 AI 点数。"
+        hint={
+          sources.length
+            ? `聚合 ${sources.length} 个源：${sources.map((s) => s.label).join(" / ")}。不耗 AI 点数。`
+            : "聚合多源技术·资讯热榜，不耗 AI 点数。"
+        }
       />
 
 
