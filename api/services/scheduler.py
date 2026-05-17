@@ -1330,6 +1330,73 @@ async def run_reconcile_check():
         logger.warning(f"[reconcile_check] 飞书告警发送失败: {e}")
 
 
+async def run_uptime_weekly_report():
+    """uptime 服务监控周报（ROADMAP 承诺但一直缺失）。
+
+    每周一 09:00：按用户汇总其 enabled 监控近 7 天的可用率 + 平均延时，
+    推到该用户的飞书 bitable 群（沿用 _record_check 同款 per-user 机制）。
+    """
+    try:
+        rows = []
+        async with _db.connect(db.DB_PATH) as conn:
+            conn.row_factory = _db.Row
+            async with conn.execute(
+                "SELECT sm.id, sm.user_id, sm.name, sm.url, "
+                "  COALESCE(sm.monitor_type,'http') AS monitor_type, "
+                "  COUNT(c.id) AS total, "
+                "  SUM(CASE WHEN c.status='ok' THEN 1 ELSE 0 END) AS ok_cnt, "
+                "  AVG(CASE WHEN c.status='ok' THEN c.latency_ms END) AS avg_ms "
+                "FROM service_monitors sm "
+                "LEFT JOIN service_monitor_checks c "
+                "  ON c.monitor_id=sm.id AND c.checked_at >= datetime('now','-7 days') "
+                "WHERE sm.enabled=1 "
+                "GROUP BY sm.id ORDER BY sm.user_id, sm.id"
+            ) as cur:
+                rows = [dict(r) for r in await cur.fetchall()]
+    except Exception as e:
+        logger.exception(f"[uptime_weekly] 统计失败: {e}")
+        return
+    if not rows:
+        logger.info("[uptime_weekly] 无启用的监控，跳过")
+        return
+
+    by_user: dict[int, list] = {}
+    for r in rows:
+        by_user.setdefault(int(r["user_id"]), []).append(r)
+
+    from . import auth_service
+    sent = 0
+    for uid, mons in by_user.items():
+        try:
+            user = auth_service.get_user_by_id(uid)
+            if not user or not (user.get("feishu_open_id") or "").strip():
+                continue
+            from .feishu import provisioning as _prov, chat as _chat
+            chat_id = await _prov.ensure_feature_chat(user, "bitable") or ""
+            if not chat_id:
+                continue
+            lines = []
+            for m in mons:
+                total = int(m["total"] or 0)
+                okc = int(m["ok_cnt"] or 0)
+                rate = f"{(okc / total * 100):.1f}%" if total else "无数据"
+                avg = f"{int(m['avg_ms'])}ms" if m["avg_ms"] is not None else "—"
+                lines.append(
+                    f"• {m['name']}（{m['monitor_type']}）：可用率 {rate}"
+                    f"（{total} 次检查）平均 {avg}"
+                )
+            card = _chat.build_alert_card(
+                "📊 服务监控周报（近 7 天）",
+                "\n".join(lines) + "\n\n— 按可用率排查异常服务",
+                template="blue",
+            )
+            await _chat.send_card(chat_id, card)
+            sent += 1
+        except Exception as e:
+            logger.warning(f"[uptime_weekly] user={uid} 推送失败: {e}")
+    logger.info("[uptime_weekly] 周报完成：%d 用户 / %d 监控", sent, len(rows))
+
+
 async def start_scheduler():
     settings = await db.get_all_settings()
     interval = int(settings.get("check_interval_minutes", "30") or "30")
@@ -1437,6 +1504,15 @@ async def start_scheduler():
         )
     except Exception as e:
         logger.warning(f"[scheduler] reconcile_check cron 注册失败: {e}")
+    # v2: uptime 周报 — 每周一 09:00 推近 7 天可用率/延时（ROADMAP 承诺项）
+    try:
+        scheduler.add_job(
+            run_uptime_weekly_report,
+            CronTrigger(day_of_week="mon", hour=9, minute=0, timezone="Asia/Shanghai"),
+            id="uptime_weekly_report", replace_existing=True, max_instances=1,
+        )
+    except Exception as e:
+        logger.warning(f"[scheduler] uptime_weekly_report cron 注册失败: {e}")
     scheduler.start()
     logger.info(f"[scheduler] started — interval={interval}min, report={report_time}")
 
