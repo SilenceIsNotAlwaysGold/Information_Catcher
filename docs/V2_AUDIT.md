@@ -14,7 +14,7 @@
 | P0-4 | 计费 | `ai_client.py:560-570` | 图片部分退款 ref=`{_ref}:partial` 不稳定 + refund 无幂等，整操作重试累计多扣；退款额未量化到分 | 部分退款用稳定业务键；refund 也加幂等查重；退款额先 quantize |
 | P0-5 | PPT | `ppt.py:989-1004` + `ppt/page.tsx:215-221` | 下载端点要 Bearer header，`<a target=_blank>` 带不了 → 永远 401，渲染好的 .pptx 下不到（整模块致命） | 下载端点接受 `?token=` query 自行 verify；或一次性签名 URL；或 fetch 带 header 取 blob |
 | P0-6 | 漫画 | `comic.py:479-482` + `comic.py:123-136` | 未配对象存储时 base64 灌 DB，详情接口一次返几十 MB 卡死前端/撑爆 SQLite | 未配存储直接标 `gen_status='error'` 提示配存储；或详情接口不返 data: URL |
-| P0-7 | 热点雷达 | `hotnews_fetcher.py:87` | GitHub Trending 字面量正则切分，GitHub HTML 结构变动后基本抓 0 条 | 改宽松匹配 / 用 GitHub search API |
+| ✅修复 | 热点雷达 | P0-7 | GitHub Trending 改按 Box-row 容器切 + stargazers 锚定星标，抓 0 → 抓满 25 条。2026-05-17 提交 7d9e3a3 | — |
 | ✅修复 | 前端 | P0-8 | 公众号 mp UI 彻底下线：删 app/dashboard/mp/ + GlobalSearch mp 跳转 + profile mp tab/类型；后端保留。2026-05-17 提交 53614fd | — |
 | ✅修复 | 计费 | P0-9 | call_edits/call_generations 五处调用方接入计费（bill_edits/refund_edits 助手 + comic_style 单价 + 预扣/整退/部分退/稳定 task_ref）—— 2026-05-17 已修并提交 ef91cc0 | — |
 | ✅修复 | 计费 | P0-1/2/3/4 | SQLite 事务锁(connect_tx+busy_timeout+显式 ROLLBACK) / 幂等键(make_task_ref 贯通 call_* + v2 调用方稳定 ref + _bill_charge 缺失 WARNING) / amount 带符号约定对齐 / 部分退款量化+refund 幂等 —— 2026-05-17 已修并提交 6720296（23 测试过）| — |
@@ -54,11 +54,19 @@
 - 合并未破坏 import（`SIZE_OPTIONS`/`mutateAiModels` 等均在）；sections.ts 无死链
 - `ai_client` 计费接入健壮（预扣/失败退/部分退/并发信号量/usage 日志）
 
-## 建议修复顺序
+## 进度（2026-05-17）
 
-1. **计费 P0-1~P0-4 一批**（命脉，阻断变现，必须最先；含 SQLite 事务/幂等/符号/退款）
-2. **P0-8 mp 去留决策**（影响导航完整性，需产品拍板，0 代码成本先定方向）
-3. **PPT P0-5 下载** + **漫画 P0-6 存储**（各自模块的致命阻断，独立可并行）
-4. **热点雷达 P0-7** + 前端 P1（402 拦截 / 16 页接 UI 原子 / text-remix PageHeader）
-5. Studio P1（小说专业度 / 漫画异步化+一致性 / PPT 修 transparency+持久化）
-6. P2 打磨
+**全部 9 个 P0 已修复并提交**：P0-1~4(6720296) · P0-9(ef91cc0) · P0-8(53614fd) ·
+P0-5/6(2bd4918) · P0-7(7d9e3a3)。前端 P1 部分：comic-style 入导航 + 删
+MyAiModelsCard 死文件(9ef6d23)。本地领先 origin/main 多个提交，未推送。
+
+### 剩余（P1/P2，非阻断）
+- **前端 P1**：全局 402「去充值」拦截（AI 扣点失败无引导）；16 个监控/仿写老页未接
+  `@/components/ui` PageHeader（视觉割裂，cosmetic）；text-remix 头补 PageHeader
+- **Studio P1**：小说补世界观/伏笔/卷/自动摘要；漫画 generate-all 异步化 + 角色 ref 图
+  一致性；PPT transparency 纯黑罩 + 产物持久化 + 删模板页健壮性；旅游 max_tokens 动态；
+  跨模块「HTTP 200 但内容非法不退款」
+- **计费 P1/P2**：price_per_call=0 配不出免费模型；adjust 负值打穿；refund 失败无补偿队列；
+  reconcile 无定时巡检告警；PG 路径零测试
+- **P2**：hotnews 政策/金融 Tab 空 + 文案造假；uptime 无 TCP/无周报/无编辑入口；
+  original 无历史/批量/同步阻塞；文档债
