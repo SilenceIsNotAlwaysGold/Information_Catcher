@@ -148,19 +148,37 @@ BACKEND_FILES=(
   api/tools/__init__.py
   api/tools/migrate_quota_to_credits.py
   pyproject.toml
+  requirements.txt
 )
 
 # ── 命令实现 ───────────────────────────────────────────────────────────────
 
 deploy_backend() {
   echo "▶ 同步后端 (${#BACKEND_FILES[@]} files)..."
+  # 部署前重生成 pinned requirements.txt（本地有 uv 才做），防与 pyproject 漂移。
+  # 关键：按**生产 Python 版本 3.10** 解析（uv.lock/uv export 是本地 3.11 解析，
+  # 会 pin 出 3.10 装不上的版本如 contourpy>=3.11）。失败则沿用已提交版本。
+  if command -v uv >/dev/null 2>&1; then
+    uv pip compile pyproject.toml --python-version 3.10 --no-header --no-annotate \
+      -o requirements.txt 2>/dev/null \
+      && echo "  · requirements.txt 已按 py3.10 重新编译" \
+      || echo "  · uv compile 失败，沿用已提交的 requirements.txt"
+  fi
   local existing=()
   for f in "${BACKEND_FILES[@]}"; do
     [[ -f "$f" ]] && existing+=("$f")
   done
   eval "$RSYNC ${existing[*]} ${USER}@${HOST}:${TARGET_PATH}/" | tail -8
-  echo "▶ 检查/安装新依赖（boto3 等）..."
-  $SSH "${TARGET_PATH}/.venv/bin/pip install -q -e ${TARGET_PATH} 2>&1 | tail -3 || true"
+  # 装依赖：不再 `pip install -e .`（项目 editable 构建在服务器一直失败、且
+  # 无必要——代码靠 rsync 同步、不靠 pip 装）。改装 pinned requirements.txt，
+  # 不构建项目、稳定；**不再 `|| true` 屏蔽失败**——装不上就响亮报错并中止，
+  # 避免重启进缺依赖的崩溃状态（v2 上线 python-pptx 就因此静默缺失过）。
+  echo "▶ 安装依赖（requirements.txt，pinned）..."
+  if ! $SSH "${TARGET_PATH}/.venv/bin/pip install -q -r ${TARGET_PATH}/requirements.txt 2>&1 | tail -4"; then
+    echo "✗ 依赖安装失败 —— 已中止部署（未重启服务，线上仍跑旧版，安全）。" >&2
+    echo "  请排查后重试；勿在缺依赖状态下重启。" >&2
+    exit 1
+  fi
   echo "✓ 后端同步完成"
 }
 
