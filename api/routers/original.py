@@ -20,7 +20,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from ..services import ai_client
+from ..services import ai_client, monitor_db
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -124,10 +124,40 @@ async def rewrite(body: RewriteIn, current_user: dict = Depends(get_current_user
         logger.warning("[original] rewrite 失败 platform=%s: %s", body.platform, exc)
         raise
 
+    result = out.strip()
+    # 落历史（最佳努力，不阻断返回）：原来改写完关页面即丢
+    hid = 0
+    try:
+        hid = await monitor_db.add_original_history(
+            uid, body.platform, body.source_text, body.extra_hint, result,
+        )
+    except Exception as exc:
+        logger.warning("[original] 历史落库失败: %s", exc)
+
     return {
+        "id": hid,
         "platform": body.platform,
         "platform_label": _LABELS[body.platform],
-        "result": out.strip(),
+        "result": result,
         "source_length": len(body.source_text),
-        "result_length": len(out.strip()),
+        "result_length": len(result),
     }
+
+
+@router.get("/history", summary="我的改写历史")
+async def list_history(
+    limit: int = 50, offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
+    uid = int(current_user["id"])
+    items = await monitor_db.list_original_history(uid, limit=min(int(limit), 200), offset=int(offset))
+    return {"items": items}
+
+
+@router.delete("/history/{rid}", summary="删除一条改写历史")
+async def delete_history(rid: int, current_user: dict = Depends(get_current_user)):
+    uid = int(current_user["id"])
+    ok = await monitor_db.delete_original_history(rid, uid)
+    if not ok:
+        raise HTTPException(404, "记录不存在或无权删除")
+    return {"ok": True}

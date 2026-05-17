@@ -375,6 +375,17 @@ CREATE INDEX IF NOT EXISTS idx_fetch_log_note_id ON fetch_log(note_id);
 -- 异步上传策略：生成时先写本地（local_url 永远有值），如配了七牛则后台 worker
 -- 异步推到云端，成功后更新 qiniu_url 覆盖本地 URL。upload_status 跟踪状态。
 -- 用 set_idx + in_set_idx 标记套图维度，方便后续按套号筛选/导出。
+CREATE TABLE IF NOT EXISTS original_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,            -- xhs | douyin | mp
+    source_text TEXT NOT NULL,         -- 用户底稿
+    extra_hint TEXT DEFAULT '',
+    result TEXT NOT NULL,              -- AI 改写成品
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_original_history_user ON original_history(user_id, id DESC);
+
 CREATE TABLE IF NOT EXISTS image_gen_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
@@ -3230,6 +3241,43 @@ async def get_image_history(record_id: int) -> Optional[Dict]:
         ) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
+
+
+# ── 原创板块历史（一键起号改写）─────────────────────────────────────────────
+
+async def add_original_history(
+    user_id: int, platform: str, source_text: str, extra_hint: str, result: str,
+) -> int:
+    async with _db.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO original_history(user_id, platform, source_text, extra_hint, result) "
+            "VALUES (?,?,?,?,?)",
+            (int(user_id), platform, source_text[:8000], (extra_hint or "")[:500], result[:20000]),
+        )
+        await db.commit()
+        return int(cur.lastrowid or 0)
+
+
+async def list_original_history(user_id: int, limit: int = 50, offset: int = 0) -> List[Dict]:
+    async with _db.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, platform, source_text, extra_hint, result, created_at "
+            "FROM original_history WHERE user_id=? ORDER BY id DESC LIMIT ? OFFSET ?",
+            (int(user_id), int(limit), int(offset)),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def delete_original_history(record_id: int, user_id: int) -> bool:
+    """只能删自己的。返回是否删到行。"""
+    async with _db.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM original_history WHERE id=? AND user_id=?",
+            (int(record_id), int(user_id)),
+        )
+        await db.commit()
+        return (cur.rowcount or 0) > 0
 
 
 async def mark_image_history_synced(record_id: int, bitable_record_id: str = "") -> None:

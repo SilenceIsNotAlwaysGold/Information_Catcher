@@ -8,13 +8,13 @@
  *
  * 计费：cross_rewrite，0.5 点 / 次。
  */
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Tabs, Tab } from "@nextui-org/tabs";
 import { Button } from "@nextui-org/button";
 import { Textarea, Input } from "@nextui-org/input";
 import { Chip } from "@nextui-org/chip";
 import {
-  PenLine, Wand2, Copy, RotateCcw, Coins, FileText,
+  PenLine, Wand2, Copy, RotateCcw, Coins, FileText, History, Trash2,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { ModelSelector } from "@/components/ModelSelector";
@@ -53,8 +53,39 @@ export default function OriginalPage() {
   const [textModelId, setTextModelId] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState("");
+  type Hist = { id: number; platform: string; source_text: string;
+    extra_hint: string; result: string; created_at: string };
+  const [history, setHistory] = useState<Hist[]>([]);
 
   const meta = useMemo(() => PLATFORMS.find((p) => p.key === platform)!, [platform]);
+
+  const loadHistory = useCallback(async () => {
+    if (!token) return;
+    try {
+      const r = await fetch("/api/original/history?limit=30", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (r.ok) { const d = await r.json(); setHistory(d.items || []); }
+    } catch { /* 历史加载失败不打扰主流程 */ }
+  }, [token]);
+  useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  const delHistory = async (id: number) => {
+    if (!token) return;
+    const r = await fetch(`/api/original/history/${id}`, {
+      method: "DELETE", headers: { Authorization: `Bearer ${token}` },
+    });
+    if (r.ok) { setHistory((h) => h.filter((x) => x.id !== id)); }
+    else { toastErr("删除失败"); }
+  };
+
+  const restoreHistory = (h: Hist) => {
+    setPlatform((["xhs", "douyin", "mp"].includes(h.platform) ? h.platform : "xhs") as Platform);
+    setText(h.source_text);
+    setHint(h.extra_hint || "");
+    setResult(h.result);
+    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
+  };
 
   const handleRewrite = async () => {
     const src = text.trim();
@@ -75,6 +106,7 @@ export default function OriginalPage() {
       if (!r.ok) { toastErr(d.detail || "改写失败"); return; }
       setResult(d.result || "");
       toastOk(`已改写完成（${d.result_length} 字）`);
+      loadHistory();
     } catch (e: any) {
       toastErr(`改写异常：${e?.message || e}`);
     } finally { setBusy(false); }
@@ -195,6 +227,35 @@ export default function OriginalPage() {
           <pre className="whitespace-pre-wrap text-sm leading-relaxed font-sans p-4 rounded-md bg-default-50 dark:bg-default-100/30 border border-default-200/60 max-h-[60vh] overflow-y-auto">
             {result}
           </pre>
+        )}
+      </SectionCard>
+
+      {/* 历史（原来改写完关页面即丢，现在落库可回看/恢复）*/}
+      <SectionCard icon={History} title={`改写历史（${history.length}）`}>
+        {history.length === 0 ? (
+          <EmptyState icon={History} compact title="还没有历史"
+            hint="改写成功后会自动存档，方便回看和复用" />
+        ) : (
+          <div className="space-y-2 max-h-[50vh] overflow-y-auto">
+            {history.map((h) => {
+              const pm = PLATFORMS.find((p) => p.key === h.platform);
+              return (
+                <div key={h.id}
+                  className="flex items-start gap-3 p-3 rounded-md border border-default-200/60 hover:bg-default-50 dark:hover:bg-default-100/20">
+                  <div className="flex-1 min-w-0 cursor-pointer" onClick={() => restoreHistory(h)}>
+                    <div className="flex items-center gap-2 mb-1">
+                      <Chip size="sm" variant="flat">{pm ? `${pm.emoji} ${pm.label}` : h.platform}</Chip>
+                      <span className="text-[11px] text-default-400">{h.created_at?.slice(5, 16)}</span>
+                    </div>
+                    <p className="text-xs text-default-500 truncate">底稿：{h.source_text}</p>
+                    <p className="text-sm truncate">{h.result}</p>
+                  </div>
+                  <Button size="sm" variant="light" color="danger" isIconOnly title="删除"
+                    onPress={() => delHistory(h.id)}><Trash2 size={14} /></Button>
+                </div>
+              );
+            })}
+          </div>
         )}
       </SectionCard>
     </div>
