@@ -62,6 +62,7 @@ export const SECTIONS: Record<SectionKey, SectionMeta> = {
       { key: "studio-travel",  label: "AI 旅游攻略",  href: "/dashboard/studio/travel",  hint: "纯 LLM 一键生成" },
       { key: "studio-ppt",     label: "AI PPT",       href: "/dashboard/studio/ppt",     hint: "大纲 + 模板 + 配图" },
       { key: "studio-image",   label: "AI 生图",      href: "/dashboard/tools/product-image", hint: "商品图 / 场景图" },
+      { key: "studio-comic-style", label: "漫画风",    href: "/dashboard/tools/comic-style", hint: "图生图 · 转漫画风格" },
     ],
   },
   original: {
