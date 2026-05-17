@@ -110,6 +110,21 @@ async def get_optional_user(
         return None
 
 
+async def get_current_user_flex(
+    token: Optional[str] = Query(None),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    """与 get_current_user 等价的鉴权，但额外接受 ?token=<jwt> 查询参数。
+
+    用于浏览器导航 / `<a download>` / window.open 这类**无法塞 Authorization
+    header** 的场景（如 PPT .pptx 下载）。优先用 header，没有再用 query token。
+    复用 get_current_user 的全部校验（状态/强制下线/过期），无重复逻辑。
+    """
+    if credentials is None and token:
+        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+    return await get_current_user(credentials)
+
+
 async def get_admin_user(current_user: dict = Depends(get_current_user)) -> dict:
     if (current_user.get("role") or "user") != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")

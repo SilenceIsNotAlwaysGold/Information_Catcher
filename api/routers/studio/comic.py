@@ -481,8 +481,14 @@ async def _gen_one_panel(panel: Dict[str, Any], project: Dict[str, Any],
             raise RuntimeError("图像模型未返回图片")
         url, _err = await storage.upload_b64(b64s[0], user_id=user_id)
         if not url:
-            # 没配存储 → 退而求其次存 data URI（小漫画格子可接受，但前端流量大）
-            url = f"data:image/png;base64,{b64s[0]}"
+            # P0-6：绝不把 base64 灌进 comic_panels.image_url——详情接口会一次性
+            # 把整本漫画所有格子的 data URI 全查出来返前端（几十 MB JSON 卡死/OOM）
+            # 且撑爆 SQLite。未配对象存储 → 直接判失败，提示管理员配存储。
+            raise RuntimeError(
+                "图片已生成但未配置对象存储（七牛 / 本地公网），无法落地保存。"
+                "请联系管理员在 admin → 系统配置 里配好存储后重试"
+                + (f"（存储错误：{_err}）" if _err else "")
+            )
         async with _db.connect(DB_PATH) as db:
             await db.execute(
                 "UPDATE comic_panels SET gen_status='done', image_url=?, gen_error='' WHERE id=?",

@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from ..auth import get_current_user
+from ..auth import get_current_user, get_current_user_flex
 from ...services import ai_client, monitor_db, storage
 from ...services import db as _db
 
@@ -993,7 +993,11 @@ async def admin_set_pexels_key(body: PexelsKeyIn, current_user: dict = Depends(g
 
 
 @router.get("/projects/{pid}/download", summary="下载渲染好的 .pptx")
-async def download_project(pid: int, current_user: dict = Depends(get_current_user)):
+async def download_project(
+    pid: int, current_user: dict = Depends(get_current_user_flex),
+):
+    # get_current_user_flex：浏览器 <a download> 带不了 Authorization header，
+    # 故额外接受 ?token=<jwt>（P0-5 修复 401 下不到文件）。
     uid = int(current_user["id"])
     p = await _get_project(pid, uid)
     if not p:

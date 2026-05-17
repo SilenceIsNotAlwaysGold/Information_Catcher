@@ -213,12 +213,12 @@ export default function PptStudioPage() {
   };
 
   const downloadUrl = useMemo(() => {
-    if (!detail?.pptx_url) return "";
-    // 加 token 让 FileResponse 也能用 Authorization；FastAPI 默认 Depends 解析 header，
-    // 浏览器 <a download> 无法塞 header，所以拼成 ?token= ... 不行，
-    // 简单做法：直接当下载链接打开，浏览器会带 cookie/header（如果有）；否则用户右键另存。
-    return detail.pptx_url;
-  }, [detail?.pptx_url]);
+    if (!detail?.pptx_url || !token) return "";
+    // 浏览器 <a download> 无法塞 Authorization header，后端 download 端点已改用
+    // get_current_user_flex 额外接受 ?token=，这里把 JWT 拼进 query（P0-5 修复 401）。
+    const sep = detail.pptx_url.includes("?") ? "&" : "?";
+    return `${detail.pptx_url}${sep}token=${encodeURIComponent(token)}`;
+  }, [detail?.pptx_url, token]);
 
   return (
     <div className="p-6 space-y-6 max-w-page mx-auto">
