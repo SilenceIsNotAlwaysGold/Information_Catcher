@@ -16,8 +16,8 @@
 | P0-6 | 漫画 | `comic.py:479-482` + `comic.py:123-136` | 未配对象存储时 base64 灌 DB，详情接口一次返几十 MB 卡死前端/撑爆 SQLite | 未配存储直接标 `gen_status='error'` 提示配存储；或详情接口不返 data: URL |
 | P0-7 | 热点雷达 | `hotnews_fetcher.py:87` | GitHub Trending 字面量正则切分，GitHub HTML 结构变动后基本抓 0 条 | 改宽松匹配 / 用 GitHub search API |
 | P0-8 | 前端 | `web/src/lib/sections.ts:41-50` | 公众号 mp 整套真实功能页（611+143 行）无导航入口，但 GlobalSearch/profile 仍能进 → 状态自相矛盾 | 决策：补回 mp 导航 **或** 彻底删 mp（页+profile tab+GlobalSearch 分支），别留半下线 |
-| **P0-9** | 计费 | `api/routers/image_gen/_common.py:95` call_edits + 5 调用方 | **图生图/参考图路径（整体仿写 remix / 文案换背景出图 / 商品图 / 漫画风）全程零计费** —— `call_edits` 是裸上游 HTTP，remix_worker/text_remix_worker/product/comic_style/text_remix 无一处 `_bill_charge`。最贵的核心付费功能完全免费，绕过整个 v2 计费 | 在 5 个 call_edits 调用方按实际出图数 deduct（feature=remix/text_remix/product_image/comic_style）+ 失败/部分退款 + 传任务级 task_ref；或在 call_edits 内统一接入计费（需传 user_id/model_row_id）。**比 P0-2/4 更伤变现，建议优先级仅次于 P0-1** |
-| ✅修复 | 计费 | P0-1/2/3/4 | SQLite 事务锁(connect_tx+busy_timeout+显式 ROLLBACK) / 幂等键(make_task_ref 贯通 call_* + v2 调用方稳定 ref + _bill_charge 缺失 WARNING) / amount 带符号约定对齐 / 部分退款量化+refund 幂等 —— 2026-05-17 已修，待测试+提交 | — |
+| ✅修复 | 计费 | P0-9 | call_edits/call_generations 五处调用方接入计费（bill_edits/refund_edits 助手 + comic_style 单价 + 预扣/整退/部分退/稳定 task_ref）—— 2026-05-17 已修并提交 ef91cc0 | — |
+| ✅修复 | 计费 | P0-1/2/3/4 | SQLite 事务锁(connect_tx+busy_timeout+显式 ROLLBACK) / 幂等键(make_task_ref 贯通 call_* + v2 调用方稳定 ref + _bill_charge 缺失 WARNING) / amount 带符号约定对齐 / 部分退款量化+refund 幂等 —— 2026-05-17 已修并提交 6720296（23 测试过）| — |
 
 ## P1 — 功能缺失 / 体验断裂
 
