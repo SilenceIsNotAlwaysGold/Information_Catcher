@@ -54,7 +54,7 @@
 - 合并未破坏 import（`SIZE_OPTIONS`/`mutateAiModels` 等均在）；sections.ts 无死链
 - `ai_client` 计费接入健壮（预扣/失败退/部分退/并发信号量/usage 日志）
 
-## 进度（2026-05-17）
+## 进度（2026-05-17 ~ 05-18）
 
 **全部 9 个 P0 已修复并提交**（已 push origin/main）：P0-1~4(6720296) · P0-9(ef91cc0) ·
 P0-8(53614fd) · P0-5/6(2bd4918) · P0-7(7d9e3a3)。
@@ -66,12 +66,19 @@ P0-8(53614fd) · P0-5/6(2bd4918) · P0-7(7d9e3a3)。
 - PPT：封面纯黑罩→真 alpha 半透 + 产物落 database/ppt_cache 持久(58f2d55)
 - 小说：落章后自动摘要，续写连贯性不再因没点摘要而退化(本轮)
 
-### 剩余（P1/P2，非阻断）
-- **前端 P1（仅剩）**：16 个监控/仿写老页未接 `@/components/ui` PageHeader
-  （xhs/douyin posts·creators·trending 等，纯 cosmetic 视觉一致性，量大）
-- **Studio P1**：小说补世界观/伏笔/卷结构/插重章；漫画 generate-all 异步化 + 角色 ref 图
-  一致性；PPT 删模板页失败应回退默认而非静默产损坏 .pptx；旅游 max_tokens 动态；
-  跨模块「HTTP 200 但内容非法 JSON 不退款」
-- **计费 P2**：refund 失败无补偿队列；reconcile 无定时巡检告警；PG 路径零测试
-- **P2**：hotnews 政策/金融 Tab 空 + 文案造假；uptime 无 TCP/无周报/无编辑入口；
-  original 无历史/批量/同步阻塞；文档债
+**P1/P2 已修（/loop 持续迭代，2026-05-17~18，全部已 push origin/main）：**
+- 计费：adjust 负值锁死防护+单测(e8d6cdd) · 跨模块上游 200 非 JSON 退款(17daad3)
+  · 每日对账巡检+飞书告警(93f0664)
+- PPT：模板渲染失败回退内置样式(b2d247c)
+- 旅游：max_tokens 按天动态(b2d247c)
+- 小说：落章自动摘要(e8d6cdd)
+- hotnews：删空 Tab + 文案造假改动态(2a6e7f7)
+- uptime：前端编辑入口+阈值暴露(ec50f7d) · TCP 探活(58aa3a8) · 周报(88ab205)
+- original：历史落库+回看/删除(075e15d)
+- 前端视觉：升级共享 PlatformSubNav 加板块色图标，平台页一次性与 v2 统一(8ce109c)
+
+### 剩余（仅 2 块大特性，需显式立项，不适合自驱 /loop）
+- **漫画 generate-all 异步化 + 角色 ref 图一致性**：需仿 remix 异步任务表+worker
+  +前端轮询的整套重构（多日量级）
+- **小说 NovelMaker 级网文结构**：世界观集/伏笔追踪/分卷/插重章（大特性）
+- 其余皆为可接受的已知限制（PG 路径零测试、refund 补偿队列等 P2 余项）
