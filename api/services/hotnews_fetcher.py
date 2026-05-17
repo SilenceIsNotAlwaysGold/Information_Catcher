@@ -82,28 +82,39 @@ async def fetch_github_trending(limit: int = 25) -> List[Dict[str, Any]]:
         )
         html = r.text
     items: List[Dict[str, Any]] = []
-    # GitHub Trending HTML 结构演化后 <h2> 后跟的 <a> 中间会插入若干 data-* 属性，
-    # 锚点在 h2 + 容器到下个 h2 之间找 href="/owner/repo" + 描述 + stars
-    blocks = re.split(r'<h2 class="h3 lh-condensed">', html)[1:]  # 跳过第一个（页面标题）
+    # P0-7：原来按 `<h2 class="h3 lh-condensed">` 字面量 split，GitHub 一改 class
+    # 属性串/顺序就抓 0 条。改为按稳定的 trending 行容器 <article class="Box-row">
+    # 切分（class 用 \b...\b 容忍前后其它 class / 属性顺序），并保留宽松 h2 兜底。
+    blocks = re.split(r'<article[^>]+class="[^"]*\bBox-row\b[^"]*"[^>]*>', html)[1:]
+    if not blocks:
+        blocks = re.split(r'<h2[^>]*\blh-condensed\b[^>]*>', html)[1:]
     for blk in blocks:
         # 一个 trending block 截至下一个明显锚点（约 5000 字符够用）
         chunk = blk[:6000]
-        m_href = re.search(r'href="(/[^/"]+/[^/"]+)"', chunk)
+        m_href = re.search(r'href="(/[^/"\s?#]+/[^/"\s?#]+)"', chunk)
         if not m_href:
             continue
         href = m_href.group(1)
-        url = f"https://github.com{href}"
-        # 仓库名 = href 去掉前导 /
         name = href.lstrip("/")
+        # 过滤明显非仓库链接（赞助/登录/话题等）——避免抓到行内其它 /a/b 链接
+        if name.split("/")[0].lower() in {
+            "login", "sponsors", "topics", "collections", "trending",
+            "about", "settings", "marketplace", "features",
+        }:
+            continue
+        url = f"https://github.com{href}"
         # 描述：第一个 <p class="col-9 ...">...</p>
         m_desc = re.search(r'<p[^>]*class="col-9[^"]*"[^>]*>([\s\S]*?)</p>', chunk)
         summary = ""
         if m_desc:
             summary = re.sub(r"<[^>]+>", "", m_desc.group(1)).strip()[:300]
-        # 星标：第一个 octicon-star 之后的数字
+        # 星标：锚定 stargazers 链接（稳），取其 svg 后的数字文本
+        # 现 GitHub 结构：<a href="/o/r/stargazers"...><svg.../></svg> 1,234 </a>
         stars = 0
         star_label = ""
-        m_star = re.search(r'octicon-star[\s\S]{0,500}?>\s*([\d,]+)', chunk)
+        # svg 的 path d="..." 较长（~750 字），上限给到 1800 才能跨过到数字
+        m_star = re.search(
+            r'href="/[^"]+/stargazers"[\s\S]{0,1800}?</svg>\s*([\d,]+)', chunk)
         if m_star:
             try:
                 stars = int(m_star.group(1).replace(",", ""))
